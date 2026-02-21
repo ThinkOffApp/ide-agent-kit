@@ -26,7 +26,7 @@ Usage:
   ide-agent-kit receipt tail [--n <count>] [--config <path>]
     Print the last N receipts as JSON.
 
-  ide-agent-kit init [--ide <claude-code|codex|cursor|vscode>]
+  ide-agent-kit init [--ide <claude-code|codex|cursor|vscode|gemini>]
     Generate starter config for your IDE.
 `);
 }
@@ -196,6 +196,24 @@ async function initIdeConfig(ide) {
       },
       notes: `# VS Code IDE Agent Kit config
 # VS Code extensions or Copilot agents can consume the queue file and invoke tmux runner`
+    },
+    'gemini': {
+      filename: 'ide-agent-kit.json',
+      config: {
+        listen: { host: '127.0.0.1', port: 8787 },
+        queue: { path: './ide-agent-queue.jsonl' },
+        receipts: { path: './ide-agent-receipts.jsonl', stdout_tail_lines: 80 },
+        tmux: {
+          default_session: 'gemini',
+          allow: ['npm test', 'npm run build', 'pytest', 'git status', 'git diff']
+        },
+        github: { webhook_secret: '', event_kinds: ['pull_request', 'issue_comment'] },
+        outbound: { default_webhook_url: '' }
+      },
+      notes: `# Gemini IDE Agent Kit config
+# Fast path via webhook push model or fallback loop via 'gemini' tmux session.
+# Broaden 'tmux.allow' for read/build tasks to reduce manual 'yes' clicking,
+# but keep destructive actions behind manual IDE approval barriers.`
     }
   };
 
