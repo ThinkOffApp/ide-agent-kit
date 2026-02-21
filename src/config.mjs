@@ -5,7 +5,7 @@ const DEFAULT_CONFIG = {
   listen: { host: '127.0.0.1', port: 8787 },
   queue: { path: './ide-agent-queue.jsonl' },
   receipts: { path: './ide-agent-receipts.jsonl', stdout_tail_lines: 80 },
-  tmux: { default_session: 'iak-runner', allow: [] },
+  tmux: { default_session: 'iak-runner', ide_session: 'claude', nudge_text: 'check rooms', allow: [] },
   github: { webhook_secret: '', event_kinds: ['pull_request', 'issue_comment', 'check_suite', 'workflow_run'] },
   outbound: { default_webhook_url: '' }
 };

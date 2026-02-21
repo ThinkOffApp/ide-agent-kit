@@ -1,7 +1,18 @@
 import { createServer } from 'node:http';
 import { createHmac, timingSafeEqual } from 'node:crypto';
 import { appendFileSync } from 'node:fs';
+import { execSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
+
+function nudgeTmux(session) {
+  try {
+    execSync(`tmux has-session -t ${JSON.stringify(session)} 2>/dev/null`);
+    execSync(`tmux send-keys -t ${JSON.stringify(session)} -l "check rooms"`);
+    setTimeout(() => {
+      try { execSync(`tmux send-keys -t ${JSON.stringify(session)} Enter`); } catch {}
+    }, 300);
+  } catch {}
+}
 
 function verifyGitHubSignature(payload, signature, secret) {
   if (!secret) return true; // No secret configured = skip verification
@@ -100,6 +111,46 @@ export function startWebhookServer(config, onEvent) {
       return;
     }
 
+    // Ant Farm webhook endpoint
+    if (req.method === 'POST' && req.url === '/antfarm') {
+      const chunks = [];
+      for await (const chunk of req) chunks.push(chunk);
+      let body;
+      try { body = JSON.parse(Buffer.concat(chunks).toString()); } catch {
+        res.writeHead(400);
+        res.end('Invalid JSON');
+        return;
+      }
+
+      // Ant Farm sends nested objects: room can be {slug, name, id}, author can be {handle, name}
+      const roomSlug = typeof body.room === 'object' ? (body.room?.slug || body.room?.name || '') : (body.room || '');
+      const authorHandle = typeof body.author === 'object' ? (body.author?.handle || body.author?.name || '?') : (body.from || body.author || '?');
+      const rawBody = body.body || body.message || body.content || '';
+      const msgBody = typeof rawBody === 'string' ? rawBody : JSON.stringify(rawBody) || '';
+
+      const event = {
+        trace_id: randomUUID(),
+        event_id: body.id || randomUUID(),
+        source: 'antfarm',
+        kind: 'antfarm.message.created',
+        timestamp: body.created_at || new Date().toISOString(),
+        room: roomSlug,
+        actor: { login: authorHandle },
+        payload: { body: msgBody.slice(0, 500), room: roomSlug }
+      };
+
+      appendFileSync(queuePath, JSON.stringify(event) + '\n');
+      if (onEvent) onEvent(event);
+      console.log(`[${event.timestamp}] antfarm message from ${event.actor.login} in ${event.room} → queued`);
+
+      // Wake up the IDE agent via tmux
+      nudgeTmux(config.tmux?.ide_session || config.tmux?.default_session || 'claude');
+
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ status: 'queued', trace_id: event.trace_id }));
+      return;
+    }
+
     if (req.method !== 'POST' || req.url !== '/webhook') {
       res.writeHead(404);
       res.end('Not found');
@@ -149,6 +200,9 @@ export function startWebhookServer(config, onEvent) {
 
     console.log(`[${normalized.timestamp}] ${normalized.kind} from ${normalized.actor.login} → queued`);
 
+    // Nudge IDE agent
+    nudgeTmux(config.tmux?.ide_session || config.tmux?.default_session || 'claude');
+
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ status: 'queued', trace_id: normalized.trace_id }));
   });
@@ -156,6 +210,7 @@ export function startWebhookServer(config, onEvent) {
   server.listen(port, host, () => {
     console.log(`IDE Agent Kit webhook server listening on ${host}:${port}`);
     console.log(`  POST /webhook  — GitHub webhook endpoint`);
+    console.log(`  POST /antfarm  — Ant Farm webhook endpoint`);
     console.log(`  GET  /health   — Health check`);
     console.log(`  Queue: ${queuePath}`);
   });

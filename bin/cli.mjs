@@ -5,6 +5,7 @@ import { tmuxRun } from '../src/tmux-runner.mjs';
 import { tailReceipts } from '../src/receipt.mjs';
 import { startWebhookServer } from '../src/webhook-server.mjs';
 import { emitJson } from '../src/emit.mjs';
+import { watchQueue } from '../src/watch.mjs';
 
 const args = process.argv.slice(2);
 const command = args[0];
@@ -25,6 +26,10 @@ Usage:
 
   ide-agent-kit receipt tail [--n <count>] [--config <path>]
     Print the last N receipts as JSON.
+
+  ide-agent-kit watch [--config <path>]
+    Watch the event queue and nudge IDE tmux session on new events.
+    Uses fs.watch for instant reaction (no polling delay).
 
   ide-agent-kit init [--ide <claude-code|codex|cursor|vscode|gemini>]
     Generate starter config for your IDE.
@@ -113,6 +118,20 @@ async function main() {
     return;
   }
 
+  if (command === 'watch') {
+    const opts = parseKV(args, 'watch');
+    const config = loadConfig(opts.config);
+    watchQueue(config, (event) => {
+      const src = event.source || '?';
+      const actor = event.actor?.login || '?';
+      const room = event.room || '';
+      console.log(`  → ${src} event from ${actor}${room ? ' in ' + room : ''}`);
+    });
+    // Keep process alive
+    process.on('SIGINT', () => { console.log('\nStopping watcher.'); process.exit(0); });
+    return;
+  }
+
   if (command === 'init') {
     const opts = parseKV(args, 'init');
     const ide = opts.ide || 'claude-code';
@@ -138,6 +157,8 @@ async function initIdeConfig(ide) {
         receipts: { path: './ide-agent-receipts.jsonl', stdout_tail_lines: 80 },
         tmux: {
           default_session: 'iak-runner',
+          ide_session: 'claude',
+          nudge_text: 'check rooms',
           allow: ['npm test', 'npm run build', 'pytest', 'git status', 'git diff']
         },
         github: { webhook_secret: '', event_kinds: ['pull_request', 'issue_comment'] },
@@ -156,6 +177,8 @@ async function initIdeConfig(ide) {
         receipts: { path: './ide-agent-receipts.jsonl', stdout_tail_lines: 80 },
         tmux: {
           default_session: 'iak-runner',
+          ide_session: 'claude',
+          nudge_text: 'check rooms',
           allow: ['npm test', 'npm run build', 'pytest', 'git status', 'git diff']
         },
         github: { webhook_secret: '', event_kinds: ['pull_request', 'issue_comment'] },
@@ -173,6 +196,8 @@ async function initIdeConfig(ide) {
         receipts: { path: './ide-agent-receipts.jsonl', stdout_tail_lines: 80 },
         tmux: {
           default_session: 'iak-runner',
+          ide_session: 'claude',
+          nudge_text: 'check rooms',
           allow: ['npm test', 'npm run build', 'pytest', 'git status', 'git diff']
         },
         github: { webhook_secret: '', event_kinds: ['pull_request', 'issue_comment'] },
@@ -189,6 +214,8 @@ async function initIdeConfig(ide) {
         receipts: { path: './ide-agent-receipts.jsonl', stdout_tail_lines: 80 },
         tmux: {
           default_session: 'iak-runner',
+          ide_session: 'claude',
+          nudge_text: 'check rooms',
           allow: ['npm test', 'npm run build', 'pytest', 'git status', 'git diff']
         },
         github: { webhook_secret: '', event_kinds: ['pull_request', 'issue_comment'] },
@@ -205,6 +232,8 @@ async function initIdeConfig(ide) {
         receipts: { path: './ide-agent-receipts.jsonl', stdout_tail_lines: 80 },
         tmux: {
           default_session: 'iak-runner',
+          ide_session: 'claude',
+          nudge_text: 'check rooms',
           allow: ['npm test', 'npm run build', 'pytest', 'git status', 'git diff']
         },
         github: { webhook_secret: '', event_kinds: ['pull_request', 'issue_comment'] },
