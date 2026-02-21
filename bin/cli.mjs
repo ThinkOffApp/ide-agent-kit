@@ -204,7 +204,7 @@ async function initIdeConfig(ide) {
         queue: { path: './ide-agent-queue.jsonl' },
         receipts: { path: './ide-agent-receipts.jsonl', stdout_tail_lines: 80 },
         tmux: {
-          default_session: 'gemini',
+          default_session: 'iak-runner',
           allow: ['npm test', 'npm run build', 'pytest', 'git status', 'git diff']
         },
         github: { webhook_secret: '', event_kinds: ['pull_request', 'issue_comment'] },
