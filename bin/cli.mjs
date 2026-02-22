@@ -7,14 +7,19 @@ import { startWebhookServer } from '../src/webhook-server.mjs';
 import { emitJson } from '../src/emit.mjs';
 import { watchQueue } from '../src/watch.mjs';
 import { startRoomPoller } from '../src/room-poller.mjs';
-import { memoryList, memoryGet, memorySet, memoryAppend, memoryDelete } from '../src/memory.mjs';
+import { memoryList, memoryGet, memorySet, memoryAppend, memoryDelete, memorySearch } from '../src/memory.mjs';
+import { triggerAgent, wakeAgent, healthCheck, healthDeep, agentsList, configGet, configPatch } from '../src/openclaw-gateway.mjs';
+import { sessionsSend, sessionsSpawn, sessionsList, sessionsHistory, sessionsStatus } from '../src/openclaw-sessions.mjs';
+import { execApprovalRequest, execApprovalWait, execApprovalResolve, execApprovalList } from '../src/openclaw-exec.mjs';
+import { listHooks, createForwarderHook, deleteHook } from '../src/openclaw-hooks.mjs';
+import { cronList, cronAdd, cronRemove, cronRun, cronStatus } from '../src/openclaw-cron.mjs';
 
 const args = process.argv.slice(2);
 const command = args[0];
 const subcommand = args[1];
 
 function usage() {
-  console.log(`IDE Agent Kit v0.1
+  console.log(`IDE Agent Kit v0.2
 
 Usage:
   ide-agent-kit serve [--config <path>]
@@ -31,26 +36,48 @@ Usage:
 
   ide-agent-kit watch [--config <path>]
     Watch the event queue and nudge IDE tmux session on new events.
-    Uses fs.watch for instant reaction (no polling delay).
 
   ide-agent-kit poll --rooms <room1,room2> --api-key <key> --handle <@handle> [--interval <sec>] [--config <path>]
     Poll Ant Farm rooms directly and nudge IDE tmux session on new messages.
-    No webhooks required — works anywhere with curl and tmux.
 
-  ide-agent-kit memory list [--config <path>]
-    List all memory entries.
+  ide-agent-kit memory <list|get|set|append|delete|search> [options]
+    Manage agent memory (local or OpenClaw backend).
+    --backend local|openclaw  --agent <name>  --key <topic>  --value <text>
+    search: --query <text> [--max-results <n>] [--min-score <n>]
 
-  ide-agent-kit memory get --key <topic> [--config <path>]
-    Read a memory entry.
+  ide-agent-kit gateway <health|health-deep|agents|config-get|config-patch|trigger|wake> [options]
+    OpenClaw gateway operations.
+    trigger: --agent <id> --message <text> [--model <model>] [--timeout <sec>]
+    wake:    --text <text> [--mode now|next-heartbeat]
+    config-patch: --patch <json>
 
-  ide-agent-kit memory set --key <topic> --value <text> [--config <path>]
-    Write a memory entry (overwrites existing).
+  ide-agent-kit sessions <list|send|spawn|history|status> [options]
+    Agent-to-agent communication via OpenClaw gateway.
+    send:    --agent <id> --message <text> [--timeout <sec>]
+    spawn:   --task <text> [--agent <id>] [--model <model>] [--mode run|session]
+    list:    [--kinds main,group,cron] [--limit <n>] [--active-minutes <n>]
+    history: --session-key <key> [--limit <n>]
+    status:  --session-key <key>
 
-  ide-agent-kit memory append --key <topic> --value <text> [--config <path>]
-    Append to a memory entry with timestamp.
+  ide-agent-kit exec <list|request|resolve> [options]
+    Execution approval governance (integrates with thinkoff-judge-core).
+    list:    [--agent <id>] [--status pending|resolved|all]
+    request: --command <cmd> [--agent <id>] [--cwd <path>]
+    resolve: --request-id <id> --decision <allow-once|allow-always|deny> [--reason <text>]
 
-  ide-agent-kit memory delete --key <topic> [--config <path>]
-    Delete a memory entry.
+  ide-agent-kit hooks <list|create|delete> [options]
+    OpenClaw event hook management.
+    list:   [--agent <name>]
+    create: --name <hook-name> --events <evt1,evt2> --webhook-url <url> [--agent <name>]
+    delete: --name <hook-name> [--agent <name>]
+
+  ide-agent-kit cron <list|add|remove|run|status> [options]
+    OpenClaw scheduled task management.
+    list:   List all cron jobs
+    add:    --name <name> --task <text> --schedule <cron-expr|interval-ms> [--agent <id>] [--mode main|isolated]
+    remove: --job-id <id>
+    run:    --job-id <id>  (trigger immediate execution)
+    status: Show cron system status
 
   ide-agent-kit init [--ide <claude-code|codex|cursor|vscode|gemini>] [--profile <balanced|low-friction>]
     Generate starter config for your IDE.
@@ -71,6 +98,12 @@ function parseKV(args, after) {
     i++;
   }
   return opts;
+}
+
+function gwOpts(opts) {
+  return {
+    host: opts.host, port: opts.port ? parseInt(opts.port) : undefined, token: opts.token
+  };
 }
 
 async function main() {
@@ -148,7 +181,6 @@ async function main() {
       const room = event.room || '';
       console.log(`  → ${src} event from ${actor}${room ? ' in ' + room : ''}`);
     });
-    // Keep process alive
     process.on('SIGINT', () => { console.log('\nStopping watcher.'); process.exit(0); });
     return;
   }
@@ -171,6 +203,7 @@ async function main() {
     return;
   }
 
+  // ── Memory ──────────────────────────────────────────────
   if (command === 'memory') {
     const opts = parseKV(args, subcommand || 'memory');
     const config = loadConfig(opts.config);
@@ -210,7 +243,272 @@ async function main() {
       console.log(`${result.action}: ${result.key}`);
       return;
     }
-    console.error('Usage: ide-agent-kit memory <list|get|set|append|delete> [--backend local|openclaw] [--agent <name>] [options]');
+    if (subcommand === 'search') {
+      if (!opts.query) { console.error('Error: --query is required'); process.exit(1); }
+      const result = memorySearch(config, opts.query, {
+        ...gwOpts(opts),
+        maxResults: opts['max-results'] ? parseInt(opts['max-results']) : undefined,
+        minScore: opts['min-score'] ? parseFloat(opts['min-score']) : undefined
+      });
+      if (!result.ok) { console.error(`Search failed: ${result.error}`); process.exit(1); }
+      if (result.results.length === 0) {
+        console.log('No results found.');
+      } else {
+        result.results.forEach(r => {
+          console.log(`  [${(r.score || 0).toFixed(3)}] ${r.path || '?'}:${r.line || '?'}`);
+          if (r.snippet) console.log(`    ${r.snippet.slice(0, 120)}`);
+        });
+      }
+      return;
+    }
+    console.error('Usage: ide-agent-kit memory <list|get|set|append|delete|search> [options]');
+    process.exit(1);
+  }
+
+  // ── Gateway ─────────────────────────────────────────────
+  if (command === 'gateway') {
+    const opts = parseKV(args, subcommand || 'gateway');
+    const config = loadConfig(opts.config);
+    const gw = gwOpts(opts);
+
+    if (subcommand === 'health') {
+      const result = await healthCheck(config, gw);
+      console.log(JSON.stringify(result.data || result, null, 2));
+      return;
+    }
+    if (subcommand === 'health-deep') {
+      const result = await healthDeep(config, gw);
+      console.log(JSON.stringify(result.data || result, null, 2));
+      return;
+    }
+    if (subcommand === 'agents') {
+      const result = await agentsList(config, gw);
+      console.log(JSON.stringify(result.data || result, null, 2));
+      return;
+    }
+    if (subcommand === 'config-get') {
+      const result = await configGet(config, gw);
+      console.log(JSON.stringify(result.data || result, null, 2));
+      return;
+    }
+    if (subcommand === 'config-patch') {
+      if (!opts.patch) { console.error('Error: --patch <json> is required'); process.exit(1); }
+      const patch = JSON.parse(opts.patch);
+      const result = await configPatch(config, patch, gw);
+      console.log(JSON.stringify(result.data || result, null, 2));
+      return;
+    }
+    if (subcommand === 'trigger') {
+      if (!opts.agent || !opts.message) { console.error('Error: --agent and --message are required'); process.exit(1); }
+      const result = await triggerAgent(config, {
+        agentId: opts.agent,
+        message: opts.message,
+        model: opts.model,
+        timeoutSeconds: opts.timeout ? parseInt(opts.timeout) : undefined
+      }, gw);
+      console.log(JSON.stringify(result.data || result, null, 2));
+      return;
+    }
+    if (subcommand === 'wake') {
+      if (!opts.text) { console.error('Error: --text is required'); process.exit(1); }
+      const result = await wakeAgent(config, { text: opts.text, mode: opts.mode }, gw);
+      console.log(JSON.stringify(result.data || result, null, 2));
+      return;
+    }
+    console.error('Usage: ide-agent-kit gateway <health|health-deep|agents|config-get|config-patch|trigger|wake>');
+    process.exit(1);
+  }
+
+  // ── Sessions ────────────────────────────────────────────
+  if (command === 'sessions') {
+    const opts = parseKV(args, subcommand || 'sessions');
+    const config = loadConfig(opts.config);
+    const gw = gwOpts(opts);
+
+    if (subcommand === 'list') {
+      const result = await sessionsList(config, {
+        kinds: opts.kinds ? opts.kinds.split(',') : undefined,
+        limit: opts.limit ? parseInt(opts.limit) : undefined,
+        activeMinutes: opts['active-minutes'] ? parseInt(opts['active-minutes']) : undefined,
+        messageLimit: opts['message-limit'] !== undefined ? parseInt(opts['message-limit']) : undefined
+      }, gw);
+      console.log(JSON.stringify(result.data || result, null, 2));
+      return;
+    }
+    if (subcommand === 'send') {
+      if (!opts.agent || !opts.message) { console.error('Error: --agent and --message are required'); process.exit(1); }
+      const result = await sessionsSend(config, {
+        agentId: opts.agent,
+        message: opts.message,
+        timeoutSeconds: opts.timeout ? parseInt(opts.timeout) : undefined
+      }, gw);
+      console.log(JSON.stringify(result.data || result, null, 2));
+      return;
+    }
+    if (subcommand === 'spawn') {
+      if (!opts.task) { console.error('Error: --task is required'); process.exit(1); }
+      const result = await sessionsSpawn(config, {
+        task: opts.task,
+        agentId: opts.agent,
+        model: opts.model,
+        mode: opts.mode,
+        runTimeoutSeconds: opts.timeout ? parseInt(opts.timeout) : undefined
+      }, gw);
+      console.log(JSON.stringify(result.data || result, null, 2));
+      return;
+    }
+    if (subcommand === 'history') {
+      if (!opts['session-key']) { console.error('Error: --session-key is required'); process.exit(1); }
+      const result = await sessionsHistory(config, {
+        sessionKey: opts['session-key'],
+        limit: opts.limit ? parseInt(opts.limit) : undefined
+      }, gw);
+      console.log(JSON.stringify(result.data || result, null, 2));
+      return;
+    }
+    if (subcommand === 'status') {
+      if (!opts['session-key']) { console.error('Error: --session-key is required'); process.exit(1); }
+      const result = await sessionsStatus(config, { sessionKey: opts['session-key'] }, gw);
+      console.log(JSON.stringify(result.data || result, null, 2));
+      return;
+    }
+    console.error('Usage: ide-agent-kit sessions <list|send|spawn|history|status>');
+    process.exit(1);
+  }
+
+  // ── Exec Approvals ──────────────────────────────────────
+  if (command === 'exec') {
+    const opts = parseKV(args, subcommand || 'exec');
+    const config = loadConfig(opts.config);
+    const gw = gwOpts(opts);
+
+    if (subcommand === 'list') {
+      const result = await execApprovalList(config, {
+        agentId: opts.agent,
+        status: opts.status
+      }, gw);
+      console.log(JSON.stringify(result.data || result, null, 2));
+      return;
+    }
+    if (subcommand === 'request') {
+      if (!opts.command) { console.error('Error: --command is required'); process.exit(1); }
+      const result = await execApprovalRequest(config, {
+        command: opts.command,
+        agentId: opts.agent,
+        cwd: opts.cwd
+      }, gw);
+      console.log(JSON.stringify(result.data || result, null, 2));
+      return;
+    }
+    if (subcommand === 'resolve') {
+      if (!opts['request-id'] || !opts.decision) { console.error('Error: --request-id and --decision are required'); process.exit(1); }
+      const result = await execApprovalResolve(config, {
+        requestId: opts['request-id'],
+        decision: opts.decision,
+        reason: opts.reason
+      }, gw);
+      console.log(JSON.stringify(result.data || result, null, 2));
+      return;
+    }
+    console.error('Usage: ide-agent-kit exec <list|request|resolve>');
+    process.exit(1);
+  }
+
+  // ── Hooks ───────────────────────────────────────────────
+  if (command === 'hooks') {
+    const opts = parseKV(args, subcommand || 'hooks');
+    const config = loadConfig(opts.config);
+
+    if (subcommand === 'list') {
+      const hooks = listHooks(config, { agent: opts.agent });
+      if (hooks.length === 0) {
+        console.log('No hooks installed.');
+      } else {
+        hooks.forEach(h => {
+          console.log(`  ${h.name} (${h.scope}) events: ${(h.events || []).join(', ') || '?'}`);
+        });
+      }
+      return;
+    }
+    if (subcommand === 'create') {
+      if (!opts.name || !opts.events || !opts['webhook-url']) {
+        console.error('Error: --name, --events, and --webhook-url are required');
+        process.exit(1);
+      }
+      const result = createForwarderHook(config, {
+        name: opts.name,
+        events: opts.events.split(','),
+        webhookUrl: opts['webhook-url'],
+        agent: opts.agent
+      });
+      console.log(`Created hook: ${result.name} → ${result.path}`);
+      console.log(`  Events: ${result.events.join(', ')}`);
+      console.log(`  Forwards to: ${result.webhookUrl}`);
+      return;
+    }
+    if (subcommand === 'delete') {
+      if (!opts.name) { console.error('Error: --name is required'); process.exit(1); }
+      const result = deleteHook(config, { name: opts.name, agent: opts.agent });
+      console.log(`${result.action}: ${result.name}`);
+      return;
+    }
+    console.error('Usage: ide-agent-kit hooks <list|create|delete>');
+    process.exit(1);
+  }
+
+  // ── Cron ────────────────────────────────────────────────
+  if (command === 'cron') {
+    const opts = parseKV(args, subcommand || 'cron');
+    const config = loadConfig(opts.config);
+    const gw = gwOpts(opts);
+
+    if (subcommand === 'list') {
+      const result = await cronList(config, gw);
+      console.log(JSON.stringify(result.data || result, null, 2));
+      return;
+    }
+    if (subcommand === 'add') {
+      if (!opts.name || !opts.task || !opts.schedule) {
+        console.error('Error: --name, --task, and --schedule are required');
+        process.exit(1);
+      }
+      // Parse schedule: could be cron expr or interval ms
+      let schedule;
+      if (/^\d+$/.test(opts.schedule)) {
+        schedule = { every: parseInt(opts.schedule) };
+      } else if (opts.schedule.includes(' ')) {
+        schedule = { cron: opts.schedule };
+      } else {
+        schedule = { at: opts.schedule };
+      }
+      const result = await cronAdd(config, {
+        name: opts.name,
+        task: opts.task,
+        schedule,
+        agentId: opts.agent,
+        mode: opts.mode
+      }, gw);
+      console.log(JSON.stringify(result.data || result, null, 2));
+      return;
+    }
+    if (subcommand === 'remove') {
+      if (!opts['job-id']) { console.error('Error: --job-id is required'); process.exit(1); }
+      const result = await cronRemove(config, { jobId: opts['job-id'] }, gw);
+      console.log(JSON.stringify(result.data || result, null, 2));
+      return;
+    }
+    if (subcommand === 'run') {
+      if (!opts['job-id']) { console.error('Error: --job-id is required'); process.exit(1); }
+      const result = await cronRun(config, { jobId: opts['job-id'] }, gw);
+      console.log(JSON.stringify(result.data || result, null, 2));
+      return;
+    }
+    if (subcommand === 'status') {
+      const result = await cronStatus(config, gw);
+      console.log(JSON.stringify(result.data || result, null, 2));
+      return;
+    }
+    console.error('Usage: ide-agent-kit cron <list|add|remove|run|status>');
     process.exit(1);
   }
 
@@ -275,12 +573,14 @@ async function initIdeConfig(ide, profile = 'balanced') {
           allow: allowForProfile
         },
         github: { webhook_secret: '', event_kinds: ['pull_request', 'issue_comment'] },
-        outbound: { default_webhook_url: '' }
+        outbound: { default_webhook_url: '' },
+        openclaw: { host: '127.0.0.1', port: 18791, token: '' }
       },
       notes: `# Claude Code IDE Agent Kit config
 # Runner uses a dedicated tmux session (iak-runner) to avoid conflicting with your IDE
 # Add commands to tmux.allow to permit them
 # Set github.webhook_secret to verify inbound webhooks
+# Set openclaw.token to connect to your OpenClaw gateway
 # Profile: ${normalizedProfile}`
     },
     'codex': {
@@ -296,7 +596,8 @@ async function initIdeConfig(ide, profile = 'balanced') {
           allow: allowForProfile
         },
         github: { webhook_secret: '', event_kinds: ['pull_request', 'issue_comment'] },
-        outbound: { default_webhook_url: '' }
+        outbound: { default_webhook_url: '' },
+        openclaw: { host: '127.0.0.1', port: 18791, token: '' }
       },
       notes: `# Codex IDE Agent Kit config
 # For Codex: auto-approve can be configured via Codex's own settings
@@ -316,7 +617,8 @@ async function initIdeConfig(ide, profile = 'balanced') {
           allow: allowForProfile
         },
         github: { webhook_secret: '', event_kinds: ['pull_request', 'issue_comment'] },
-        outbound: { default_webhook_url: '' }
+        outbound: { default_webhook_url: '' },
+        openclaw: { host: '127.0.0.1', port: 18791, token: '' }
       },
       notes: `# Cursor IDE Agent Kit config
 # Cursor agents can invoke tmux runner via CLI or consume the webhook queue
@@ -335,7 +637,8 @@ async function initIdeConfig(ide, profile = 'balanced') {
           allow: allowForProfile
         },
         github: { webhook_secret: '', event_kinds: ['pull_request', 'issue_comment'] },
-        outbound: { default_webhook_url: '' }
+        outbound: { default_webhook_url: '' },
+        openclaw: { host: '127.0.0.1', port: 18791, token: '' }
       },
       notes: `# VS Code IDE Agent Kit config
 # VS Code extensions or Copilot agents can consume the queue file and invoke tmux runner
@@ -354,7 +657,8 @@ async function initIdeConfig(ide, profile = 'balanced') {
           allow: allowForProfile
         },
         github: { webhook_secret: '', event_kinds: ['pull_request', 'issue_comment'] },
-        outbound: { default_webhook_url: '' }
+        outbound: { default_webhook_url: '' },
+        openclaw: { host: '127.0.0.1', port: 18791, token: '' }
       },
       notes: `# Gemini IDE Agent Kit config
 # Fast path via webhook push model or fallback loop via 'gemini' tmux session.

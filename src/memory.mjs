@@ -1,5 +1,6 @@
 import { readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync, unlinkSync } from 'node:fs';
 import { join, resolve } from 'node:path';
+import { execSync } from 'node:child_process';
 
 /**
  * File-based memory for IDE agents with two backends:
@@ -111,5 +112,45 @@ export function memoryDelete(config, key, options = {}) {
     return { key, path, action: 'deleted' };
   } catch {
     return { key, path, action: 'not found' };
+  }
+}
+
+/**
+ * Semantic memory search via OpenClaw gateway RPC.
+ * Uses vector + BM25 hybrid search over indexed memory markdown.
+ *
+ * Requires the OpenClaw gateway to be running with memory indexing enabled.
+ *
+ * @param {object} config
+ * @param {string} query - natural language search query
+ * @param {object} options - { agent?, maxResults?, minScore?, host?, port?, token? }
+ * @returns {object} { ok, results: [{ path, score, snippet, line }] }
+ */
+export function memorySearch(config, query, options = {}) {
+  const host = options.host || config?.openclaw?.host || '127.0.0.1';
+  const port = options.port || config?.openclaw?.port || 18791;
+  const token = options.token || config?.openclaw?.token || '';
+
+  const params = {
+    query,
+    ...(options.maxResults && { maxResults: options.maxResults }),
+    ...(options.minScore && { minScore: options.minScore })
+  };
+
+  const body = JSON.stringify({ method: 'memory.search', params });
+  const headers = ['Content-Type: application/json'];
+  if (token) headers.push(`Authorization: Bearer ${token}`);
+
+  const headerArgs = headers.map(h => `-H "${h}"`).join(' ');
+  const bodyArg = `-d '${body.replace(/'/g, "'\\''")}'`;
+  const url = `http://${host}:${port}/rpc`;
+  const cmd = `curl -sS -X POST ${headerArgs} ${bodyArg} "${url}"`;
+
+  try {
+    const result = execSync(cmd, { encoding: 'utf8', timeout: 15000 });
+    const data = JSON.parse(result);
+    return { ok: true, results: data.results || data };
+  } catch (e) {
+    return { ok: false, error: e.message, results: [] };
   }
 }

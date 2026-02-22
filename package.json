@@ -1,7 +1,7 @@
 {
   "name": "ide-agent-kit",
-  "version": "0.1.0",
-  "description": "Let IDE AIs participate in team workflows — webhook relay, tmux runner, receipts",
+  "version": "0.2.0",
+  "description": "IDE agent toolkit with OpenClaw integration — gateway, sessions, exec approvals, hooks, cron, memory, polling",
   "type": "module",
   "bin": {
     "ide-agent-kit": "./bin/cli.mjs"
@@ -10,7 +10,7 @@
     "test": "node --test test/*.test.mjs",
     "start": "node bin/cli.mjs serve"
   },
-  "keywords": ["ide", "agent", "ai", "webhook", "tmux", "receipts"],
+  "keywords": ["ide", "agent", "ai", "webhook", "tmux", "receipts", "openclaw", "gateway", "sessions", "governance"],
   "license": "MIT",
   "engines": {
     "node": ">=18"
