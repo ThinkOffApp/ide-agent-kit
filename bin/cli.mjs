@@ -52,7 +52,7 @@ Usage:
   ide-agent-kit memory delete --key <topic> [--config <path>]
     Delete a memory entry.
 
-  ide-agent-kit init [--ide <claude-code|codex|cursor|vscode|gemini>]
+  ide-agent-kit init [--ide <claude-code|codex|cursor|vscode|gemini>] [--profile <balanced|low-friction>]
     Generate starter config for your IDE.
 `);
 }
@@ -217,7 +217,8 @@ async function main() {
   if (command === 'init') {
     const opts = parseKV(args, 'init');
     const ide = opts.ide || 'claude-code';
-    await initIdeConfig(ide);
+    const profile = opts.profile || opts.friction || 'balanced';
+    await initIdeConfig(ide, profile);
     return;
   }
 
@@ -226,9 +227,39 @@ async function main() {
   process.exit(1);
 }
 
-async function initIdeConfig(ide) {
+async function initIdeConfig(ide, profile = 'balanced') {
   const { writeFileSync, existsSync, mkdirSync } = await import('node:fs');
   const { resolve } = await import('node:path');
+
+  const defaultAllow = ['npm test', 'npm run build', 'pytest', 'git status', 'git diff'];
+  const lowFrictionAllow = [
+    ...defaultAllow,
+    'npm run lint',
+    'npm run typecheck',
+    'npm run test',
+    'npm run test:',
+    'node --test',
+    'python3 -m pytest',
+    'python -m pytest',
+    'rg',
+    'ls',
+    'cat',
+    'sed',
+    'awk',
+    'jq',
+    'git log',
+    'git show',
+    'git branch',
+    'git fetch',
+    'git pull --ff-only'
+  ];
+
+  const normalizedProfile = profile === 'low' ? 'low-friction' : profile;
+  if (!['balanced', 'low-friction'].includes(normalizedProfile)) {
+    console.error(`Unknown profile: ${profile}. Choose from: balanced, low-friction`);
+    process.exit(1);
+  }
+  const allowForProfile = normalizedProfile === 'low-friction' ? lowFrictionAllow : defaultAllow;
 
   const configs = {
     'claude-code': {
@@ -241,7 +272,7 @@ async function initIdeConfig(ide) {
           default_session: 'iak-runner',
           ide_session: 'claude',
           nudge_text: 'check rooms',
-          allow: ['npm test', 'npm run build', 'pytest', 'git status', 'git diff']
+          allow: allowForProfile
         },
         github: { webhook_secret: '', event_kinds: ['pull_request', 'issue_comment'] },
         outbound: { default_webhook_url: '' }
@@ -249,7 +280,8 @@ async function initIdeConfig(ide) {
       notes: `# Claude Code IDE Agent Kit config
 # Runner uses a dedicated tmux session (iak-runner) to avoid conflicting with your IDE
 # Add commands to tmux.allow to permit them
-# Set github.webhook_secret to verify inbound webhooks`
+# Set github.webhook_secret to verify inbound webhooks
+# Profile: ${normalizedProfile}`
     },
     'codex': {
       filename: 'ide-agent-kit.json',
@@ -261,14 +293,15 @@ async function initIdeConfig(ide) {
           default_session: 'iak-runner',
           ide_session: 'claude',
           nudge_text: 'check rooms',
-          allow: ['npm test', 'npm run build', 'pytest', 'git status', 'git diff']
+          allow: allowForProfile
         },
         github: { webhook_secret: '', event_kinds: ['pull_request', 'issue_comment'] },
         outbound: { default_webhook_url: '' }
       },
       notes: `# Codex IDE Agent Kit config
 # For Codex: auto-approve can be configured via Codex's own settings
-# This module handles the webhook + tmux layer underneath`
+# This module handles the webhook + tmux layer underneath
+# Profile: ${normalizedProfile}`
     },
     'cursor': {
       filename: 'ide-agent-kit.json',
@@ -280,13 +313,14 @@ async function initIdeConfig(ide) {
           default_session: 'iak-runner',
           ide_session: 'claude',
           nudge_text: 'check rooms',
-          allow: ['npm test', 'npm run build', 'pytest', 'git status', 'git diff']
+          allow: allowForProfile
         },
         github: { webhook_secret: '', event_kinds: ['pull_request', 'issue_comment'] },
         outbound: { default_webhook_url: '' }
       },
       notes: `# Cursor IDE Agent Kit config
-# Cursor agents can invoke tmux runner via CLI or consume the webhook queue`
+# Cursor agents can invoke tmux runner via CLI or consume the webhook queue
+# Profile: ${normalizedProfile}`
     },
     'vscode': {
       filename: 'ide-agent-kit.json',
@@ -298,13 +332,14 @@ async function initIdeConfig(ide) {
           default_session: 'iak-runner',
           ide_session: 'claude',
           nudge_text: 'check rooms',
-          allow: ['npm test', 'npm run build', 'pytest', 'git status', 'git diff']
+          allow: allowForProfile
         },
         github: { webhook_secret: '', event_kinds: ['pull_request', 'issue_comment'] },
         outbound: { default_webhook_url: '' }
       },
       notes: `# VS Code IDE Agent Kit config
-# VS Code extensions or Copilot agents can consume the queue file and invoke tmux runner`
+# VS Code extensions or Copilot agents can consume the queue file and invoke tmux runner
+# Profile: ${normalizedProfile}`
     },
     'gemini': {
       filename: 'ide-agent-kit.json',
@@ -316,7 +351,7 @@ async function initIdeConfig(ide) {
           default_session: 'iak-runner',
           ide_session: 'claude',
           nudge_text: 'check rooms',
-          allow: ['npm test', 'npm run build', 'pytest', 'git status', 'git diff']
+          allow: allowForProfile
         },
         github: { webhook_secret: '', event_kinds: ['pull_request', 'issue_comment'] },
         outbound: { default_webhook_url: '' }
@@ -324,7 +359,8 @@ async function initIdeConfig(ide) {
       notes: `# Gemini IDE Agent Kit config
 # Fast path via webhook push model or fallback loop via 'gemini' tmux session.
 # Broaden 'tmux.allow' for read/build tasks to reduce manual 'yes' clicking,
-# but keep destructive actions behind manual IDE approval barriers.`
+# but keep destructive actions behind manual IDE approval barriers.
+# Profile: ${normalizedProfile}`
     }
   };
 

@@ -29,7 +29,10 @@ git clone https://github.com/ThinkOffApp/team-relay.git
 cd team-relay
 
 # Generate config for your IDE
-node bin/cli.mjs init --ide claude-code   # or: codex, cursor, vscode
+node bin/cli.mjs init --ide claude-code   # or: codex, cursor, vscode, gemini
+
+# Minimize manual approvals for routine safe commands
+node bin/cli.mjs init --ide codex --profile low-friction
 
 # Start webhook server
 node bin/cli.mjs serve
@@ -56,7 +59,7 @@ ide-agent-kit serve [--config <path>]
 ide-agent-kit tmux run --cmd <command> [--session <name>] [--cwd <path>] [--timeout-sec <sec>]
 ide-agent-kit emit --to <url> --json <file>
 ide-agent-kit receipt tail [--n <count>]
-ide-agent-kit init [--ide <claude-code|codex|cursor|vscode>]
+ide-agent-kit init [--ide <claude-code|codex|cursor|vscode|gemini>] [--profile <balanced|low-friction>]
 ```
 
 ## Config
@@ -70,6 +73,16 @@ See `config/team-relay.example.json` for the full config shape. Key sections:
 - `tmux.default_session` — tmux session name
 - `github.webhook_secret` — HMAC secret for signature verification
 - `github.event_kinds` — which GitHub events to accept
+
+### Low-friction profile
+
+Use the `low-friction` profile when you want fewer manual accept prompts for routine non-destructive commands.
+
+```bash
+node bin/cli.mjs init --ide codex --profile low-friction
+```
+
+This profile broadens `tmux.allow` to include common read/build/test commands (`rg`, `ls`, `cat`, `git log/show`, `npm run lint/typecheck/test`, etc.) while still excluding destructive commands by default.
 
 ## Schemas
 

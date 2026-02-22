@@ -1,0 +1,55 @@
+{
+  "listen": {
+    "host": "127.0.0.1",
+    "port": 8787
+  },
+  "queue": {
+    "path": "./team-relay-queue.jsonl"
+  },
+  "receipts": {
+    "path": "./team-relay-receipts.jsonl",
+    "stdout_tail_lines": 80
+  },
+  "tmux": {
+    "default_session": "iak-runner",
+    "ide_session": "claude",
+    "nudge_text": "check rooms",
+    "allow": [
+      "npm test",
+      "npm run build",
+      "pytest",
+      "git status",
+      "git diff",
+      "npm run lint",
+      "npm run typecheck",
+      "npm run test",
+      "npm run test:",
+      "node --test",
+      "python3 -m pytest",
+      "python -m pytest",
+      "rg",
+      "ls",
+      "cat",
+      "sed",
+      "awk",
+      "jq",
+      "git log",
+      "git show",
+      "git branch",
+      "git fetch",
+      "git pull --ff-only"
+    ]
+  },
+  "github": {
+    "webhook_secret": "CHANGE_ME",
+    "event_kinds": [
+      "pull_request",
+      "issue_comment",
+      "check_suite",
+      "workflow_run"
+    ]
+  },
+  "outbound": {
+    "default_webhook_url": "https://example.com/webhook"
+  }
+}
