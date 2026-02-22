@@ -13,6 +13,7 @@ import { sessionsSend, sessionsSpawn, sessionsList, sessionsHistory, sessionsSta
 import { execApprovalRequest, execApprovalWait, execApprovalResolve, execApprovalList } from '../src/openclaw-exec.mjs';
 import { listHooks, createForwarderHook, deleteHook } from '../src/openclaw-hooks.mjs';
 import { cronList, cronAdd, cronRemove, cronRun, cronStatus } from '../src/openclaw-cron.mjs';
+import { keepaliveStart, keepaliveStop, keepaliveStatus } from '../src/session-keepalive.mjs';
 
 const args = process.argv.slice(2);
 const command = args[0];
@@ -78,6 +79,12 @@ Usage:
     remove: --job-id <id>
     run:    --job-id <id>  (trigger immediate execution)
     status: Show cron system status
+
+  ide-agent-kit keepalive <start|stop|status> [options]
+    Prevent macOS display sleep and terminal freezes for VNC/remote sessions.
+    start:  Start caffeinate -d -i -s [--heartbeat-sec <n>] [--pid-file <path>]
+    stop:   Stop managed caffeinate + heartbeat processes
+    status: Show keepalive state, system caffeinate procs, and pmset settings
 
   ide-agent-kit init [--ide <claude-code|codex|cursor|vscode|gemini>] [--profile <balanced|low-friction>]
     Generate starter config for your IDE.
@@ -509,6 +516,60 @@ async function main() {
       return;
     }
     console.error('Usage: ide-agent-kit cron <list|add|remove|run|status>');
+    process.exit(1);
+  }
+
+  // ── Keepalive ──────────────────────────────────────────
+  if (command === 'keepalive') {
+    const opts = parseKV(args, subcommand || 'keepalive');
+    const config = loadConfig(opts.config);
+    const kaOpts = { pidFile: opts['pid-file'], heartbeatSec: opts['heartbeat-sec'] ? parseInt(opts['heartbeat-sec']) : undefined };
+
+    if (subcommand === 'start') {
+      const result = keepaliveStart(config, kaOpts);
+      if (!result.ok) { console.error(`Failed: ${result.error}`); process.exit(1); }
+      if (result.action === 'already-running') {
+        console.log(`Keepalive already running (caffeinate PID ${result.caffeinate?.pid})`);
+      } else {
+        console.log(`Keepalive started:`);
+        console.log(`  caffeinate PID: ${result.caffeinate?.pid}`);
+        if (result.heartbeat) console.log(`  heartbeat PID: ${result.heartbeat.pid} (every ${result.heartbeat.intervalSec}s)`);
+      }
+      return;
+    }
+    if (subcommand === 'stop') {
+      const result = keepaliveStop(config, kaOpts);
+      if (result.action === 'not-running') {
+        console.log('Keepalive not running.');
+      } else {
+        console.log(`Stopped: ${result.killed.join(', ')}`);
+      }
+      return;
+    }
+    if (subcommand === 'status') {
+      const result = keepaliveStatus(config, kaOpts);
+      console.log('Keepalive status:');
+      if (result.caffeinate) {
+        const src = result.caffeinate.external ? ' (external)' : ' (managed)';
+        console.log(`  caffeinate: PID ${result.caffeinate.pid} alive=${result.caffeinate.alive}${src}`);
+      } else {
+        console.log('  caffeinate: not running');
+      }
+      if (result.heartbeat) {
+        console.log(`  heartbeat: PID ${result.heartbeat.pid} alive=${result.heartbeat.alive} interval=${result.heartbeat.intervalSec}s`);
+      }
+      if (result.pmset.displaysleep != null) {
+        console.log(`  displaysleep: ${result.pmset.displaysleep} min${result.pmset.displaysleep === 0 ? ' (never)' : ''}`);
+      }
+      if (result.pmset.sleep != null) {
+        console.log(`  system sleep: ${result.pmset.sleep} min${result.pmset.sleep === 0 ? ' (never)' : ''}`);
+      }
+      if (result.systemCaffeinateProcesses.length > 1) {
+        console.log(`  note: ${result.systemCaffeinateProcesses.length} caffeinate processes running`);
+      }
+      return;
+    }
+    console.error('Usage: ide-agent-kit keepalive <start|stop|status>');
     process.exit(1);
   }
 
