@@ -174,9 +174,10 @@ async function main() {
   if (command === 'memory') {
     const opts = parseKV(args, subcommand || 'memory');
     const config = loadConfig(opts.config);
+    const memOpts = { backend: opts.backend, agent: opts.agent };
 
     if (subcommand === 'list') {
-      const entries = memoryList(config);
+      const entries = memoryList(config, memOpts);
       if (entries.length === 0) {
         console.log('No memory entries. Use "ide-agent-kit memory set --key <topic> --value <text>" to create one.');
       } else {
@@ -186,30 +187,30 @@ async function main() {
     }
     if (subcommand === 'get') {
       if (!opts.key) { console.error('Error: --key is required'); process.exit(1); }
-      const result = memoryGet(config, opts.key);
+      const result = memoryGet(config, opts.key, memOpts);
       if (result.error) { console.error(`Not found: ${opts.key}`); process.exit(1); }
       console.log(result.content);
       return;
     }
     if (subcommand === 'set') {
       if (!opts.key || !opts.value) { console.error('Error: --key and --value are required'); process.exit(1); }
-      const result = memorySet(config, opts.key, opts.value);
+      const result = memorySet(config, opts.key, opts.value, memOpts);
       console.log(`Set ${result.key} (${result.size} bytes) → ${result.path}`);
       return;
     }
     if (subcommand === 'append') {
       if (!opts.key || !opts.value) { console.error('Error: --key and --value are required'); process.exit(1); }
-      const result = memoryAppend(config, opts.key, opts.value);
+      const result = memoryAppend(config, opts.key, opts.value, memOpts);
       console.log(`Appended to ${result.key} (${result.size} bytes) → ${result.path}`);
       return;
     }
     if (subcommand === 'delete') {
       if (!opts.key) { console.error('Error: --key is required'); process.exit(1); }
-      const result = memoryDelete(config, opts.key);
+      const result = memoryDelete(config, opts.key, memOpts);
       console.log(`${result.action}: ${result.key}`);
       return;
     }
-    console.error('Usage: ide-agent-kit memory <list|get|set|append|delete> [options]');
+    console.error('Usage: ide-agent-kit memory <list|get|set|append|delete> [--backend local|openclaw] [--agent <name>] [options]');
     process.exit(1);
   }
 

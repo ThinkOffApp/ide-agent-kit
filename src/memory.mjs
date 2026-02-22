@@ -2,24 +2,46 @@ import { readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync, unlink
 import { join, resolve } from 'node:path';
 
 /**
- * Simple file-based memory for IDE agents.
- * Inspired by OpenClaw's session-memory hook.
+ * File-based memory for IDE agents with two backends:
  *
- * Memory is stored as markdown files in a `memory/` directory.
- * Each file is a topic (e.g., memory/room-context.md, memory/decisions.md).
- * Agents can read, write, append, and list memory files.
+ * Backend "local" (default):
+ *   Stores markdown files in a local `memory/` directory.
+ *   Good for IDE agents (Claude Code, Codex, Gemini, Cursor).
+ *
+ * Backend "openclaw":
+ *   Reads/writes to OpenClaw agent workspace memory directories.
+ *   Good for bots running on the OpenClaw gateway.
+ *   Requires --agent <name> to resolve workspace path.
  *
  * CLI:
- *   ide-agent-kit memory list [--config <path>]
- *   ide-agent-kit memory get --key <topic> [--config <path>]
- *   ide-agent-kit memory set --key <topic> --value <text> [--config <path>]
- *   ide-agent-kit memory append --key <topic> --value <text> [--config <path>]
- *   ide-agent-kit memory delete --key <topic> [--config <path>]
+ *   ide-agent-kit memory list [--backend local|openclaw] [--agent <name>] [--config <path>]
+ *   ide-agent-kit memory get --key <topic> [--backend ...] [--agent <name>]
+ *   ide-agent-kit memory set --key <topic> --value <text> [--backend ...] [--agent <name>]
+ *   ide-agent-kit memory append --key <topic> --value <text> [--backend ...] [--agent <name>]
+ *   ide-agent-kit memory delete --key <topic> [--backend ...] [--agent <name>]
  */
 
 const DEFAULT_MEMORY_DIR = './memory';
+const OPENCLAW_HOME = process.env.OPENCLAW_HOME || '/Users/family/openclaw';
+const OPENCLAW_DATA = process.env.OPENCLAW_DATA || '/Users/family/.openclaw';
 
-function resolveMemoryDir(config) {
+function resolveMemoryDir(config, options = {}) {
+  const backend = options.backend || config?.memory?.backend || 'local';
+
+  if (backend === 'openclaw') {
+    const agent = options.agent || config?.memory?.agent;
+    if (!agent) {
+      throw new Error('OpenClaw backend requires --agent <name> (e.g., sally, ether, haruka)');
+    }
+    // OpenClaw stores memory in workspace-{agent}/memory/
+    const wsDir = join(OPENCLAW_DATA, `workspace-${agent}`, 'memory');
+    if (!existsSync(wsDir)) {
+      mkdirSync(wsDir, { recursive: true });
+    }
+    return wsDir;
+  }
+
+  // Local backend
   const dir = config?.memory?.dir || DEFAULT_MEMORY_DIR;
   const resolved = resolve(dir);
   if (!existsSync(resolved)) {
@@ -29,7 +51,6 @@ function resolveMemoryDir(config) {
 }
 
 function sanitizeKey(key) {
-  // Allow alphanumeric, hyphens, underscores, dots
   return key.replace(/[^a-zA-Z0-9._-]/g, '-').replace(/-+/g, '-');
 }
 
@@ -39,8 +60,8 @@ function keyToPath(memDir, key) {
   return join(memDir, filename);
 }
 
-export function memoryList(config) {
-  const memDir = resolveMemoryDir(config);
+export function memoryList(config, options = {}) {
+  const memDir = resolveMemoryDir(config, options);
   try {
     const files = readdirSync(memDir).filter(f => f.endsWith('.md'));
     return files.map(f => ({
@@ -53,8 +74,8 @@ export function memoryList(config) {
   }
 }
 
-export function memoryGet(config, key) {
-  const memDir = resolveMemoryDir(config);
+export function memoryGet(config, key, options = {}) {
+  const memDir = resolveMemoryDir(config, options);
   const path = keyToPath(memDir, key);
   try {
     return { key, path, content: readFileSync(path, 'utf8') };
@@ -63,15 +84,15 @@ export function memoryGet(config, key) {
   }
 }
 
-export function memorySet(config, key, value) {
-  const memDir = resolveMemoryDir(config);
+export function memorySet(config, key, value, options = {}) {
+  const memDir = resolveMemoryDir(config, options);
   const path = keyToPath(memDir, key);
   writeFileSync(path, value);
   return { key, path, action: 'set', size: value.length };
 }
 
-export function memoryAppend(config, key, value) {
-  const memDir = resolveMemoryDir(config);
+export function memoryAppend(config, key, value, options = {}) {
+  const memDir = resolveMemoryDir(config, options);
   const path = keyToPath(memDir, key);
   let existing = '';
   try { existing = readFileSync(path, 'utf8'); } catch { /* new file */ }
@@ -82,8 +103,8 @@ export function memoryAppend(config, key, value) {
   return { key, path, action: 'append', size: (existing + entry).length };
 }
 
-export function memoryDelete(config, key) {
-  const memDir = resolveMemoryDir(config);
+export function memoryDelete(config, key, options = {}) {
+  const memDir = resolveMemoryDir(config, options);
   const path = keyToPath(memDir, key);
   try {
     unlinkSync(path);
