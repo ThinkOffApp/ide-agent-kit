@@ -92,8 +92,8 @@ caffeinate -d -i -s &
 
 ```bash
 # Clone and init
-git clone https://github.com/ThinkOffApp/team-relay.git
-cd team-relay
+git clone https://github.com/ThinkOffApp/ide-agent-kit.git
+cd ide-agent-kit
 
 # Generate config for your IDE
 node bin/cli.mjs init --ide claude-code   # or: codex, cursor, vscode, gemini
