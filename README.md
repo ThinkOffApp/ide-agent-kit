@@ -47,6 +47,31 @@ node bin/cli.mjs receipt tail --n 5
 node bin/cli.mjs emit --to https://example.com/webhook --json receipt.json
 ```
 
+## Room Poller Scripts (tmux fallback)
+
+The repo includes a minimal shell+python fallback poller used in long-running tmux sessions:
+
+- `scripts/room-poll.sh`
+- `scripts/room-poll-check.py`
+
+These now avoid hardcoded secrets and only auto-ack messages that look like direct task requests from the owner.
+
+```bash
+export ANTIGRAVITY_API_KEY=xfb_...
+export IAK_SELF_HANDLES="@antigravity,antigravity"
+export IAK_TARGET_HANDLE="@antigravity"
+export IAK_TMUX_SESSION="codex"
+export IAK_POLL_INTERVAL=10
+./scripts/room-poll.sh
+```
+
+Useful env vars:
+
+- `IAK_ROOMS` (default: `thinkoff-development,feature-admin-planning,lattice-qcd`)
+- `IAK_ACK_ENABLED` (`1`/`0`)
+- `IAK_SEEN_FILE`, `IAK_ACKED_FILE`, `IAK_NEW_FILE`
+- `IAK_NUDGE_TEXT` (default: `check rooms`)
+
 ## Naming convention (frozen)
 
 - JSON fields (events, receipts, config): **snake_case**
