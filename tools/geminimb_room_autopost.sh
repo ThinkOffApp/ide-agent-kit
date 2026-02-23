@@ -15,8 +15,8 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 
-# Define the GeminiMB API Key directly as requested
-API_KEY="antfarm_9aec99ba9136fced8a409fe17bdc9080"
+# Define the GeminiMB API Key from environment if available
+API_KEY="${GEMINIMB_API_KEY:-REDACTED_GEMINIMB_KEY}"
 
 BASE_URL="https://antfarm.world/api/v1"
 ROOMS_CSV="${ROOMS:-feature-admin-planning,thinkoff-development}"
@@ -170,8 +170,7 @@ Message:
 $src_body
 EOF
       echo "[$(date +%H:%M:%S)] GENERATING LLM reply for task from $from_handle..."
-      local llm_out
-      if llm_out="$(source ~/.zprofile && /opt/homebrew/bin/gemini -y -p "\$(cat "$prompt_file")" -o text 2>/dev/null)"; then
+      if llm_out="$(source ~/.zprofile && /opt/homebrew/bin/gemini -y -p "$(cat "$prompt_file")" -o text < /dev/null 2>/dev/null)"; then
         if [[ -n "$llm_out" && "$llm_out" != "NO_REPLY" ]]; then
           reply_body="@${from_handle#@} [geminimb] ${llm_out:0:1000}"
           echo "[$(date +%H:%M:%S)] GENERATED reply: ${#reply_body} chars"
