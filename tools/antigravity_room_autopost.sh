@@ -41,10 +41,11 @@ PRIME_ON_START="${PRIME_ON_START:-0}"   # 1 = seed current room messages as seen
 SMART_MODE="${SMART_MODE:-1}"           # 1 = use codex exec for real responses when possible
 CODEX_WORKDIR="${CODEX_WORKDIR:-/Users/petrus/AndroidStudioProjects/ThinkOff}"
 SMART_TIMEOUT_SEC="${SMART_TIMEOUT_SEC:-75}"
-CODEX_APPROVAL_POLICY="${CODEX_APPROVAL_POLICY:-never}"
+CODEX_APPROVAL_POLICY="${CODEX_APPROVAL_POLICY:-on-request}"
 CODEX_SANDBOX_MODE="${CODEX_SANDBOX_MODE:-workspace-write}"
 MAX_REPLY_AGE_SEC="${MAX_REPLY_AGE_SEC:-900}"   # skip replying to stale backlog messages
 SKIP_PRESTART_BACKLOG="${SKIP_PRESTART_BACKLOG:-1}"  # 1 = do not reply to messages older than process start
+NO_PLACEHOLDER_ACK="${NO_PLACEHOLDER_ACK:-1}"   # 1 = never send "on it" placeholder replies
 START_EPOCH="$(date +%s)"
 
 SEEN_IDS_FILE="/tmp/antigravity_room_autopost_seen_ids.txt"
@@ -220,7 +221,11 @@ build_force_fallback_reply() {
     echo "@${from_handle#@} [ag-codex] applied. I am live in tmux poll mode and will keep polling every ${POLL_INTERVAL}s. I will post concrete action updates, not only ack."
     return 0
   fi
-  echo "@${from_handle#@} [ag-codex] on it. Running this now and posting a concrete update shortly."
+  if [[ "$NO_PLACEHOLDER_ACK" == "1" ]]; then
+    echo "@${from_handle#@} [ag-codex] smart auto-reply unavailable for this request right now. Poller is live (${POLL_INTERVAL}s). Placeholder 'on it' ack is disabled."
+    return 0
+  fi
+  echo "@${from_handle#@} [ag-codex] ack. Poller is live (${POLL_INTERVAL}s)."
 }
 
 seconds_since_iso() {
