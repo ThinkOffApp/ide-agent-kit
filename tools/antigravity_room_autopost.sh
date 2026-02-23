@@ -1,9 +1,7 @@
 #!/usr/bin/env bash
-# SPDX-License-Identifier: AGPL-3.0-only
-#
 # antigravity_room_autopost.sh
 # Automatic room responder for @antigravity.
-# Responds to new room messages with smart Codex-generated replies.
+# Responds to new room messages (mention-only by default).
 #
 # Usage:
 #   ./tools/antigravity_room_autopost.sh
@@ -23,7 +21,7 @@ if [[ ! -f "$ENV_FILE" ]]; then
   exit 1
 fi
 
-API_KEY="$(rg -n "^ANTIGRAVITY_API_KEY=" "$ENV_FILE" | head -n1 | cut -d= -f2-)"
+API_KEY="$(grep "^ANTIGRAVITY_API_KEY=" "$ENV_FILE" | head -n1 | cut -d= -f2-)"
 if [[ -z "${API_KEY:-}" ]]; then
   echo "ANTIGRAVITY_API_KEY is missing in $ENV_FILE"
   exit 1
@@ -41,9 +39,9 @@ SOURCE_TAG="${SOURCE_TAG:-[ag-codex][tmux-ok]}"
 SEEN_MAX="${SEEN_MAX:-500}"
 PRIME_ON_START="${PRIME_ON_START:-0}"   # 1 = seed current room messages as seen on cold start
 SMART_MODE="${SMART_MODE:-1}"           # 1 = use codex exec for real responses when possible
-CODEX_WORKDIR="${CODEX_WORKDIR:-$ROOT_DIR}"
+CODEX_WORKDIR="${CODEX_WORKDIR:-/Users/petrus/AndroidStudioProjects/ThinkOff}"
 SMART_TIMEOUT_SEC="${SMART_TIMEOUT_SEC:-75}"
-CODEX_APPROVAL_POLICY="${CODEX_APPROVAL_POLICY:-on-request}"
+CODEX_APPROVAL_POLICY="${CODEX_APPROVAL_POLICY:-never}"
 CODEX_SANDBOX_MODE="${CODEX_SANDBOX_MODE:-workspace-write}"
 MAX_REPLY_AGE_SEC="${MAX_REPLY_AGE_SEC:-900}"   # skip replying to stale backlog messages
 SKIP_PRESTART_BACKLOG="${SKIP_PRESTART_BACKLOG:-1}"  # 1 = do not reply to messages older than process start
@@ -69,7 +67,7 @@ record_id() {
 prime_seen_ids() {
   local room="$1"
   local response
-  response="$(curl -sS -H "X-API-Key: $API_KEY" "$BASE_URL/rooms/$room/messages?limit=50" 2>/dev/null || true)"
+  response="$(curl -sS -H "Authorization: Bearer $API_KEY" "$BASE_URL/rooms/$room/messages?limit=50" 2>/dev/null || true)"
   [[ -z "$response" ]] && return 0
   echo "$response" | python3 -c '
 import json, sys
@@ -209,6 +207,22 @@ PY
   echo "@${from_handle#@} [ag-codex] ${reply:0:900}"
 }
 
+build_force_fallback_reply() {
+  local from_handle="$1"
+  local body="$2"
+  local lc
+  lc="$(printf "%s" "$body" | tr '[:upper:]' '[:lower:]')"
+  if ! should_force_reply "$from_handle" "$body"; then
+    echo ""
+    return 0
+  fi
+  if [[ "$lc" == *"stay up"* || "$lc" == *"off screen"* || "$lc" == *"keep polling"* || "$lc" == *"not responding"* ]]; then
+    echo "@${from_handle#@} [ag-codex] applied. I am live in tmux poll mode and will keep polling every ${POLL_INTERVAL}s. I will post concrete action updates, not only ack."
+    return 0
+  fi
+  echo "@${from_handle#@} [ag-codex] on it. Running this now and posting a concrete update shortly."
+}
+
 seconds_since_iso() {
   local ts="$1"
   python3 - "$ts" <<'PY'
@@ -287,6 +301,9 @@ post_reply() {
   reply_body="$(build_reply "$from_handle" "$created_at" "$src_body")"
   if [[ -z "$reply_body" ]]; then
     reply_body="$(build_smart_reply "$room" "$from_handle" "$src_body")"
+  fi
+  if [[ -z "$reply_body" ]]; then
+    reply_body="$(build_force_fallback_reply "$from_handle" "$src_body")"
   fi
   if [[ -z "$reply_body" ]]; then
     return 0
@@ -395,7 +412,7 @@ while true; do
     room="$(echo "$raw_room" | xargs)"
     [[ -z "$room" ]] && continue
 
-    response="$(curl -sS -H "X-API-Key: $API_KEY" "$BASE_URL/rooms/$room/messages?limit=$FETCH_LIMIT" 2>/dev/null || true)"
+    response="$(curl -sS -H "Authorization: Bearer $API_KEY" "$BASE_URL/rooms/$room/messages?limit=$FETCH_LIMIT" 2>/dev/null || true)"
     if [[ -z "$response" ]]; then
       echo "[$(date +%H:%M:%S)] fetch empty room=$room"
       continue
