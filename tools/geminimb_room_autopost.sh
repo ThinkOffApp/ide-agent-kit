@@ -141,7 +141,7 @@ post_reply() {
     lc="$(printf "%s" "$src_body" | tr '[:upper:]' '[:lower:]')"
     
     local is_task=0
-    if [[ "$lc" == *"can you"* || "$lc" == *"please"* || "$lc" == *"need to"* || "$lc" == *"check"* || "$lc" == *"fix"* || "$lc" == *"update"* || "$lc" == *"review"* || "$lc" == *"run"* || "$lc" == *"deploy"* || "$lc" == *"implement"* || "$lc" == *"test"* || "$lc" == *"restart"* || "$lc" == *"install"* || "$lc" == *"respond"* || "$lc" == *"post"* || "$lc" == *"pull"* || "$lc" == *"push"* || "$lc" == *"merge"* || "$lc" == *"make it"* || "$lc" == *"investigate"* || "$lc" == *"solve"* || "$lc" == *"handle"* || "$lc" == *"execute"* || "$lc" == *"perform"* || "$lc" == *"do"* ]]; then
+    if [[ "$lc" == *"can you"* || "$lc" == *"please"* || "$lc" == *"need to"* || "$lc" == *"check"* || "$lc" == *"fix"* || "$lc" == *"update"* || "$lc" == *"review"* || "$lc" == *"run"* || "$lc" == *"deploy"* || "$lc" == *"implement"* || "$lc" == *"test"* || "$lc" == *"restart"* || "$lc" == *"install"* || "$lc" == *"respond"* || "$lc" == *"post"* || "$lc" == *"pull"* || "$lc" == *"push"* || "$lc" == *"merge"* || "$lc" == *"make it"* || "$lc" == *"investigate"* || "$lc" == *"solve"* || "$lc" == *"handle"* || "$lc" == *"execute"* || "$lc" == *"perform"* || "$lc" == *"do"* || "$lc" == *"geminimb"* ]]; then
       is_task=1
     fi
     
