@@ -17,9 +17,11 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
-
-# Define the GeminiMB API Key from environment if available
-API_KEY="${GEMINIMB_API_KEY:-REDACTED_GEMINIMB_KEY}"
+ENV_FILE="$ROOT_DIR/.env.local"
+API_KEY="$(grep "^GEMINIMB_API_KEY=" "$ENV_FILE" 2>/dev/null | head -n1 | cut -d= -f2- || true)"
+if [[ -z "${API_KEY:-}" ]]; then
+  API_KEY="${GEMINIMB_API_KEY:-REDACTED_GEMINIMB_KEY}"
+fi
 
 BASE_URL="https://antfarm.world/api/v1"
 ROOMS_CSV="${ROOMS:-feature-admin-planning,thinkoff-development}"
@@ -52,12 +54,12 @@ record_id() {
 prime_seen_ids() {
   local room="$1"
   local response
-  response="$(curl -sS -H "X-API-Key: $API_KEY" "$BASE_URL/rooms/$room/messages?limit=50" 2>/dev/null || true)"
+  response="$(curl -sS -H "Authorization: Bearer $API_KEY" "$BASE_URL/rooms/$room/messages?limit=50" 2>/dev/null || true)"
   [[ -z "$response" ]] && return 0
   echo "$response" | python3 -c '
 import json, sys
 try:
-    data = json.load(sys.stdin)
+    data = json.load(sys.stdin, strict=False)
 except Exception:
     sys.exit(0)
 for m in data.get("messages", []):
@@ -173,7 +175,10 @@ Message:
 $src_body
 EOF
       echo "[$(date +%H:%M:%S)] GENERATING LLM reply for task from $from_handle..."
-      if llm_out="$(source ~/.zprofile && /opt/homebrew/bin/gemini -y -p "$(cat "$prompt_file")" -o text < /dev/null 2>/dev/null)"; then
+      local llm_out
+      if llm_out="$(source ~/.zprofile && /opt/homebrew/bin/gemini -y -p "$(cat "$prompt_file")" -o text < /dev/null 2>/dev/null | tail -n 1)"; then
+        # Trim leading/trailing whitespace
+        llm_out="$(echo -e "${llm_out}" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
         if [[ -n "$llm_out" && "$llm_out" != "NO_REPLY" ]]; then
           reply_body="@${from_handle#@} [geminimb] ${llm_out:0:1000}"
           echo "[$(date +%H:%M:%S)] GENERATED reply: ${#reply_body} chars"
@@ -272,7 +277,7 @@ while true; do
     room="$(echo "$raw_room" | xargs)"
     [[ -z "$room" ]] && continue
 
-    response="$(curl -sS -H "X-API-Key: $API_KEY" "$BASE_URL/rooms/$room/messages?limit=$FETCH_LIMIT" 2>/dev/null || true)"
+    response="$(curl -sS -H "Authorization: Bearer $API_KEY" "$BASE_URL/rooms/$room/messages?limit=$FETCH_LIMIT" 2>/dev/null || true)"
     if [[ -z "$response" ]]; then
       echo "[$(date +%H:%M:%S)] fetch empty room=$room"
       continue
@@ -299,7 +304,7 @@ while true; do
     done < <(echo "$response" | python3 -c '
 import json, re, sys
 try:
-    data = json.load(sys.stdin)
+    data = json.load(sys.stdin, strict=False)
 except Exception:
     sys.exit(0)
 for m in data.get("messages", []):
