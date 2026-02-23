@@ -269,10 +269,8 @@ node --test test/*.test.mjs
 
 ## Example flow
 
-See `examples/flow-pr-opened.md` for a complete PR → test → receipt walkthrough.
+See `examples/flow-pr-opened.md` for a complete PR - test - receipt walkthrough.
 
 ## License
 
-This project is licensed under the GNU Affero General Public License v3.0 only (**AGPL-3.0-only**). 
-
-By contributing to this repository, you agree to license your contributions under the AGPL-3.0-only. All source files must include the `SPDX-License-Identifier: AGPL-3.0-only` header.
+AGPL-3.0. See [LICENSE](LICENSE).
