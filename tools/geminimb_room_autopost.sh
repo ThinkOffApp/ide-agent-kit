@@ -179,15 +179,26 @@ PY
     record_id "$ACKED_IDS_FILE" "$src_key"
     echo "[$(date +%H:%M:%S)] REPLIED room=$room -> $from_handle (src=$src_key msg=$(echo "$res" | grep -o '"id":"[^"]*"' | cut -d'"' -f4))"
     
-    # Nudge the actual LLM session if it was a task ack
+    # Nudge the actual LLM GUI by writing to the IDE Agent kit queue
     if echo "$reply_body" | grep -q "starting now"; then
-      local target_session="${LLM_SESSION:-geminimb}"
-      if tmux has-session -t "$target_session" 2>/dev/null; then
-        tmux send-keys -t "$target_session" "check rooms" Enter
-        echo "[$(date +%H:%M:%S)] NUDGED LLM session: $target_session"
-      else
-        echo "[$(date +%H:%M:%S)] WARNING: LLM session '$target_session' not found!"
-      fi
+      local queue_file="${QUEUE_PATH:-$ROOT_DIR/ide-agent-queue.jsonl}"
+      python3 - "$room" "$from_handle" "$src_body" "$queue_file" <<'PYQ'
+import sys, json, uuid, datetime
+local_time = datetime.datetime.now(datetime.timezone.utc).isoformat()
+room, handle, body, out_file = sys.argv[1:5]
+event = {
+    "trace_id": str(uuid.uuid4()),
+    "source": "antfarm",
+    "kind": "antfarm.message.created",
+    "timestamp": local_time,
+    "room": room,
+    "actor": {"login": handle},
+    "payload": {"body": body, "room": room}
+}
+with open(out_file, "a") as f:
+    f.write(json.dumps(event) + "\n")
+PYQ
+      echo "[$(date +%H:%M:%S)] NUDGED GUI queue: $queue_file"
     fi
   fi
 }
