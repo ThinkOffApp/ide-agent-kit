@@ -15,8 +15,13 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 
-# Define the GeminiMB API Key directly as requested
-API_KEY="REDACTED_GEMINIMB_KEY"
+# NEVER hardcode API keys here - use env vars
+# This has been fixed 3 times already. Do NOT re-add a literal key.
+API_KEY="${IAK_API_KEY:-${GEMINIMB_API_KEY:-}}"
+if [ -z "$API_KEY" ]; then
+  echo "ERROR: Set IAK_API_KEY or GEMINIMB_API_KEY env var" >&2
+  exit 1
+fi
 
 BASE_URL="https://antfarm.world/api/v1"
 ROOMS_CSV="${ROOMS:-feature-admin-planning,thinkoff-development}"
