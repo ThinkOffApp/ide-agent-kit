@@ -183,30 +183,15 @@ Config keys: `listen.port`, `github.webhook_secret`, `github.event_kinds`, `queu
 
 Five modules for managing an [OpenClaw](https://openclaw.dev) multi-agent bot fleet via its CLI. Since the OpenClaw gateway uses WebSocket (not HTTP) for RPC, all modules shell out to the `openclaw` CLI, optionally over SSH for cross-user setups.
 
-**Gateway** (`src/openclaw-gateway.mjs`):
-- Start, stop, restart the OpenClaw gateway
-- Check gateway status (deep health check)
-- Config: `openclaw.home`, `openclaw.bin`, `openclaw.ssh`
+The **Gateway** module (`src/openclaw-gateway.mjs`) handles starting, stopping, and restarting the OpenClaw gateway, including deep health checks. It is configured via `openclaw.home`, `openclaw.bin`, and `openclaw.ssh` keys.
 
-**Sessions** (`src/openclaw-sessions.mjs`):
-- Send messages to agents, list active sessions
-- Agent-to-agent communication via `openclaw agent` CLI
-- Supports sending to specific agents by name
+The **Sessions** module (`src/openclaw-sessions.mjs`) sends messages to agents and lists active sessions. It supports agent-to-agent communication via the `openclaw agent` CLI, with the ability to target specific agents by name.
 
-**Exec Approvals** (`src/openclaw-exec.mjs`):
-- Governance layer for agent command execution
-- Manages an approval queue (pending → allow/deny)
-- Reads OpenClaw's native exec-approvals allowlist (per-agent, glob-based)
-- Files: `~/.openclaw/exec-approvals.json` (native), `./exec-approvals.json` (queue)
+The **Exec Approvals** module (`src/openclaw-exec.mjs`) provides a governance layer for agent command execution. It manages an approval queue (pending, allow, deny) and reads OpenClaw's native per-agent, glob-based exec-approvals allowlist from `~/.openclaw/exec-approvals.json`.
 
-**Hooks** (`src/openclaw-hooks.mjs`):
-- Register and manage event hooks for agents
-- Events: `message:received`, `message:sent`, `command:new`, `command:reset`, `command:stop`, `agent:bootstrap`, `gateway:startup`
-- Hook locations: `workspace/hooks/` (per-agent) and `~/.openclaw/hooks/` (shared)
+The **Hooks** module (`src/openclaw-hooks.mjs`) registers and manages event hooks for agents. Supported events include `message:received`, `message:sent`, `command:new`, `command:reset`, `command:stop`, `agent:bootstrap`, and `gateway:startup`. Hooks can be placed per-agent in `workspace/hooks/` or shared in `~/.openclaw/hooks/`.
 
-**Cron** (`src/openclaw-cron.mjs`):
-- Scheduled task management via `openclaw cron` CLI
-- List, add, remove scheduled tasks for agents
+The **Cron** module (`src/openclaw-cron.mjs`) handles scheduled task management, letting you list, add, and remove cron tasks for any agent.
 
 ```bash
 # OpenClaw config (in team-relay config file)
@@ -225,12 +210,7 @@ See [Room Poller](#room-poller) above. Provides realtime multi-agent communicati
 
 ### Other modules
 
-- **Receipts** (`src/receipt.mjs`) - Append-only JSONL receipt log with trace IDs and idempotency keys
-- **Emit** (`src/emit.mjs`) - Send receipts/payloads to external webhook URLs
-- **Memory** (`src/memory.mjs`) - Persistent key-value memory for agents across sessions
-- **Session Keepalive** (`src/session-keepalive.mjs`) - macOS `caffeinate` management for remote sessions
-- **tmux Runner** (`src/tmux-runner.mjs`) - Run allowlisted commands in tmux sessions with output capture
-- **Watch** (`src/watch.mjs`) - File watcher for JSONL queue changes
+**Receipts** (`src/receipt.mjs`) provides an append-only JSONL receipt log with trace IDs and idempotency keys for auditing every action. **Emit** (`src/emit.mjs`) sends receipts or arbitrary payloads to external webhook URLs. **Memory** (`src/memory.mjs`) offers persistent key-value storage for agents across sessions. **Session Keepalive** (`src/session-keepalive.mjs`) manages macOS `caffeinate` to prevent display and idle sleep during long-running remote sessions. **tmux Runner** (`src/tmux-runner.mjs`) executes allowlisted commands in tmux sessions with output capture. **Watch** (`src/watch.mjs`) monitors JSONL queue files for changes.
 
 ## Naming convention (frozen)
 
