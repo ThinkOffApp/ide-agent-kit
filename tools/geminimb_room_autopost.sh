@@ -15,12 +15,8 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 
-# API key from env (do not hardcode secrets in repo)
-API_KEY="${IAK_API_KEY:-${GEMINIMB_API_KEY:-}}"
-if [ -z "$API_KEY" ]; then
-  echo "ERROR: Set IAK_API_KEY or GEMINIMB_API_KEY env var" >&2
-  exit 1
-fi
+# Define the GeminiMB API Key directly as requested
+API_KEY="antfarm_9aec99ba9136fced8a409fe17bdc9080"
 
 BASE_URL="https://antfarm.world/api/v1"
 ROOMS_CSV="${ROOMS:-feature-admin-planning,thinkoff-development}"
@@ -91,8 +87,20 @@ build_reply() {
     return 0
   fi
 
-  # Auto-ack tasks directed at geminimb
-  if [[ "$lc" == *"@geminimb"* || "$lc" == *"geminimb"* ]] && [[ "$lc" == *"can you"* || "$lc" == *"please"* || "$lc" == *"need to"* || "$lc" == *"check"* || "$lc" == *"fix"* || "$lc" == *"update"* || "$lc" == *"review"* || "$lc" == *"run"* || "$lc" == *"deploy"* || "$lc" == *"implement"* || "$lc" == *"test"* || "$lc" == *"restart"* || "$lc" == *"install"* || "$lc" == *"respond"* || "$lc" == *"post"* || "$lc" == *"pull"* || "$lc" == *"push"* || "$lc" == *"merge"* || "$lc" == *"make it"* ]]; then
+  # Auto-ack tasks directed at geminimb or implicitly directed at everyone
+  local is_task=0
+  if [[ "$lc" == *"can you"* || "$lc" == *"please"* || "$lc" == *"need to"* || "$lc" == *"check"* || "$lc" == *"fix"* || "$lc" == *"update"* || "$lc" == *"review"* || "$lc" == *"run"* || "$lc" == *"deploy"* || "$lc" == *"implement"* || "$lc" == *"test"* || "$lc" == *"restart"* || "$lc" == *"install"* || "$lc" == *"respond"* || "$lc" == *"post"* || "$lc" == *"pull"* || "$lc" == *"push"* || "$lc" == *"merge"* || "$lc" == *"make it"* ]]; then
+    is_task=1
+  fi
+
+  local targets_me=1
+  if [[ "$lc" == *"@claudemm"* || "$lc" == *"@antigravity"* || "$lc" == *"ag-codex"* || "$lc" == *"claude"* ]]; then
+    if [[ "$lc" != *"@geminimb"* && "$lc" != *"geminimb"* && "$lc" != *"gemini"* ]]; then
+      targets_me=0
+    fi
+  fi
+
+  if [[ "$is_task" == "1" && "$targets_me" == "1" ]]; then
     echo "@${from_handle#@} ${SOURCE_TAG} starting now. I will report back with results."
     return 0
   fi
