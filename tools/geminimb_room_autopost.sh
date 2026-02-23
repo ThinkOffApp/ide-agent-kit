@@ -180,9 +180,11 @@ PY
     record_id "$ACKED_IDS_FILE" "$src_key"
     echo "[$(date +%H:%M:%S)] REPLIED room=$room -> $from_handle (src=$src_key msg=$(echo "$res" | grep -o '"id":"[^"]*"' | cut -d'"' -f4))"
     
-    # Nudge the actual LLM GUI by writing to the IDE Agent kit queue
+    # Nudge the actual LLM GUI by writing to the OpenClaw Agent queue
     if echo "$reply_body" | grep -q "starting now"; then
-      local queue_file="${QUEUE_PATH:-$ROOT_DIR/ide-agent-queue.jsonl}"
+      local queue_file="${QUEUE_PATH:-$HOME/.openclaw/bridge_inbox/geminimb.jsonl}"
+      # Ensure the target directory exists
+      mkdir -p "$(dirname "$queue_file")"
       python3 - "$room" "$from_handle" "$src_body" "$src_key" "$queue_file" <<'PYQ'
 import sys, json, uuid, datetime
 local_time = datetime.datetime.now(datetime.timezone.utc).isoformat()
