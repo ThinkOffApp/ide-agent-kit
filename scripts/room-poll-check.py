@@ -1,79 +1,165 @@
 #!/usr/bin/env python3
-"""Check for new Ant Farm messages, auto-ack from petrus, and append to inbox file."""
-import json, subprocess, sys, os, time
+"""Check for new Ant Farm room messages, optionally post focused auto-acks, append inbox file."""
 
-SEEN_FILE = "/tmp/claudemm_seen_ids.txt"
-NEW_FILE = "/tmp/claudemm_new_messages.txt"
-API_KEY = "xfb_a71acdf98be644bd0b015c39cf18dfcff333cc3e4bc83484c2cae9400fde8fcc"
-ROOMS = ["thinkoff-development", "feature-admin-planning", "lattice-qcd"]
-MY_HANDLES = ("@claudemm", "claudemm")
+import json
+import os
+import re
+import subprocess
+import sys
+from typing import Iterable, List, Set
 
-def post_ack(room, text):
-    """Post a quick ack directly to the room."""
+BASE_URL = os.getenv("IAK_BASE_URL", "https://antfarm.world/api/v1").rstrip("/")
+API_KEY = os.getenv("IAK_API_KEY") or os.getenv("ANTIGRAVITY_API_KEY", "")
+ROOMS = [r.strip() for r in os.getenv(
+    "IAK_ROOMS", "thinkoff-development,feature-admin-planning,lattice-qcd"
+).split(",") if r.strip()]
+MY_HANDLES = tuple(
+    h.strip() for h in os.getenv("IAK_SELF_HANDLES", "@claudemm,claudemm").split(",") if h.strip()
+)
+OWNER_HANDLE = os.getenv("IAK_OWNER_HANDLE", "petrus").lower()
+TARGET_HANDLE = os.getenv("IAK_TARGET_HANDLE", "@claudemm")
+SEEN_FILE = os.getenv("IAK_SEEN_FILE", "/tmp/iak_seen_ids.txt")
+ACKED_FILE = os.getenv("IAK_ACKED_FILE", "/tmp/iak_acked_ids.txt")
+NEW_FILE = os.getenv("IAK_NEW_FILE", "/tmp/iak_new_messages.txt")
+FETCH_LIMIT = int(os.getenv("IAK_FETCH_LIMIT", "20"))
+ACK_ENABLED = os.getenv("IAK_ACK_ENABLED", "1").lower() not in ("0", "false", "no")
+
+TASK_HINTS = (
+    "can you", "please", "need to", "check", "fix", "update", "review",
+    "run", "deploy", "implement", "test", "restart", "install", "respond",
+    "post", "pull", "push", "merge"
+)
+
+
+def _load_id_set(path: str) -> Set[str]:
     try:
-        payload = json.dumps({"room": room, "body": text})
-        subprocess.run(
-            ["curl", "-sS", "-X", "POST",
-             "https://antfarm.world/api/v1/messages",
-             "-H", f"X-API-Key: {API_KEY}",
-             "-H", "Content-Type: application/json",
-             "-d", payload],
-            capture_output=True, text=True, timeout=10
-        )
-    except Exception:
-        pass
-
-try:
-    seen = set()
-    try:
-        with open(SEEN_FILE) as f:
-            seen = set(line.strip() for line in f if line.strip())
+        with open(path, "r", encoding="utf-8") as f:
+            return {line.strip() for line in f if line.strip()}
     except FileNotFoundError:
-        pass
+        return set()
 
-    new_msgs = []
+
+def _save_id_set(path: str, values: Iterable[str], keep_last: int = 1000) -> None:
+    tail = list(values)[-keep_last:]
+    with open(path, "w", encoding="utf-8") as f:
+        for v in tail:
+            f.write(v + "\n")
+
+
+def _extract_mentions(text: str) -> List[str]:
+    return [m.lower() for m in re.findall(r"@([a-zA-Z0-9_.-]+)", text or "")]
+
+
+def _message_targets_me(body: str) -> bool:
+    mentions = _extract_mentions(body)
+    my_short = {h.lower().lstrip("@") for h in MY_HANDLES}
+    if mentions:
+        return any(m in my_short for m in mentions)
+    # If no explicit mentions, treat owner imperatives as potentially addressed to current agent.
+    return True
+
+
+def _looks_like_task_request(body: str) -> bool:
+    text = (body or "").strip().lower()
+    if not text:
+        return False
+    return any(hint in text for hint in TASK_HINTS)
+
+
+def _should_ack(handle: str, author_handle: str, body: str) -> bool:
+    from_owner = OWNER_HANDLE in str(author_handle).lower() or OWNER_HANDLE in str(handle).lower()
+    if not from_owner:
+        return False
+    if not _message_targets_me(body):
+        return False
+    return _looks_like_task_request(body)
+
+
+def _post_ack(room: str, text: str) -> None:
+    payload = json.dumps({"room": room, "body": text})
+    subprocess.run(
+        [
+            "curl", "-sS", "-X", "POST", f"{BASE_URL}/messages",
+            "-H", f"X-API-Key: {API_KEY}",
+            "-H", "Content-Type: application/json",
+            "-d", payload,
+        ],
+        capture_output=True,
+        text=True,
+        timeout=15,
+        check=False,
+    )
+
+
+def _fetch_room_messages(room: str) -> List[dict]:
+    result = subprocess.run(
+        [
+            "curl", "-sS", "-H", f"X-API-Key: {API_KEY}",
+            f"{BASE_URL}/rooms/{room}/messages?limit={FETCH_LIMIT}",
+        ],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+    if not result.stdout.strip():
+        return []
+    data = json.loads(result.stdout)
+    return data.get("messages", data if isinstance(data, list) else [])
+
+
+def main() -> int:
+    if not API_KEY:
+        print("ERROR: IAK_API_KEY or ANTIGRAVITY_API_KEY is required", file=sys.stderr)
+        print("NONE")
+        return 0
+
+    seen = _load_id_set(SEEN_FILE)
+    acked = _load_id_set(ACKED_FILE)
+    new_msgs: List[str] = []
+
     for room in ROOMS:
-        r = subprocess.run(
-            ["curl", "-sS", "-H", f"X-API-Key: {API_KEY}",
-             f"https://antfarm.world/api/v1/rooms/{room}/messages?limit=10"],
-            capture_output=True, text=True, timeout=30
-        )
-        data = json.loads(r.stdout)
-        msgs = data.get("messages", data if isinstance(data, list) else [])
+        msgs = _fetch_room_messages(room)
+        for msg in msgs:
+            mid = str(msg.get("id", "")).strip()
+            if not mid or mid in seen:
+                continue
+            seen.add(mid)
 
-        for m in msgs:
-            mid = m.get("id", "")
-            if mid and mid not in seen:
-                handle = m.get("from", "?")
-                author_handle = m.get("author", {}).get("handle", handle)
-                if author_handle not in MY_HANDLES and handle not in MY_HANDLES:
-                    body = m.get("body", "")[:400]
-                    ts = m.get("created_at", "")[:19]
-                    new_msgs.append(f"[{ts}] [{room}] {author_handle}: {body}")
+            handle = str(msg.get("from", "?"))
+            author_handle = str(msg.get("author", {}).get("handle", handle))
+            if author_handle in MY_HANDLES or handle in MY_HANDLES:
+                continue
 
-                    # Auto-ack messages from petrus (direct questions / hearing checks)
-                    body_lower = body.lower()
-                    is_from_petrus = "petrus" in str(author_handle).lower() or "petrus" in str(handle).lower()
-                    is_hearing_check = "hear" in body_lower or "do you" in body_lower or "claudemm" in body_lower.split("@")[-1:]
+            body = str(msg.get("body", ""))[:1000]
+            ts = str(msg.get("created_at", ""))[:19]
+            new_msgs.append(f"[{ts}] [{room}] {author_handle}: {body[:400]}")
 
-                    if is_from_petrus:
-                        elapsed = int(time.time() % 60)
-                        post_ack(room, f"@petrus [claudemm] seen, {elapsed}s. Full response coming via Claude Code.")
+            if ACK_ENABLED and mid not in acked and _should_ack(handle, author_handle, body):
+                _post_ack(
+                    room,
+                    f"@{OWNER_HANDLE} [{TARGET_HANDLE.lstrip('@')}] starting now. "
+                    "I will report back when finished with results."
+                )
+                acked.add(mid)
 
-                seen.add(mid)
-
-    with open(SEEN_FILE, "w") as f:
-        for sid in list(seen)[-500:]:
-            f.write(sid + "\n")
+    _save_id_set(SEEN_FILE, seen, keep_last=1000)
+    _save_id_set(ACKED_FILE, acked, keep_last=1000)
 
     if new_msgs:
-        with open(NEW_FILE, "a") as f:
+        with open(NEW_FILE, "a", encoding="utf-8") as f:
             for nm in reversed(new_msgs):
                 f.write(nm + "\n---\n")
         print("NEW")
     else:
         print("NONE")
+    return 0
 
-except Exception as e:
-    print(f"ERROR: {e}", file=sys.stderr)
-    print("NONE")
+
+if __name__ == "__main__":
+    try:
+        raise SystemExit(main())
+    except Exception as e:
+        print(f"ERROR: {e}", file=sys.stderr)
+        print("NONE")
+        raise SystemExit(0)
