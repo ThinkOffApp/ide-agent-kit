@@ -28,7 +28,7 @@ POLL_INTERVAL="${POLL_INTERVAL:-8}"
 FETCH_LIMIT="${FETCH_LIMIT:-10}"
 SESSION="${SESSION:-geminimb-room-autopost}"
 AGENT_HANDLE="@geminiMB"
-MENTION_ONLY="${MENTION_ONLY:-1}"   # 1 = only auto-reply when @geminiMB is mentioned
+MENTION_ONLY="${MENTION_ONLY:-0}"   # 0 = process all messages in the room
 RESPOND_TO_HANDLE="${RESPOND_TO_HANDLE:-petrus}"
 SOURCE_TAG="${SOURCE_TAG:-[geminimb][tmux-ok]}"
 SEEN_MAX="${SEEN_MAX:-500}"
@@ -78,7 +78,7 @@ build_reply() {
   local lag_sec
   lag_sec="$(seconds_since_iso "$created_at")"
 
-  if [[ "$lc" == *"do you hear me"* ]]; then
+  if [[ "$lc" == *"hear me"* ]]; then
     if [[ "$lag_sec" =~ ^[0-9]+$ ]] && [[ "$lag_sec" -ge 0 ]]; then
       echo "@${from_handle#@} ${SOURCE_TAG} yes, hearing you. ${lag_sec}s from your message. path=geminimb poller."
     else
@@ -88,6 +88,12 @@ build_reply() {
   fi
   if [[ "$lc" == *"webhook and/or tmux"* ]]; then
     echo "@${from_handle#@} ${SOURCE_TAG} path=geminimb poller on this runtime."
+    return 0
+  fi
+
+  # Auto-ack tasks directed at geminimb
+  if [[ "$lc" == *"@geminimb"* || "$lc" == *"geminimb"* ]] && [[ "$lc" == *"can you"* || "$lc" == *"please"* || "$lc" == *"need to"* || "$lc" == *"check"* || "$lc" == *"fix"* || "$lc" == *"update"* || "$lc" == *"review"* || "$lc" == *"run"* || "$lc" == *"deploy"* || "$lc" == *"implement"* || "$lc" == *"test"* || "$lc" == *"restart"* || "$lc" == *"install"* || "$lc" == *"respond"* || "$lc" == *"post"* || "$lc" == *"pull"* || "$lc" == *"push"* || "$lc" == *"merge"* || "$lc" == *"make it"* ]]; then
+    echo "@${from_handle#@} ${SOURCE_TAG} starting now. I will report back with results."
     return 0
   fi
 
@@ -117,7 +123,7 @@ should_force_reply() {
   if [[ "$from_handle" != "$RESPOND_TO_HANDLE" ]]; then
     return 1
   fi
-  if [[ "$lc" == *"do you hear me"* || "$lc" == *"report time in seconds"* || "$lc" == *"webhook and/or tmux"* || "$lc" == *"all of you"* ]]; then
+  if [[ "$lc" == *"do you hear me"* || "$lc" == *"report time in"* || "$lc" == *"webhook and/or tmux"* || "$lc" == *"all of you"* || "$lc" == *"can you"* || "$lc" == *"please"* || "$lc" == *"need to"* || "$lc" == *"check"* ]]; then
     return 0
   fi
   return 1
