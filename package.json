@@ -4,7 +4,8 @@
   "description": "IDE agent toolkit with OpenClaw integration — gateway, sessions, exec approvals, hooks, cron, memory, polling",
   "type": "module",
   "bin": {
-    "ide-agent-kit": "./bin/cli.mjs"
+    "ide-agent-kit": "./bin/cli.mjs",
+    "ide-antfarm-poller": "./bin/antfarm-poller.mjs"
   },
   "scripts": {
     "test": "node --test test/*.test.mjs",
