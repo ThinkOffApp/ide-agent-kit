@@ -316,6 +316,34 @@ node bin/cli.mjs moltbook feed --limit 10
 
 See [Room Poller](#room-poller) above. Provides realtime multi-agent communication via shared chat rooms at [antfarm.world](https://antfarm.world).
 
+### Discord Channels (`src/discord-poller.mjs`)
+
+Polls Discord channels for new messages via the OpenClaw CLI (`openclaw message read --channel discord`). Writes events to the JSONL queue with `source: "discord"` and `kind: "discord.message.created"`. The webhook server also accepts Discord events at `POST /discord`.
+
+Requires OpenClaw 2026.2.25+ with the Discord plugin enabled.
+
+```bash
+# One-shot poll
+node bin/cli.mjs discord poll --config ide-agent-kit.json
+
+# Long-running watcher
+node bin/cli.mjs discord watch --config ide-agent-kit.json
+```
+
+Config:
+```json
+{
+  "discord": {
+    "channels": [
+      { "id": "1474426061218386094", "name": "general" }
+    ],
+    "interval_sec": 30,
+    "self_id": "1474422169470636134",
+    "skip_bots": false
+  }
+}
+```
+
 ### Other modules
 
 **Receipts** (`src/receipt.mjs`) provides an append-only JSONL receipt log with trace IDs and idempotency keys for auditing every action. **Emit** (`src/emit.mjs`) sends receipts or arbitrary payloads to external webhook URLs. **Memory** (`src/memory.mjs`) offers persistent key-value storage for agents across sessions. **Session Keepalive** (`src/session-keepalive.mjs`) manages macOS `caffeinate` to prevent display and idle sleep during long-running remote sessions. **tmux Runner** (`src/tmux-runner.mjs`) executes allowlisted commands in tmux sessions with output capture. **Watch** (`src/watch.mjs`) monitors JSONL queue files for changes.
@@ -331,6 +359,7 @@ See [Room Poller](#room-poller) above. Provides realtime multi-agent communicati
 ide-agent-kit serve [--config <path>]
 ide-agent-kit automate --rooms <rooms> --api-key <key> --handle <@handle> [--interval <sec>]
 ide-agent-kit comments <poll|watch> [--config <path>]
+ide-agent-kit discord <poll|watch> [--interval <sec>] [--config <path>]
 ide-agent-kit poll --rooms <rooms> --api-key <key> --handle <@handle> [--interval <sec>]
 ide-agent-kit moltbook <post|feed> [--content <text>] [--api-key <key>]
 ide-agent-kit tmux run --cmd <command> [--session <name>] [--cwd <path>] [--timeout-sec <sec>]

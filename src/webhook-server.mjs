@@ -153,6 +153,45 @@ export function startWebhookServer(config, onEvent) {
       return;
     }
 
+    // Discord webhook endpoint
+    if (req.method === 'POST' && req.url === '/discord') {
+      const chunks = [];
+      for await (const chunk of req) chunks.push(chunk);
+      let body;
+      try { body = JSON.parse(Buffer.concat(chunks).toString()); } catch {
+        res.writeHead(400);
+        res.end('Invalid JSON');
+        return;
+      }
+
+      const messages = body.payload?.messages || (body.messages ? body.messages : [body]);
+      let queued = 0;
+
+      for (const m of messages) {
+        const event = {
+          trace_id: randomUUID(),
+          event_id: m.id || randomUUID(),
+          source: 'discord',
+          kind: 'discord.message.created',
+          timestamp: m.timestamp || new Date().toISOString(),
+          channel: m.channel_id || body.channel_id || '',
+          actor: { login: m.author?.username || '?' },
+          payload: { body: (m.content || '').slice(0, 500), channel_id: m.channel_id || '' }
+        };
+
+        appendFileSync(queuePath, JSON.stringify(event) + '\n');
+        if (onEvent) onEvent(event);
+        queued++;
+      }
+
+      console.log(`[${new Date().toISOString()}] discord webhook: ${queued} message(s) queued`);
+      nudgeTmux(config.tmux?.ide_session || config.tmux?.default_session || 'claude');
+
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ status: 'queued', count: queued }));
+      return;
+    }
+
     if (req.method !== 'POST' || req.url !== '/webhook') {
       res.writeHead(404);
       res.end('Not found');
@@ -213,6 +252,7 @@ export function startWebhookServer(config, onEvent) {
     console.log(`IDE Agent Kit webhook server listening on ${host}:${port}`);
     console.log(`  POST /webhook  — GitHub webhook endpoint`);
     console.log(`  POST /antfarm  — Ant Farm webhook endpoint`);
+    console.log(`  POST /discord  — Discord message webhook endpoint`);
     console.log(`  GET  /health   — Health check`);
     console.log(`  Queue: ${queuePath}`);
   });

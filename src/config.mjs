@@ -22,6 +22,13 @@ const DEFAULT_CONFIG = {
     github: { repos: [], token: '' },
     interval_sec: 120,
     seen_file: '/tmp/iak-comment-seen.txt'
+  },
+  discord: {
+    channels: [],
+    interval_sec: 30,
+    seen_file: '/tmp/iak-discord-seen.txt',
+    self_id: '',
+    skip_bots: false
   }
 };
 
@@ -42,6 +49,8 @@ export function loadConfig(configPath) {
       ...raw.comments,
       moltbook: { ...DEFAULT_CONFIG.comments.moltbook, ...raw.comments?.moltbook },
       github: { ...DEFAULT_CONFIG.comments.github, ...raw.comments?.github }
-    }
+    },
+    discord: { ...DEFAULT_CONFIG.discord, ...raw.discord },
+    openclaw: raw.openclaw || {}
   };
 }

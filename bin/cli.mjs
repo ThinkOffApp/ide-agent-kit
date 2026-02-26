@@ -20,6 +20,7 @@ import { keepaliveStart, keepaliveStop, keepaliveStatus } from '../src/session-k
 import { moltbookPost, moltbookFeed } from '../src/moltbook.mjs';
 import { startRoomAutomation } from '../src/room-automation.mjs';
 import { pollComments, startCommentPoller } from '../src/comment-poller.mjs';
+import { pollDiscord, startDiscordPoller } from '../src/discord-poller.mjs';
 
 const args = process.argv.slice(2);
 const command = args[0];
@@ -106,6 +107,12 @@ Usage:
     poll:   One-shot poll, print new comments as JSON.
     watch:  Long-running poller with tmux nudge on new comments.
     Config: comments.moltbook.posts, comments.github.repos
+
+  ide-agent-kit discord <poll|watch> [options]
+    Poll Discord channels via OpenClaw CLI for new messages.
+    poll:   One-shot poll, print new messages.
+    watch:  Long-running poller with tmux nudge on new messages.
+    Config: discord.channels, discord.interval_sec, discord.self_id
 
   ide-agent-kit init [--ide <claude-code|codex|cursor|vscode|gemini>] [--profile <balanced|low-friction>]
     Generate starter config for your IDE.
@@ -691,6 +698,34 @@ async function main() {
       return;
     }
     console.error('Usage: ide-agent-kit comments <poll|watch>');
+    process.exit(1);
+  }
+
+  // ── Discord Poller ─────────────────────────────────────
+  if (command === 'discord') {
+    const opts = parseKV(args, subcommand || 'discord');
+    const config = loadConfig(opts.config);
+
+    if (subcommand === 'poll') {
+      const messages = pollDiscord(config);
+      if (messages.length === 0) {
+        console.log('No new Discord messages.');
+      } else {
+        for (const m of messages) {
+          console.log(`@${m.actor.login} in ${m.channel}: ${m.payload.body.slice(0, 120)}`);
+          console.log();
+        }
+      }
+      return;
+    }
+    if (subcommand === 'watch') {
+      await startDiscordPoller({
+        config,
+        interval: opts.interval ? parseInt(opts.interval) : undefined
+      });
+      return;
+    }
+    console.error('Usage: ide-agent-kit discord <poll|watch>');
     process.exit(1);
   }
 

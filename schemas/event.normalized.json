@@ -6,7 +6,7 @@
   "properties": {
     "trace_id": {"type": "string", "description": "Stable trace id across the workflow"},
     "event_id": {"type": "string", "description": "Idempotency key for inbound webhook/event"},
-    "source": {"type": "string", "enum": ["github", "antfarm"], "description": "Origin system"},
+    "source": {"type": "string", "enum": ["github", "antfarm", "discord"], "description": "Origin system"},
     "kind": {
       "type": "string",
       "enum": [
@@ -15,7 +15,8 @@
         "github.issue_comment.created",
         "github.check_suite.completed",
         "github.workflow_run.completed",
-        "antfarm.message.created"
+        "antfarm.message.created",
+        "discord.message.created"
       ]
     },
     "timestamp": {"type": "string", "format": "date-time"},
@@ -36,6 +37,7 @@
       }
     },
     "room": {"type": "string", "description": "Ant Farm room name (antfarm source only)"},
+    "channel": {"type": "string", "description": "Discord channel name or ID (discord source only)"},
     "refs": {
       "type": "object",
       "description": "Pointers the IDE agent can act on",
