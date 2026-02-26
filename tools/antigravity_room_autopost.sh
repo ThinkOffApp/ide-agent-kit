@@ -41,8 +41,10 @@ PRIME_ON_START="${PRIME_ON_START:-0}"   # 1 = seed current room messages as seen
 SMART_MODE="${SMART_MODE:-1}"           # 1 = use codex exec for real responses when possible
 CODEX_WORKDIR="${CODEX_WORKDIR:-/Users/petrus/AndroidStudioProjects/ThinkOff}"
 SMART_TIMEOUT_SEC="${SMART_TIMEOUT_SEC:-75}"
-CODEX_APPROVAL_POLICY="${CODEX_APPROVAL_POLICY:-never}"
+CODEX_APPROVAL_POLICY="${CODEX_APPROVAL_POLICY:-on-request}"
 CODEX_SANDBOX_MODE="${CODEX_SANDBOX_MODE:-workspace-write}"
+CODEX_YOLO_MODE="${CODEX_YOLO_MODE:-0}"       # 1 = force -a never
+CODEX_YOLO_DANGER="${CODEX_YOLO_DANGER:-0}"   # 1 = also bypass approvals+sandbox entirely
 MAX_REPLY_AGE_SEC="${MAX_REPLY_AGE_SEC:-900}"   # skip replying to stale backlog messages
 SKIP_PRESTART_BACKLOG="${SKIP_PRESTART_BACKLOG:-1}"  # 1 = do not reply to messages older than process start
 START_EPOCH="$(date +%s)"
@@ -179,15 +181,21 @@ Message:
 $body
 EOF
 
-  if ! python3 - <<'PY' "$prompt_file" "$out_file" "$CODEX_WORKDIR" "$SMART_TIMEOUT_SEC" "$CODEX_APPROVAL_POLICY" "$CODEX_SANDBOX_MODE" >/tmp/antigravity_codex_exec.log 2>&1
+  if ! python3 - <<'PY' "$prompt_file" "$out_file" "$CODEX_WORKDIR" "$SMART_TIMEOUT_SEC" "$CODEX_APPROVAL_POLICY" "$CODEX_SANDBOX_MODE" "$CODEX_YOLO_MODE" "$CODEX_YOLO_DANGER" >/tmp/antigravity_codex_exec.log 2>&1
 import subprocess, sys
-prompt_file, out_file, workdir, timeout_s, approval_policy, sandbox_mode = sys.argv[1], sys.argv[2], sys.argv[3], int(sys.argv[4]), sys.argv[5], sys.argv[6]
+prompt_file, out_file, workdir, timeout_s, approval_policy, sandbox_mode, yolo_mode, yolo_danger = sys.argv[1], sys.argv[2], sys.argv[3], int(sys.argv[4]), sys.argv[5], sys.argv[6], sys.argv[7], sys.argv[8]
 prompt = open(prompt_file, "r", encoding="utf-8").read()
-subprocess.run(
-    ["codex", "exec", "--ephemeral", "-C", workdir, "-a", approval_policy, "-s", sandbox_mode, "--output-last-message", out_file, prompt],
-    check=True,
-    timeout=timeout_s,
-)
+cmd = ["codex", "exec", "--ephemeral", "-C", workdir]
+if yolo_mode == "1":
+    cmd.extend(["-a", "never"])
+    if yolo_danger == "1":
+        cmd.append("--dangerously-bypass-approvals-and-sandbox")
+    else:
+        cmd.extend(["-s", sandbox_mode or "workspace-write"])
+else:
+    cmd.extend(["-a", approval_policy, "-s", sandbox_mode])
+cmd.extend(["--output-last-message", out_file, prompt])
+subprocess.run(cmd, check=True, timeout=timeout_s)
 PY
   then
     echo ""
@@ -370,7 +378,26 @@ if [[ "${1:-}" == "tmux" ]]; then
         echo "$SESSION already running"
         exit 0
       fi
-      tmux new-session -d -s "$SESSION" "$0"
+      launch_cmd=(
+        env
+        "ROOMS=$ROOMS_CSV"
+        "POLL_INTERVAL=$POLL_INTERVAL"
+        "FETCH_LIMIT=$FETCH_LIMIT"
+        "MENTION_ONLY=$MENTION_ONLY"
+        "RESPOND_TO_HANDLE=$RESPOND_TO_HANDLE"
+        "SMART_MODE=$SMART_MODE"
+        "CODEX_WORKDIR=$CODEX_WORKDIR"
+        "SMART_TIMEOUT_SEC=$SMART_TIMEOUT_SEC"
+        "CODEX_APPROVAL_POLICY=$CODEX_APPROVAL_POLICY"
+        "CODEX_SANDBOX_MODE=$CODEX_SANDBOX_MODE"
+        "CODEX_YOLO_MODE=$CODEX_YOLO_MODE"
+        "CODEX_YOLO_DANGER=$CODEX_YOLO_DANGER"
+        "MAX_REPLY_AGE_SEC=$MAX_REPLY_AGE_SEC"
+        "SKIP_PRESTART_BACKLOG=$SKIP_PRESTART_BACKLOG"
+        "$0"
+      )
+      printf -v launch_line '%q ' "${launch_cmd[@]}"
+      tmux new-session -d -s "$SESSION" "$launch_line"
       echo "Started $SESSION (rooms=$ROOMS_CSV interval=${POLL_INTERVAL}s mention_only=$MENTION_ONLY)"
       ;;
     *)
@@ -405,6 +432,7 @@ if [[ "$PRIME_ON_START" == "1" ]] && [[ ! -s "$SEEN_IDS_FILE" ]]; then
 fi
 
 echo "[antigravity-autopost] rooms=$ROOMS_CSV poll=${POLL_INTERVAL}s limit=${FETCH_LIMIT} mention_only=$MENTION_ONLY"
+echo "[antigravity-autopost] codex_approval=$CODEX_APPROVAL_POLICY sandbox=$CODEX_SANDBOX_MODE yolo=$CODEX_YOLO_MODE yolo_danger=$CODEX_YOLO_DANGER"
 echo "[antigravity-autopost] seen=$SEEN_IDS_FILE acked=$ACKED_IDS_FILE"
 
 while true; do

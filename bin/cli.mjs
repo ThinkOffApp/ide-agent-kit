@@ -661,11 +661,21 @@ async function initIdeConfig(ide, profile = 'balanced') {
         },
         github: { webhook_secret: '', event_kinds: ['pull_request', 'issue_comment'] },
         outbound: { default_webhook_url: '' },
-        openclaw: { host: '127.0.0.1', port: 18791, token: '' }
+        openclaw: { host: '127.0.0.1', port: 18791, token: '' },
+        codex: {
+          yolo_mode: false,
+          yolo_danger: false,
+          approval_policy: 'on-request',
+          sandbox_mode: 'workspace-write'
+        }
       },
       notes: `# Codex IDE Agent Kit config
 # For Codex: auto-approve can be configured via Codex's own settings
 # This module handles the webhook + tmux layer underneath
+# YOLO switch (for tools/antigravity_room_autopost.sh):
+#   export CODEX_YOLO_MODE=1
+# Danger YOLO (bypass approvals+sandbox):
+#   export CODEX_YOLO_DANGER=1
 # Profile: ${normalizedProfile}`
     },
     'cursor': {

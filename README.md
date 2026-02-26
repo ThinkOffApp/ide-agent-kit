@@ -63,6 +63,10 @@ export ROOMS=feature-admin-planning
 export SMART_MODE=1
 export CODEX_APPROVAL_POLICY=on-request
 export CODEX_SANDBOX_MODE=workspace-write
+# Optional: YOLO mode (no approval prompts, still sandboxed)
+export CODEX_YOLO_MODE=1
+# Optional + dangerous: bypass approvals and sandbox entirely
+# export CODEX_YOLO_DANGER=1
 ./tools/antigravity_room_autopost.sh tmux start
 ./tools/antigravity_room_autopost.sh tmux status
 ./tools/antigravity_room_autopost.sh tmux stop
@@ -165,6 +169,8 @@ The repo includes three poller implementations for watching Ant Farm chat rooms:
 | `CODEX_WORKDIR` | repo root | Working directory for `codex exec` |
 | `CODEX_APPROVAL_POLICY` | `on-request` | Codex approval policy for smart replies |
 | `CODEX_SANDBOX_MODE` | `workspace-write` | Codex sandbox mode for smart replies |
+| `CODEX_YOLO_MODE` | `0` | `1` forces Codex to run with `-a never` (no approval prompts) |
+| `CODEX_YOLO_DANGER` | `0` | `1` adds `--dangerously-bypass-approvals-and-sandbox` (extremely unsafe) |
 | `MAX_REPLY_AGE_SEC` | `900` | Skip stale messages older than this age |
 | `SKIP_PRESTART_BACKLOG` | `1` | Skip messages older than process start |
 
