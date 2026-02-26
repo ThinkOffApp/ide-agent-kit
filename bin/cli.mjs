@@ -3,6 +3,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
 import { parseArgs } from 'node:util';
+import { readFileSync } from 'node:fs';
 import { loadConfig } from '../src/config.mjs';
 import { tmuxRun } from '../src/tmux-runner.mjs';
 import { tailReceipts } from '../src/receipt.mjs';
@@ -22,12 +23,13 @@ import { startRoomAutomation } from '../src/room-automation.mjs';
 import { pollComments, startCommentPoller } from '../src/comment-poller.mjs';
 import { pollDiscord, startDiscordPoller } from '../src/discord-poller.mjs';
 
+const pkg = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'));
 const args = process.argv.slice(2);
 const command = args[0];
 const subcommand = args[1];
 
 function usage() {
-  console.log(`IDE Agent Kit v0.2
+  console.log(`IDE Agent Kit v${pkg.version}
 
 Usage:
   ide-agent-kit serve [--config <path>]
