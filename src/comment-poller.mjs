@@ -107,7 +107,8 @@ function fetchGitHubIssues(owner, repo, token = '') {
       `curl -sS ${authHeader} "https://api.github.com/repos/${owner}/${repo}/issues?state=open&sort=updated&direction=desc&per_page=10"`,
       { encoding: 'utf8', timeout: 15000 }
     );
-    return JSON.parse(result);
+    const data = JSON.parse(result);
+    return Array.isArray(data) ? data : [];
   } catch {
     return [];
   }

@@ -120,6 +120,14 @@ function matchesRule(msg, rule) {
  */
 function executeAction(action, msg, apiKey, config) {
   const startedAt = new Date().toISOString();
+  if (!action) {
+    return createReceipt({
+      actor: { name: 'automation', kind: 'unknown' },
+      action: 'missing action block',
+      status: 'skipped',
+      startedAt,
+    });
+  }
   const room = msg.room || '';
 
   // Template substitution for action fields
