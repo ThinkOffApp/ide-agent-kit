@@ -200,15 +200,54 @@ Config keys: `listen.port`, `github.webhook_secret`, `github.event_kinds`, `queu
 
 Five modules for managing an [OpenClaw](https://openclaw.dev) multi-agent bot fleet via its CLI. Since the OpenClaw gateway uses WebSocket (not HTTP) for RPC, all modules shell out to the `openclaw` CLI, optionally over SSH for cross-user setups.
 
-The **Gateway** module (`src/openclaw-gateway.mjs`) handles starting, stopping, and restarting the OpenClaw gateway, including deep health checks. It is configured via `openclaw.home`, `openclaw.bin`, and `openclaw.ssh` keys.
+**Why this matters:** OpenClaw agents run as long-lived processes with their own models, memory, and tool access. IDE Agent Kit bridges the gap between these agents and your IDE workflow — letting room messages trigger agent actions, receipts flow between agents, and fleet operations happen from a single CLI.
 
-The **Sessions** module (`src/openclaw-sessions.mjs`) sends messages to agents and lists active sessions. It supports agent-to-agent communication via the `openclaw agent` CLI, with the ability to target specific agents by name.
+The **Gateway** module (`src/openclaw-gateway.mjs`) handles starting, stopping, and restarting the OpenClaw gateway, including deep health checks. Use it to ensure your fleet is running before triggering automations.
+
+```bash
+# Check gateway health
+node bin/cli.mjs gateway health
+node bin/cli.mjs gateway health-deep
+
+# List active agents
+node bin/cli.mjs gateway agents
+
+# Restart gateway (e.g. after config change)
+node bin/cli.mjs gateway config-patch --json '{"key": "value"}'
+```
+
+The **Sessions** module (`src/openclaw-sessions.mjs`) sends messages to agents and lists active sessions. Use it for agent-to-agent communication — for example, asking one agent to review another's work.
+
+```bash
+# Send a message to a specific agent
+node bin/cli.mjs gateway trigger --agent ether --message "review PR #6"
+
+# Wake all agents
+node bin/cli.mjs gateway wake --text "new deployment ready" --mode now
+```
 
 The **Exec Approvals** module (`src/openclaw-exec.mjs`) provides a governance layer for agent command execution. It manages an approval queue (pending, allow, deny) and reads OpenClaw's native per-agent, glob-based exec-approvals allowlist from `~/.openclaw/exec-approvals.json`.
 
 The **Hooks** module (`src/openclaw-hooks.mjs`) registers and manages event hooks for agents. Supported events include `message:received`, `message:sent`, `command:new`, `command:reset`, `command:stop`, `agent:bootstrap`, and `gateway:startup`. Hooks can be placed per-agent in `workspace/hooks/` or shared in `~/.openclaw/hooks/`.
 
 The **Cron** module (`src/openclaw-cron.mjs`) handles scheduled task management, letting you list, add, and remove cron tasks for any agent.
+
+```bash
+# List cron jobs
+node bin/cli.mjs cron list
+
+# Add a scheduled poll
+node bin/cli.mjs cron add --name "hourly-comments" --task "poll GitHub comments" --schedule "0 * * * *"
+```
+
+**Example: full OpenClaw + IDE Agent Kit workflow**
+
+1. Room message arrives in Ant Farm → room automation matches a rule
+2. Rule triggers `gateway trigger --agent ether --message "deploy staging"`
+3. Ether agent runs the deployment, writes a receipt
+4. Receipt is appended to the JSONL log with trace ID
+5. Comment poller detects a new GitHub comment on the deploy PR
+6. IDE agent is nudged via tmux to review the comment
 
 ```bash
 # OpenClaw config (in team-relay config file)
