@@ -17,6 +17,9 @@ import { execApprovalRequest, execApprovalWait, execApprovalResolve, execApprova
 import { listHooks, createForwarderHook, deleteHook } from '../src/openclaw-hooks.mjs';
 import { cronList, cronAdd, cronRemove, cronRun, cronStatus } from '../src/openclaw-cron.mjs';
 import { keepaliveStart, keepaliveStop, keepaliveStatus } from '../src/session-keepalive.mjs';
+import { moltbookPost, moltbookFeed } from '../src/moltbook.mjs';
+import { startRoomAutomation } from '../src/room-automation.mjs';
+import { pollComments, startCommentPoller } from '../src/comment-poller.mjs';
 
 const args = process.argv.slice(2);
 const command = args[0];
@@ -88,6 +91,21 @@ Usage:
     start:  Start caffeinate -d -i -s [--heartbeat-sec <n>] [--pid-file <path>]
     stop:   Stop managed caffeinate + heartbeat processes
     status: Show keepalive state, system caffeinate procs, and pmset settings
+
+  ide-agent-kit moltbook <post|feed> [options]
+    Moltbook social platform integration.
+    post:  --content <text> [--submolt <name>] [--title <text>] [--api-key <key>]
+    feed:  [--limit <n>] [--submolt <name>]
+
+  ide-agent-kit automate --rooms <room1,room2> --api-key <key> --handle <@handle> [--interval <sec>] [--config <path>]
+    Run rule-based automation on room messages.
+    Rules are defined in config under automation.rules.
+
+  ide-agent-kit comments <poll|watch> [options]
+    Poll Moltbook posts and GitHub issues/discussions for new comments.
+    poll:   One-shot poll, print new comments as JSON.
+    watch:  Long-running poller with tmux nudge on new comments.
+    Config: comments.moltbook.posts, comments.github.repos
 
   ide-agent-kit init [--ide <claude-code|codex|cursor|vscode|gemini>] [--profile <balanced|low-friction>]
     Generate starter config for your IDE.
@@ -576,6 +594,106 @@ async function main() {
     process.exit(1);
   }
 
+  // ── Moltbook ──────────────────────────────────────────
+  if (command === 'moltbook') {
+    const opts = parseKV(args, subcommand || 'moltbook');
+    const config = loadConfig(opts.config);
+
+    if (subcommand === 'post') {
+      if (!opts.content) { console.error('Error: --content is required'); process.exit(1); }
+      const result = await moltbookPost(config, {
+        content: opts.content,
+        submolt: opts.submolt,
+        title: opts.title,
+        apiKey: opts['api-key']
+      });
+      if (!result.ok) {
+        console.error(`Post failed: ${result.error}`);
+        process.exit(1);
+      }
+      console.log(JSON.stringify(result.data, null, 2));
+      if (result.url) console.log(`URL: ${result.url}`);
+      return;
+    }
+    if (subcommand === 'feed') {
+      const result = await moltbookFeed(config, {
+        limit: opts.limit ? parseInt(opts.limit) : undefined,
+        submolt: opts.submolt,
+        apiKey: opts['api-key']
+      });
+      if (!result.ok) {
+        console.error(`Feed failed: ${result.error}`);
+        process.exit(1);
+      }
+      const posts = result.data?.posts || [];
+      if (posts.length === 0) {
+        console.log('No posts found.');
+      } else {
+        posts.forEach(p => {
+          const author = p.author?.name || '?';
+          const date = (p.created_at || '').slice(0, 19);
+          console.log(`[${date}] @${author}: ${(p.content || '').slice(0, 120)}`);
+          if (p.id) console.log(`  https://www.moltbook.com/post/${p.id}`);
+          console.log();
+        });
+      }
+      return;
+    }
+    console.error('Usage: ide-agent-kit moltbook <post|feed>');
+    process.exit(1);
+  }
+
+  // ── Room Automation ─────────────────────────────────────
+  if (command === 'automate') {
+    const opts = parseKV(args, 'automate');
+    if (!opts.rooms || !opts['api-key'] || !opts.handle) {
+      console.error('Error: --rooms, --api-key, and --handle are required');
+      console.error('Example: ide-agent-kit automate --rooms thinkoff-development --api-key <key> --handle @claudemm');
+      process.exit(1);
+    }
+    const config = loadConfig(opts.config);
+    await startRoomAutomation({
+      rooms: opts.rooms.split(','),
+      apiKey: opts['api-key'],
+      handle: opts.handle,
+      interval: opts.interval ? parseInt(opts.interval) : undefined,
+      config
+    });
+    return;
+  }
+
+  // ── Comment Poller ─────────────────────────────────────
+  if (command === 'comments') {
+    const opts = parseKV(args, subcommand || 'comments');
+    const config = loadConfig(opts.config);
+
+    if (subcommand === 'poll') {
+      const comments = pollComments(config);
+      if (comments.length === 0) {
+        console.log('No new comments.');
+      } else {
+        for (const c of comments) {
+          const sourceLabel = c.source === 'moltbook'
+            ? `moltbook/${c.post_id?.slice(0, 8)}`
+            : `${c.repo}#${c.number}`;
+          console.log(`@${c.author} on ${sourceLabel}: ${c.body.slice(0, 120)}`);
+          if (c.url) console.log(`  ${c.url}`);
+          console.log();
+        }
+      }
+      return;
+    }
+    if (subcommand === 'watch') {
+      await startCommentPoller({
+        config,
+        interval: opts.interval ? parseInt(opts.interval) : undefined
+      });
+      return;
+    }
+    console.error('Usage: ide-agent-kit comments <poll|watch>');
+    process.exit(1);
+  }
+
   if (command === 'init') {
     const opts = parseKV(args, 'init');
     const ide = opts.ide || 'claude-code';
@@ -645,7 +763,14 @@ async function initIdeConfig(ide, profile = 'balanced') {
 # Add commands to tmux.allow to permit them
 # Set github.webhook_secret to verify inbound webhooks
 # Set openclaw.token to connect to your OpenClaw gateway
-# Profile: ${normalizedProfile}`
+# Profile: ${normalizedProfile}
+#
+# To run with full auto-approval (no permission prompts):
+#   claude --dangerously-skip-permissions
+#
+# Or use the generated .claude/settings.json for granular control.
+# WARNING: --dangerously-skip-permissions skips ALL safety prompts.
+# Only use in trusted environments with bounded agent tasks.`
     },
     'codex': {
       filename: 'ide-agent-kit.json',
@@ -747,6 +872,76 @@ async function initIdeConfig(ide, profile = 'balanced') {
   writeFileSync(outPath, JSON.stringify(preset.config, null, 2) + '\n');
   console.log(`Created ${outPath} for ${ide}`);
   console.log(preset.notes);
+
+  // Generate IDE-specific permission settings
+  if (ide === 'claude-code') {
+    const claudeDir = resolve('.claude');
+    if (!existsSync(claudeDir)) mkdirSync(claudeDir, { recursive: true });
+    const settingsPath = resolve('.claude', 'settings.json');
+    if (!existsSync(settingsPath)) {
+      const defaultAllowedTools = [
+        'Bash(node bin/cli.mjs *)',
+        'Bash(node --test *)',
+        'Bash(npm test*)',
+        'Bash(npm run build*)',
+        'Bash(npm run lint*)',
+        'Bash(npm run typecheck*)',
+        'Bash(git status*)',
+        'Bash(git diff*)',
+        'Bash(git log*)',
+        'Bash(git show*)',
+        'Bash(git branch*)',
+        'Bash(git fetch*)',
+        'Bash(gh api *)',
+        'Bash(gh auth status*)',
+        'Bash(gh search *)',
+        'Bash(curl -sS *)',
+        'Bash(lsof *)',
+        'Bash(ps *)',
+        'Bash(tail *)',
+        'Bash(head *)',
+        'Bash(wc *)',
+        'Bash(cat *)',
+        'Bash(ls *)',
+        'Bash(python3 -c *)',
+        'Bash(python3 -m pytest*)',
+        'Bash(kill *)',
+        'Bash(nohup *)',
+      ];
+      const lowFrictionAllowedTools = [
+        ...defaultAllowedTools,
+        'Bash(rg *)',
+        'Bash(jq *)',
+        'Bash(sed *)',
+        'Bash(awk *)',
+        'Bash(git pull --ff-only*)',
+        'Bash(ssh family@localhost *)',
+        'Bash(openclaw *)',
+      ];
+      const settings = {
+        permissions: {
+          allowedTools: normalizedProfile === 'low-friction' ? lowFrictionAllowedTools : defaultAllowedTools,
+          dangerouslySkipPermissions: true
+        }
+      };
+      writeFileSync(settingsPath, JSON.stringify(settings, null, 2) + '\n');
+      console.log(`Created ${settingsPath} with auto-approved commands (profile: ${normalizedProfile})`);
+    } else {
+      console.log(`Claude Code settings already exist: ${settingsPath}`);
+    }
+  }
+
+  if (ide === 'codex') {
+    const codexPath = resolve('codex.json');
+    if (!existsSync(codexPath)) {
+      const codexSettings = {
+        approvalPolicy: normalizedProfile === 'low-friction' ? 'on-request' : 'unless-allow-listed',
+        sandboxMode: 'workspace-write'
+      };
+      writeFileSync(codexPath, JSON.stringify(codexSettings, null, 2) + '\n');
+      console.log(`Created ${codexPath} with Codex approval settings (profile: ${normalizedProfile})`);
+    }
+  }
 }
 
 main().catch(e => {

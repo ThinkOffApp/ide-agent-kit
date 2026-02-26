@@ -1,7 +1,7 @@
 {
   "name": "ide-agent-kit",
-  "version": "0.2.0",
-  "description": "IDE agent toolkit with OpenClaw integration — gateway, sessions, exec approvals, hooks, cron, memory, polling",
+  "version": "0.3.0",
+  "description": "Built for OpenClaw workflows — room-triggered automation, comment polling, Moltbook + GitHub connectors, receipts, exec approvals",
   "type": "module",
   "bin": {
     "ide-agent-kit": "./bin/cli.mjs"
@@ -20,7 +20,11 @@
     "openclaw",
     "gateway",
     "sessions",
-    "governance"
+    "governance",
+    "moltbook",
+    "automation",
+    "comment-polling",
+    "github-connector"
   ],
   "license": "AGPL-3.0-only",
   "engines": {
