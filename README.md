@@ -1,11 +1,18 @@
 # IDE Agent Kit
 
-Local-first. No external server by default.
+Built for [OpenClaw](https://openclaw.dev) workflows. Local-first. No external server by default.
 
-Filesystem message bus for cross-IDE agent coordination. Let IDE AIs (Claude Code, Codex, Cursor, VS Code agents, local LLM assistants) participate in team workflows - including realtime multi-agent communication via shared chat rooms.
+Multi-agent coordination toolkit for IDE AIs (Claude Code, Codex, Cursor, VS Code agents, local LLM assistants). Room-triggered automation, comment polling, and connectors for [Moltbook](https://www.moltbook.com), GitHub, and [Ant Farm](https://antfarm.world) chat rooms.
 
 **Install:** `npm install -g ide-agent-kit`
 **ClawHub:** https://clawhub.ai/ThinkOffApp/ide-agent-kit
+
+### Key integrations
+
+- **OpenClaw** — manage bot fleet gateway, sessions, exec approvals, hooks, and cron via CLI
+- **Moltbook** — post with challenge-verify flow, read feeds, poll comments
+- **GitHub** — webhook ingestion, issue/discussion comment polling, reply connectors
+- **Ant Farm** — room polling, rule-based automation, multi-agent realtime chat
 
 ## How it works
 
@@ -19,14 +26,19 @@ Three agents tested concurrently with <10s response times.
 **Fallback path: tmux runner**
 Run allowlisted commands in a named tmux session, capture output + exit code.
 
-## v0.1 primitives
+## Features
 
-1. **Webhook relay** - ingest GitHub webhooks, normalize to a stable JSON schema, append to a local queue.
-2. **Room poller** - watch Ant Farm chat rooms, auto-ack task requests, nudge IDE agents via tmux.
-3. **tmux runner** - run allowlisted commands in a named tmux session, capture output + exit code.
-4. **Receipts** - append-only JSONL receipts with trace IDs + idempotency keys.
-5. **Session keepalive** - prevent macOS display/idle sleep for long-running remote sessions.
-6. **IDE init** - generate starter configs for Claude Code, Codex, Cursor, or VS Code.
+1. **Room automation** - rule-based matching (keyword, sender, room, regex) on Ant Farm messages → bounded actions (post, exec, nudge) with receipts and cooldowns.
+2. **Comment polling** - poll Moltbook posts and GitHub issues/discussions for new comments, write to event queue, nudge IDE agent.
+3. **Moltbook connector** - post with challenge-verify flow, read feeds, comment polling.
+4. **GitHub connector** - webhook ingestion with HMAC verification, issue/discussion comment polling.
+5. **OpenClaw fleet management** - gateway health, agent sessions, exec approvals, hooks, cron — all via CLI.
+6. **Room poller** - watch Ant Farm chat rooms, auto-ack task requests, nudge IDE agents via tmux.
+7. **Webhook relay** - ingest GitHub webhooks, normalize to a stable JSON schema, append to a local queue.
+8. **tmux runner** - run allowlisted commands in a named tmux session, capture output + exit code.
+9. **Receipts** - append-only JSONL receipts with trace IDs + idempotency keys.
+10. **Session keepalive** - prevent macOS display/idle sleep for long-running remote sessions.
+11. **IDE init** - generate starter configs for Claude Code, Codex, Cursor, or VS Code.
 
 No dependencies. Node.js ≥ 18 only.
 
@@ -209,6 +221,58 @@ The **Cron** module (`src/openclaw-cron.mjs`) handles scheduled task management,
 }
 ```
 
+### Room Automation (`src/room-automation.mjs`)
+
+Rule-based automation triggered by Ant Farm room messages. Define match conditions (keyword, sender, room, regex, mention) and bounded actions (post to room, exec command, nudge tmux). Every action produces a receipt. Includes cooldowns and first-match-only mode to prevent cascading.
+
+```bash
+# Start automation engine
+node bin/cli.mjs automate --rooms thinkoff-development --api-key $KEY --handle @mybot
+
+# Rules in config (ide-agent-kit.json):
+{
+  "automation": {
+    "rules": [
+      { "name": "greet", "match": { "sender": "petrus", "keywords": ["hello"] }, "action": { "type": "post", "room": "${room}", "body": "Hello!" } },
+      { "name": "deploy", "match": { "mention": "@mybot", "regex": "deploy|ship" }, "action": { "type": "nudge", "text": "check rooms" } }
+    ]
+  }
+}
+```
+
+### Comment Polling (`src/comment-poller.mjs`)
+
+Polls Moltbook posts and GitHub issues/discussions for new comments. Writes new comments to the event queue and optionally nudges the IDE tmux session.
+
+```bash
+# One-shot poll
+node bin/cli.mjs comments poll --config ide-agent-kit.json
+
+# Long-running watcher
+node bin/cli.mjs comments watch --config ide-agent-kit.json
+
+# Config:
+{
+  "comments": {
+    "moltbook": { "posts": ["uuid1", "uuid2"] },
+    "github": { "repos": [{ "owner": "org", "repo": "name", "type": "issues" }] },
+    "interval_sec": 120
+  }
+}
+```
+
+### Moltbook (`src/moltbook.mjs`)
+
+Post to [Moltbook](https://www.moltbook.com) with challenge-verify flow, read feeds, and poll comments. Supports submolt targeting and configurable base URLs.
+
+```bash
+# Post to Moltbook
+node bin/cli.mjs moltbook post --content "Hello from my agent" --api-key $KEY
+
+# Read feed
+node bin/cli.mjs moltbook feed --limit 10
+```
+
 ### Ant Farm Chat Rooms (`scripts/room-poll*.`)
 
 See [Room Poller](#room-poller) above. Provides realtime multi-agent communication via shared chat rooms at [antfarm.world](https://antfarm.world).
@@ -226,9 +290,15 @@ See [Room Poller](#room-poller) above. Provides realtime multi-agent communicati
 
 ```
 ide-agent-kit serve [--config <path>]
+ide-agent-kit automate --rooms <rooms> --api-key <key> --handle <@handle> [--interval <sec>]
+ide-agent-kit comments <poll|watch> [--config <path>]
+ide-agent-kit poll --rooms <rooms> --api-key <key> --handle <@handle> [--interval <sec>]
+ide-agent-kit moltbook <post|feed> [--content <text>] [--api-key <key>]
 ide-agent-kit tmux run --cmd <command> [--session <name>] [--cwd <path>] [--timeout-sec <sec>]
 ide-agent-kit emit --to <url> --json <file>
 ide-agent-kit receipt tail [--n <count>]
+ide-agent-kit gateway <health|agents|trigger|wake> [options]
+ide-agent-kit memory <list|get|set|append|delete|search> [options]
 ide-agent-kit init [--ide <claude-code|codex|cursor|vscode|gemini>] [--profile <balanced|low-friction>]
 ide-agent-kit keepalive <start|stop|status> [--pid-file <path>] [--heartbeat-sec <sec>]
 ```
