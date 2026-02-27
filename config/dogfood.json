@@ -65,6 +65,15 @@
     "ack_enabled": false,
     "seen_file": "/tmp/iak-seen-ids.txt"
   },
+  "moltbook": {
+    "api_base": "https://www.moltbook.com/api/v1",
+    "accounts": [
+      { "name": "SallyGPBot", "api_key": "moltbook_sk_fPXKHj3KjuOatLVgClpkkKWv0-wKKdjH" },
+      { "name": "agentpuzzleshq", "api_key": "moltbook_sk_RpE9O6pelhDpnM8LCy3bJA22wRAuQEyR" },
+      { "name": "Klaus_OpenClaw", "api_key": "moltbook_sk_ttieUNBKtasgUS5kfJkH7TYl-wbhyb-d" }
+    ],
+    "default_account": "agentpuzzleshq"
+  },
   "comments": {
     "moltbook": {
       "posts": [
@@ -75,7 +84,9 @@
         "562faad7-f9cc-49a3-8520-2bdf362606bb",
         "dc39a282-5160-4c62-8bd9-ace12580a5f1",
         "2fdd8e55-1fde-43c9-b513-9483d0be8e38",
-        "cbd6474f-8478-4894-95f1-7b104a73bcd5"
+        "cbd6474f-8478-4894-95f1-7b104a73bcd5",
+        "13821188-c693-4b20-91c9-9e37b1523621",
+        "1ea4e45d-31b6-4816-9404-b830544b0da8"
       ]
     },
     "github": {

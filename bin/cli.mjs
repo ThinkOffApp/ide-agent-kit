@@ -22,6 +22,11 @@ import { moltbookPost, moltbookFeed } from '../src/moltbook.mjs';
 import { startRoomAutomation } from '../src/room-automation.mjs';
 import { pollComments, startCommentPoller } from '../src/comment-poller.mjs';
 import { pollDiscord, startDiscordPoller } from '../src/discord-poller.mjs';
+import { UnifiedPoller } from '../src/unified-poller.mjs';
+import { antfarmAdapter } from '../src/adapters/antfarm.mjs';
+import { discordAdapter } from '../src/adapters/discord.mjs';
+import { xforAdapter } from '../src/adapters/xfor.mjs';
+import { commentsAdapter } from '../src/adapters/comments.mjs';
 
 const pkg = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'));
 const args = process.argv.slice(2);
@@ -123,6 +128,17 @@ Usage:
     poll:   One-shot poll, print new messages.
     watch:  Long-running poller with tmux nudge on new messages.
     Config: discord.channels, discord.interval_sec, discord.self_id
+
+  ide-agent-kit xfor <poll|watch> [options]
+    Poll xfor.bot for new posts and notifications.
+    poll:   One-shot poll, print new events.
+    watch:  Long-running poller.
+    Config: xfor.api_key, xfor.handle, xfor.interval_sec
+
+  ide-agent-kit platform <watch|status> [--adapters antfarm,discord,xfor,comments] [--config <path>]
+    Unified platform poller — runs multiple adapters in one process.
+    watch:  Start all adapters (or selected via --adapters).
+    status: Show which adapters are configured.
 
   ide-agent-kit init [--ide <claude-code|codex|cursor|vscode|gemini>] [--profile <balanced|low-friction>]
     Generate starter config for your IDE.
@@ -777,6 +793,90 @@ async function main() {
       return;
     }
     console.error('Usage: ide-agent-kit discord <poll|watch>');
+    process.exit(1);
+  }
+
+  // ── xfor Poller ──────────────────────────────────────
+  if (command === 'xfor') {
+    const opts = parseKV(args, subcommand || 'xfor');
+    const config = loadConfig(opts.config);
+
+    if (subcommand === 'poll') {
+      const poller = new UnifiedPoller(xforAdapter, config);
+      const events = await poller.poll();
+      if (events.length === 0) {
+        console.log('No new xfor events.');
+      } else {
+        for (const e of events) {
+          console.log(`@${e.actor.login} [${e.kind}]: ${e.payload.body.slice(0, 120)}`);
+          if (e.payload.url) console.log(`  ${e.payload.url}`);
+          console.log();
+        }
+      }
+      return;
+    }
+    if (subcommand === 'watch') {
+      const poller = new UnifiedPoller(xforAdapter, config);
+      await poller.start();
+      return;
+    }
+    console.error('Usage: ide-agent-kit xfor <poll|watch>');
+    process.exit(1);
+  }
+
+  // ── Platform (Unified Poller) ──────────────────────
+  if (command === 'platform') {
+    const opts = parseKV(args, subcommand || 'platform');
+    const config = loadConfig(opts.config);
+
+    if (subcommand === 'watch') {
+      const adapterNames = (opts.adapters || 'antfarm,discord,comments,xfor').split(',');
+      const adapterMap = { antfarm: antfarmAdapter, discord: discordAdapter, xfor: xforAdapter, comments: commentsAdapter };
+      const pollers = [];
+
+      for (const name of adapterNames) {
+        const adapter = adapterMap[name.trim()];
+        if (!adapter) {
+          console.error(`Unknown adapter: ${name}. Available: ${Object.keys(adapterMap).join(', ')}`);
+          continue;
+        }
+        const poller = new UnifiedPoller(adapter, config);
+        pollers.push(poller);
+      }
+
+      console.log(`Platform watcher started with adapters: ${adapterNames.join(', ')}`);
+      for (const p of pollers) {
+        await p.seed();
+        setInterval(() => p.poll(), p.interval * 1000);
+      }
+
+      // Initial poll
+      for (const p of pollers) {
+        await p.poll();
+      }
+
+      const shutdown = () => {
+        console.log('\nPlatform watcher stopped.');
+        for (const p of pollers) p.stop();
+        process.exit(0);
+      };
+      process.on('SIGINT', shutdown);
+      process.on('SIGTERM', shutdown);
+      return;
+    }
+
+    if (subcommand === 'status') {
+      const adapterMap = { antfarm: antfarmAdapter, discord: discordAdapter, xfor: xforAdapter, comments: commentsAdapter };
+      console.log('Platform adapters:');
+      for (const [name, adapter] of Object.entries(adapterMap)) {
+        const cfgKey = name === 'antfarm' ? 'poller' : name;
+        const hasCfg = !!(config?.[cfgKey]);
+        console.log(`  ${name}: ${hasCfg ? 'configured' : 'not configured'}`);
+      }
+      return;
+    }
+
+    console.error('Usage: ide-agent-kit platform <watch|status> [--adapters antfarm,discord,xfor,comments]');
     process.exit(1);
   }
 
