@@ -6,6 +6,22 @@ import { randomUUID } from 'node:crypto';
 import { createReceipt, appendReceipt } from './receipt.mjs';
 import { canSend, markSent } from './rate-limiter.mjs';
 
+// Ack-only messages are low-value and cause loops. Filter them out from automation posts.
+const ACK_ONLY_PATTERNS = [
+  'understood', 'agreed', 'proceed', 'perfect', 'exactly',
+  'great', 'good', 'sounds good', 'will do', 'yes',
+  'got it', 'noted', 'copy that', 'roger', 'acknowledged',
+  'excellent', 'right', 'correct', 'ok', 'okay',
+];
+
+function isAckOnly(body) {
+  const cleaned = (body || '').trim().replace(/[.!,]+$/, '').toLowerCase();
+  if (cleaned.length >= 80) return false;
+  return ACK_ONLY_PATTERNS.some(pat =>
+    cleaned === pat || cleaned.startsWith(pat + ' ') || cleaned.startsWith(pat + '.') || cleaned.startsWith(pat + ',')
+  );
+}
+
 /**
  * Room Automation — rule-based automation triggered by Ant Farm room messages.
  *
@@ -63,6 +79,10 @@ function fetchRoomMessages(room, apiKey, limit = 20) {
 }
 
 function postMessage(room, body, apiKey, config) {
+  if (isAckOnly(body)) {
+    console.log(`  ack-only message filtered, skipping post to ${room}: ${body.slice(0, 60)}`);
+    return false;
+  }
   if (!canSend(config)) {
     console.log(`  rate-limited (${config?.rate_limit?.message_interval_sec || 30}s interval), skipping post to ${room}`);
     return false;
@@ -218,6 +238,8 @@ function executeAction(action, msg, apiKey, config) {
  *
  * @param {object} opts - { rooms, apiKey, handle, interval, config, rules }
  */
+export { isAckOnly };
+
 export async function startRoomAutomation({ rooms, apiKey, handle, interval, config }) {
   const rules = config?.automation?.rules || [];
   const seenFile = config?.automation?.seen_file || SEEN_FILE_DEFAULT;
