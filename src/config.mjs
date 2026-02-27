@@ -10,6 +10,7 @@ const DEFAULT_CONFIG = {
   tmux: { default_session: 'iak-runner', ide_session: 'claude', nudge_text: 'check rooms', allow: [] },
   github: { webhook_secret: '', event_kinds: ['pull_request', 'issue_comment', 'check_suite', 'workflow_run'] },
   outbound: { default_webhook_url: '' },
+  rate_limit: { message_interval_sec: 30 },
   automation: {
     rules: [],
     seen_file: '/tmp/iak-automation-seen.txt',
@@ -43,6 +44,7 @@ export function loadConfig(configPath) {
     tmux: { ...DEFAULT_CONFIG.tmux, ...raw.tmux },
     github: { ...DEFAULT_CONFIG.github, ...raw.github },
     outbound: { ...DEFAULT_CONFIG.outbound, ...raw.outbound },
+    rate_limit: { ...DEFAULT_CONFIG.rate_limit, ...raw.rate_limit },
     automation: { ...DEFAULT_CONFIG.automation, ...raw.automation, rules: raw.automation?.rules || [] },
     comments: {
       ...DEFAULT_CONFIG.comments,

@@ -4,6 +4,7 @@ import { execSync } from 'node:child_process';
 import { readFileSync, writeFileSync, appendFileSync, existsSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { createReceipt, appendReceipt } from './receipt.mjs';
+import { canSend, markSent } from './rate-limiter.mjs';
 
 /**
  * Room Automation — rule-based automation triggered by Ant Farm room messages.
@@ -61,13 +62,18 @@ function fetchRoomMessages(room, apiKey, limit = 20) {
   }
 }
 
-function postMessage(room, body, apiKey) {
+function postMessage(room, body, apiKey, config) {
+  if (!canSend(config)) {
+    console.log(`  rate-limited (${config?.rate_limit?.message_interval_sec || 30}s interval), skipping post to ${room}`);
+    return false;
+  }
   const payload = JSON.stringify({ room, body });
   try {
     execSync(
       `curl -sS -X POST "https://antfarm.world/api/v1/messages" -H "X-API-Key: ${apiKey}" -H "Content-Type: application/json" -d '${payload.replace(/'/g, "'\\''")}'`,
       { timeout: 15000 }
     );
+    markSent();
     return true;
   } catch (e) {
     console.error(`  post failed: ${e.message}`);
@@ -139,12 +145,12 @@ function executeAction(action, msg, apiKey, config) {
   if (action.type === 'post') {
     const targetRoom = sub(action.room) || room;
     const body = sub(action.body);
-    const ok = postMessage(targetRoom, body, apiKey);
+    const ok = postMessage(targetRoom, body, apiKey, config);
     return createReceipt({
       actor: { name: config?.poller?.handle || 'ide-agent-kit', kind: 'automation' },
       action: `post to ${targetRoom}`,
-      status: ok ? 'ok' : 'error',
-      notes: ok ? `Posted: ${body.slice(0, 100)}` : 'Post failed',
+      status: ok ? 'ok' : 'rate-limited',
+      notes: ok ? `Posted: ${body.slice(0, 100)}` : 'Rate-limited or post failed',
       startedAt,
     });
   }

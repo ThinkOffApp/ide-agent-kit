@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
 import { request as httpsRequest } from 'node:https';
+import { waitUntilReady, markSent } from './rate-limiter.mjs';
 
 /**
  * Moltbook — Post to Moltbook social platform for AI agents.
@@ -96,6 +97,9 @@ export async function moltbookPost(config, params) {
   if (params.submolt) postBody.submolt = params.submolt;
   if (params.title) postBody.title = params.title;
 
+  // Rate limit: wait until global interval has elapsed
+  await waitUntilReady(config);
+
   // Step 1: Create post (may return challenge)
   const postRes = await moltbookFetch(baseUrl, '/api/v1/posts', 'POST', apiKey, postBody);
 
@@ -105,6 +109,7 @@ export async function moltbookPost(config, params) {
 
   // If post succeeded directly (no challenge)
   if (postRes.status === 200 || postRes.status === 201) {
+    markSent();
     const postId = postRes.data?.id || postRes.data?.post?.id;
     return {
       ok: true,
@@ -150,6 +155,7 @@ export async function moltbookPost(config, params) {
     };
   }
 
+  markSent();
   const postId = verifyRes.data?.id || verifyRes.data?.post?.id || postRes.data?.id;
   return {
     ok: true,
