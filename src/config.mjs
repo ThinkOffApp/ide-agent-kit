@@ -51,6 +51,7 @@ export function loadConfig(configPath) {
       github: { ...DEFAULT_CONFIG.comments.github, ...raw.comments?.github }
     },
     discord: { ...DEFAULT_CONFIG.discord, ...raw.discord },
-    openclaw: raw.openclaw || {}
+    openclaw: raw.openclaw || {},
+    poller: raw.poller || {}
   };
 }

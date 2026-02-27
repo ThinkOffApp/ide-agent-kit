@@ -1,20 +1,27 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
 import { execSync } from 'node:child_process';
-import { readFileSync, writeFileSync, appendFileSync, existsSync } from 'node:fs';
+import { readFileSync, writeFileSync, appendFileSync, existsSync, unlinkSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 
 /**
- * Room Poller — polls Ant Farm room API directly and nudges IDE tmux session.
+ * Room Poller — polls Ant Farm rooms and notifies IDE agent of new messages.
  * Works for any IDE agent (Claude Code, Codex, Gemini, Cursor).
- * No webhooks required — just an API key and a tmux session.
+ * No webhooks required — just an API key.
+ *
+ * Notification delivery (in order of priority):
+ *   1. Notification file (always) — human-readable file that the IDE agent reads
+ *   2. tmux nudge (optional) — types "check rooms" into a tmux session
+ *
+ * The IDE agent calls `rooms check` to read and clear the notification file.
  *
  * Usage:
- *   ide-agent-kit poll --rooms thinkoff-development,feature-admin-planning \
- *     --api-key <key> --handle @myhandle [--interval 30] [--config <path>]
+ *   ide-agent-kit rooms watch --config <path>
+ *   ide-agent-kit rooms check --config <path>
  */
 
 const SEEN_FILE_DEFAULT = '/tmp/iak-seen-ids.txt';
+const NOTIFY_FILE_DEFAULT = '/tmp/iak-new-messages.txt';
 
 function loadSeenIds(path) {
   try {
@@ -61,8 +68,26 @@ async function fetchRoomMessages(room, apiKey, limit = 10) {
   }
 }
 
+/**
+ * Read and clear the notification file. Returns array of message lines.
+ * This is the primary way the IDE agent retrieves new messages.
+ */
+export function checkRoomMessages(config) {
+  const notifyFile = config?.poller?.notification_file || NOTIFY_FILE_DEFAULT;
+  try {
+    const content = readFileSync(notifyFile, 'utf8').trim();
+    if (!content) return [];
+    // Clear the file after reading
+    writeFileSync(notifyFile, '');
+    return content.split('\n').filter(Boolean);
+  } catch {
+    return [];
+  }
+}
+
 export async function startRoomPoller({ rooms, apiKey, handle, interval, config }) {
   const seenFile = config?.poller?.seen_file || SEEN_FILE_DEFAULT;
+  const notifyFile = config?.poller?.notification_file || NOTIFY_FILE_DEFAULT;
   const queuePath = config?.queue?.path || './ide-agent-queue.jsonl';
   const session = config?.tmux?.ide_session || config?.tmux?.default_session || 'claude';
   const nudgeText = config?.tmux?.nudge_text || 'check rooms';
@@ -73,7 +98,8 @@ export async function startRoomPoller({ rooms, apiKey, handle, interval, config 
   console.log(`  rooms: ${rooms.join(', ')}`);
   console.log(`  handle: ${selfHandle} (messages from self are ignored)`);
   console.log(`  interval: ${pollInterval}s`);
-  console.log(`  tmux session: ${session}`);
+  console.log(`  notification file: ${notifyFile}`);
+  console.log(`  tmux session: ${session} (optional)`);
   console.log(`  seen file: ${seenFile}`);
   console.log(`  queue: ${queuePath}`);
 
@@ -92,59 +118,10 @@ export async function startRoomPoller({ rooms, apiKey, handle, interval, config 
     console.log(`  seeded ${seen.size} IDs`);
   }
 
-  const ackEnabled = config?.poller?.ack_enabled !== false;
-  const ownerHandle = (config?.poller?.owner_handle || 'petrus').toLowerCase();
-
-  const TASK_HINTS = [
-    'can you', 'please', 'need to', 'check', 'fix', 'update', 'review',
-    'run', 'deploy', 'implement', 'test', 'restart', 'install', 'respond',
-    'post', 'pull', 'push', 'merge'
-  ];
-
-  function extractMentions(text) {
-    const matches = text.match(/@([a-zA-Z0-9_.-]+)/g) || [];
-    return matches.map(m => m.toLowerCase());
-  }
-
-  function messageTargetsMe(body) {
-    const mentions = extractMentions(body);
-    const myShort = selfHandle.toLowerCase().replace('@', '');
-    if (mentions.length > 0) {
-      return mentions.some(m => m.replace('@', '') === myShort);
-    }
-    return true; // Treat generic owner imperatives as targeted
-  }
-
-  function looksLikeTaskRequest(body) {
-    const text = (body || '').trim().toLowerCase();
-    if (!text) return false;
-    return TASK_HINTS.some(hint => text.includes(hint));
-  }
-
-  function shouldAck(sender, body) {
-    const fromOwner = sender.toLowerCase().includes(ownerHandle);
-    if (!fromOwner) return false;
-    if (!messageTargetsMe(body)) return false;
-    return looksLikeTaskRequest(body);
-  }
-
-  async function postAck(room) {
-    const payload = JSON.stringify({
-      room,
-      body: `@${ownerHandle} [${selfHandle.replace('@', '')}] starting now. I will report back when finished with results.`
-    });
-    try {
-      execSync(
-        `curl -sS -X POST "https://antfarm.world/api/v1/messages" -H "X-API-Key: ${apiKey}" -H "Content-Type: application/json" -d '${payload.replace(/'/g, "'\\''")}'`,
-        { timeout: 15000 }
-      );
-    } catch (e) {
-      console.error(`  post ack failed: ${e.message}`);
-    }
-  }
 
   async function poll() {
     let newCount = 0;
+    const newMessages = [];
     for (const room of rooms) {
       const msgs = await fetchRoomMessages(room, apiKey);
       for (const m of msgs) {
@@ -159,7 +136,7 @@ export async function startRoomPoller({ rooms, apiKey, handle, interval, config 
         const body = (m.body || '').slice(0, 500);
         const ts = m.created_at || new Date().toISOString();
 
-        // Write to queue
+        // Write to structured queue
         const event = {
           trace_id: randomUUID(),
           event_id: mid,
@@ -171,22 +148,25 @@ export async function startRoomPoller({ rooms, apiKey, handle, interval, config 
           payload: { body, room }
         };
         appendFileSync(queuePath, JSON.stringify(event) + '\n');
+
+        // Collect for notification file
+        const line = `[${ts.slice(0, 19)}] [${room}] ${sender}: ${body.replace(/\n/g, ' ').slice(0, 200)}`;
+        newMessages.push(line);
         newCount++;
 
         console.log(`  [${ts.slice(0, 19)}] ${sender} in ${room}: ${body.slice(0, 80)}...`);
-
-        if (ackEnabled && shouldAck(sender, body)) {
-          await postAck(room);
-          console.log(`  posted auto-ack for task from ${sender}`);
-        }
       }
     }
 
     saveSeenIds(seenFile, seen);
 
     if (newCount > 0) {
+      // Primary: write to notification file (always works)
+      appendFileSync(notifyFile, newMessages.join('\n') + '\n');
+
+      // Secondary: try tmux nudge (bonus if IDE is in tmux)
       const nudged = nudgeTmux(session, nudgeText);
-      console.log(`  ${newCount} new message(s) → ${nudged ? 'nudged' : 'no tmux session'}`);
+      console.log(`  ${newCount} new message(s) → notified${nudged ? ' + tmux nudge' : ''}`);
     }
   }
 
@@ -196,18 +176,10 @@ export async function startRoomPoller({ rooms, apiKey, handle, interval, config 
   // Start interval
   const timer = setInterval(poll, pollInterval * 1000);
 
-  // Anti-sleep heartbeat (keeps terminal pseudo-active to prevent display-sleep freeze)
-  const heartbeat = setInterval(() => {
-    try {
-      execSync(`tmux send-keys -t ${JSON.stringify(session)} Escape`);
-    } catch { }
-  }, 4 * 60 * 1000);
-
   // Handle shutdown
   process.on('SIGINT', () => {
     console.log('\nPoller stopped.');
     clearInterval(timer);
-    clearInterval(heartbeat);
     process.exit(0);
   });
   process.on('SIGTERM', () => {

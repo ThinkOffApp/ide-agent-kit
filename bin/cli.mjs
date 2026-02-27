@@ -10,7 +10,7 @@ import { tailReceipts } from '../src/receipt.mjs';
 import { startWebhookServer } from '../src/webhook-server.mjs';
 import { emitJson } from '../src/emit.mjs';
 import { watchQueue } from '../src/watch.mjs';
-import { startRoomPoller } from '../src/room-poller.mjs';
+import { startRoomPoller, checkRoomMessages } from '../src/room-poller.mjs';
 import { memoryList, memoryGet, memorySet, memoryAppend, memoryDelete, memorySearch } from '../src/memory.mjs';
 import { triggerAgent, healthCheck, healthDeep, agentsList, configGet, configPatch, gatewayRestart } from '../src/openclaw-gateway.mjs';
 import { sessionsSend, sessionsSpawn, sessionsList, sessionsHistory, sessionsStatus } from '../src/openclaw-sessions.mjs';
@@ -47,8 +47,16 @@ Usage:
   ide-agent-kit watch [--config <path>]
     Watch the event queue and nudge IDE tmux session on new events.
 
+  ide-agent-kit rooms check [--config <path>]
+    Read and display new room messages from the notification file, then clear it.
+    This is the primary way to retrieve messages from the poller.
+
+  ide-agent-kit rooms watch [--config <path>]
+    Long-running room poller. Writes new messages to a notification file and
+    optional tmux nudge. Uses rooms/apiKey/handle from config.poller section.
+
   ide-agent-kit poll --rooms <room1,room2> --api-key <key> --handle <@handle> [--interval <sec>] [--config <path>]
-    Poll Ant Farm rooms directly and nudge IDE tmux session on new messages.
+    (Legacy) Poll Ant Farm rooms with explicit CLI args. Prefer "rooms watch".
 
   ide-agent-kit memory <list|get|set|append|delete|search> [options]
     Manage agent memory (local or OpenClaw backend).
@@ -222,6 +230,47 @@ async function main() {
     return;
   }
 
+  // ── Rooms ──────────────────────────────────────────────
+  if (command === 'rooms') {
+    const opts = parseKV(args, subcommand || 'rooms');
+    const config = loadConfig(opts.config);
+
+    if (subcommand === 'check') {
+      const messages = checkRoomMessages(config);
+      if (messages.length === 0) {
+        console.log('No new room messages.');
+      } else {
+        console.log(`${messages.length} new message(s):\n`);
+        for (const line of messages) {
+          console.log(line);
+        }
+      }
+      return;
+    }
+
+    if (subcommand === 'watch') {
+      const pollerRooms = config?.poller?.rooms;
+      const pollerApiKey = config?.poller?.api_key;
+      const pollerHandle = config?.poller?.handle;
+      if (!pollerRooms || !pollerApiKey || !pollerHandle) {
+        console.error('Error: poller.rooms, poller.api_key, and poller.handle must be set in config');
+        process.exit(1);
+      }
+      await startRoomPoller({
+        rooms: pollerRooms,
+        apiKey: pollerApiKey,
+        handle: pollerHandle,
+        interval: opts.interval ? parseInt(opts.interval) : undefined,
+        config
+      });
+      return;
+    }
+
+    console.error('Usage: ide-agent-kit rooms <check|watch> [--config <path>]');
+    process.exit(1);
+  }
+
+  // ── Legacy Poll (prefer "rooms watch") ────────────────
   if (command === 'poll') {
     const opts = parseKV(args, 'poll');
     if (!opts.rooms || !opts['api-key'] || !opts.handle) {
