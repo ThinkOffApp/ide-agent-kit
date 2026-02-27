@@ -965,50 +965,19 @@ async function initIdeConfig(ide, profile = 'balanced') {
     if (!existsSync(claudeDir)) mkdirSync(claudeDir, { recursive: true });
     const settingsPath = resolve('.claude', 'settings.json');
     if (!existsSync(settingsPath)) {
-      const defaultAllowedTools = [
-        'Bash(node bin/cli.mjs *)',
-        'Bash(node --test *)',
-        'Bash(npm test*)',
-        'Bash(npm run build*)',
-        'Bash(npm run lint*)',
-        'Bash(npm run typecheck*)',
-        'Bash(git status*)',
-        'Bash(git diff*)',
-        'Bash(git log*)',
-        'Bash(git show*)',
-        'Bash(git branch*)',
-        'Bash(git fetch*)',
-        'Bash(gh api *)',
-        'Bash(gh auth status*)',
-        'Bash(gh search *)',
-        'Bash(curl -sS *)',
-        'Bash(lsof *)',
-        'Bash(ps *)',
-        'Bash(tail *)',
-        'Bash(head *)',
-        'Bash(wc *)',
-        'Bash(cat *)',
-        'Bash(ls *)',
-        'Bash(python3 -c *)',
-        'Bash(python3 -m pytest*)',
-        'Bash(kill *)',
-        'Bash(nohup *)',
-      ];
-      const lowFrictionAllowedTools = [
-        ...defaultAllowedTools,
-        'Bash(rg *)',
-        'Bash(jq *)',
-        'Bash(sed *)',
-        'Bash(awk *)',
-        'Bash(git pull --ff-only*)',
-        'Bash(ssh family@localhost *)',
-        'Bash(openclaw *)',
-      ];
       const settings = {
         permissions: {
-          allowedTools: normalizedProfile === 'low-friction' ? lowFrictionAllowedTools : defaultAllowedTools,
-          dangerouslySkipPermissions: true
-        }
+          allow: [
+            'Bash',
+            'Read',
+            'Edit',
+            'Write',
+            'Glob',
+            'Grep',
+            'WebFetch',
+            'WebSearch',
+          ],
+        },
       };
       writeFileSync(settingsPath, JSON.stringify(settings, null, 2) + '\n');
       console.log(`Created ${settingsPath} with auto-approved commands (profile: ${normalizedProfile})`);

@@ -1,0 +1,116 @@
+{
+  "listen": {
+    "host": "127.0.0.1",
+    "port": 8787
+  },
+  "queue": {
+    "path": "./ide-agent-queue.jsonl"
+  },
+  "receipts": {
+    "path": "./ide-agent-receipts.jsonl",
+    "stdout_tail_lines": 80
+  },
+  "tmux": {
+    "default_session": "iak-runner",
+    "ide_session": "claude",
+    "nudge_text": "check rooms",
+    "allow": [
+      "npm test",
+      "npm run build",
+      "pytest",
+      "git status",
+      "git diff"
+    ]
+  },
+  "github": {
+    "webhook_secret": "",
+    "event_kinds": [
+      "pull_request",
+      "issue_comment"
+    ]
+  },
+  "outbound": {
+    "default_webhook_url": ""
+  },
+  "rate_limit": {
+    "message_interval_sec": 30
+  },
+  "openclaw": {
+    "home": "/Users/family/openclaw",
+    "bin": "/opt/homebrew/bin/openclaw",
+    "ssh": "family@localhost",
+    "host": "127.0.0.1",
+    "port": 18791,
+    "token": ""
+  },
+  "discord": {
+    "channels": [
+      { "id": "1474426061218386094", "name": "general" },
+      { "id": "1474427350434189352", "name": "agent-puzzles" },
+      { "id": "1474427384945184932", "name": "outreach" },
+      { "id": "1474427386693943296", "name": "bot-fleet" },
+      { "id": "1474427387621015606", "name": "dev" }
+    ],
+    "interval_sec": 30,
+    "self_id": "1474422169470636134",
+    "skip_bots": false,
+    "seen_file": "/tmp/iak-discord-seen.txt"
+  },
+  "poller": {
+    "rooms": ["thinkoff-development", "feature-admin-planning", "lattice-qcd"],
+    "api_key": "xfb_a71acdf98be644bd0b015c39cf18dfcff333cc3e4bc83484c2cae9400fde8fcc",
+    "handle": "@claudemm",
+    "interval_sec": 10,
+    "owner_handle": "petrus",
+    "ack_enabled": false,
+    "seen_file": "/tmp/iak-seen-ids.txt"
+  },
+  "comments": {
+    "moltbook": {
+      "posts": [
+        "c827bb23-0779-41bb-8814-ce0d0b733103",
+        "2f5001f9-c96f-493c-ade9-455400abccaa",
+        "0c1eea58-9ed3-4b13-b644-63c22f3a6d34",
+        "3253574f-6236-4f2e-8e02-6f354a424eaf",
+        "562faad7-f9cc-49a3-8520-2bdf362606bb",
+        "dc39a282-5160-4c62-8bd9-ace12580a5f1",
+        "2fdd8e55-1fde-43c9-b513-9483d0be8e38",
+        "cbd6474f-8478-4894-95f1-7b104a73bcd5"
+      ]
+    },
+    "github": {
+      "repos": [
+        { "owner": "ThinkOffApp", "repo": "ide-agent-kit", "type": "issues" },
+        { "owner": "HKUDS", "repo": "nanobot", "number": 431, "type": "discussion" },
+        { "owner": "anthropics", "repo": "claude-code", "number": 28520, "type": "issues" },
+        { "owner": "bradygaster", "repo": "squad", "number": 24, "type": "issues" },
+        { "owner": "microsoft", "repo": "agent-framework", "number": 1092, "type": "discussion" }
+      ]
+    },
+    "interval_sec": 120,
+    "seen_file": "/tmp/iak-comment-seen.txt"
+  },
+  "automation": {
+    "rules": [
+      {
+        "name": "owner-task-nudge",
+        "match": { "sender": "petrus", "mention": "@claudemm" },
+        "action": { "type": "nudge", "text": "check rooms" }
+      },
+      {
+        "name": "check-comments-request",
+        "match": { "sender": "petrus", "keywords": ["check comments", "poll comments", "new comments"] },
+        "action": { "type": "nudge", "text": "check comments" }
+      },
+      {
+        "name": "status-request",
+        "match": { "sender": "petrus", "keywords": ["status", "how are you"] },
+        "action": { "type": "nudge", "text": "check rooms" }
+      }
+    ],
+    "cooldown_sec": 10,
+    "interval_sec": 15,
+    "first_match_only": true,
+    "seen_file": "/tmp/iak-automation-seen.txt"
+  }
+}
