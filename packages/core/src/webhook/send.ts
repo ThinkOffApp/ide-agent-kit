@@ -73,25 +73,20 @@ export async function processWebhookQueue(
   const batchSize = opts?.batchSize ?? 10;
   const maxAttempts = opts?.maxAttempts ?? 5;
 
-  // Claim items atomically by setting status to 'processing' to prevent double-delivery
+  // Atomic claim: update status to 'processing' and return claimed rows in one operation.
+  // Uses Supabase's update().select() which maps to UPDATE ... RETURNING.
   const { data: items } = await supabase
     .from('webhook_queue')
-    .select('*')
+    .update({ status: 'processing' })
     .in('status', ['pending', 'failed'])
     .lt('attempts', maxAttempts)
     .order('last_attempt_at', { ascending: true, nullsFirst: true })
-    .limit(batchSize);
+    .limit(batchSize)
+    .select('*');
 
   if (!items || items.length === 0) {
     return { processed: 0, delivered: 0, failed: 0 };
   }
-
-  // Claim batch — mark as processing so concurrent workers skip these
-  const ids = items.map((item: WebhookQueueItem) => item.id);
-  await supabase
-    .from('webhook_queue')
-    .update({ status: 'processing' })
-    .in('id', ids);
 
   let delivered = 0;
   let failed = 0;

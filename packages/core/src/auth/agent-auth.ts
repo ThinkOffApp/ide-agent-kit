@@ -53,7 +53,7 @@ export async function getAgentByApiKey(
     .single();
 
   if (error || !data) return null;
-  return data as AuthenticatedAgent;
+  return data as unknown as AuthenticatedAgent;
 }
 
 /**
