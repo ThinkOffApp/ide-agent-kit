@@ -37,6 +37,7 @@ export class UnifiedPoller {
     this.interval = adapterCfg.interval_sec || 30;
 
     this.seen = loadSeenIds(this.seenFile, this.maxSeenIds);
+    this._polling = false;
   }
 
   /**
@@ -44,10 +45,14 @@ export class UnifiedPoller {
    * Returns array of new events.
    */
   async poll() {
+    if (this._polling) return [];
+    this._polling = true;
+
     let messages;
     try {
       messages = await this.adapter.fetch(this.config);
     } catch (e) {
+      this._polling = false;
       console.error(`  ${this.adapter.name} fetch error: ${e.message}`);
       this.logReceipt({ action: 'fetch', status: 'error', error: e.message });
       return [];
@@ -87,6 +92,7 @@ export class UnifiedPoller {
       });
     }
 
+    this._polling = false;
     return newEvents;
   }
 
