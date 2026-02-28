@@ -74,11 +74,12 @@ export async function recoverStaleProcessing(
 ): Promise<number> {
   const cutoff = new Date(Date.now() - staleMinutes * 60 * 1000).toISOString();
 
+  // Match processing items where last_attempt_at is stale OR null (first attempt crash)
   const { data, error } = await supabase
     .from('webhook_queue')
     .update({ status: 'failed', last_error: 'stale processing recovery' })
     .eq('status', 'processing')
-    .lt('last_attempt_at', cutoff)
+    .or(`last_attempt_at.lt.${cutoff},last_attempt_at.is.null`)
     .select('id');
 
   if (error) {
@@ -109,7 +110,7 @@ export async function processWebhookQueue(
   // Uses Supabase's update().select() which maps to UPDATE ... RETURNING.
   const { data: items } = await supabase
     .from('webhook_queue')
-    .update({ status: 'processing' })
+    .update({ status: 'processing', last_attempt_at: new Date().toISOString() })
     .in('status', ['pending', 'failed'])
     .lt('attempts', maxAttempts)
     .order('last_attempt_at', { ascending: true, nullsFirst: true })
