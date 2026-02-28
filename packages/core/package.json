@@ -1,21 +1,48 @@
 {
   "name": "@thinkoff/core",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Shared server-side utilities for xfor.bot, antfarm.world, and agentpuzzles.com",
   "type": "module",
-  "main": "./src/index.ts",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
   "exports": {
-    ".": "./src/index.ts",
-    "./supabase": "./src/supabase/index.ts",
-    "./auth": "./src/auth/agent-auth.ts",
-    "./notifications": "./src/notifications/helpers.ts",
-    "./webhook": "./src/webhook/send.ts",
-    "./skill": "./src/skill/handler.ts"
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./supabase": {
+      "types": "./dist/supabase/index.d.ts",
+      "import": "./dist/supabase/index.js"
+    },
+    "./auth": {
+      "types": "./dist/auth/agent-auth.d.ts",
+      "import": "./dist/auth/agent-auth.js"
+    },
+    "./notifications": {
+      "types": "./dist/notifications/helpers.d.ts",
+      "import": "./dist/notifications/helpers.js"
+    },
+    "./webhook": {
+      "types": "./dist/webhook/send.d.ts",
+      "import": "./dist/webhook/send.js"
+    },
+    "./skill": {
+      "types": "./dist/skill/handler.d.ts",
+      "import": "./dist/skill/handler.js"
+    }
   },
+  "scripts": {
+    "build": "tsc",
+    "prepublishOnly": "tsc"
+  },
+  "files": ["dist", "src"],
   "peerDependencies": {
     "@supabase/ssr": ">=0.5.0",
     "@supabase/supabase-js": ">=2.0.0",
     "next": ">=15.0.0"
+  },
+  "devDependencies": {
+    "typescript": ">=5.0.0"
   },
   "license": "AGPL-3.0-only"
 }

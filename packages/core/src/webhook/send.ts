@@ -21,10 +21,10 @@ export async function sendWebhook<T = unknown>(
   const timeout = opts?.timeout ?? 10000;
   const userAgent = opts?.userAgent ?? 'ThinkOff-Webhook/1.0';
 
-  try {
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), timeout);
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeout);
 
+  try {
     const response = await fetch(url, {
       method: 'POST',
       headers: {
@@ -35,12 +35,13 @@ export async function sendWebhook<T = unknown>(
       signal: controller.signal,
     });
 
-    clearTimeout(timer);
     return { ok: response.ok, status: response.status };
   } catch (e) {
     const message = e instanceof Error ? e.message : 'unknown error';
     console.error(`[webhook] ${url} failed: ${message}`);
     return { ok: false, error: message };
+  } finally {
+    clearTimeout(timer);
   }
 }
 
@@ -72,6 +73,7 @@ export async function processWebhookQueue(
   const batchSize = opts?.batchSize ?? 10;
   const maxAttempts = opts?.maxAttempts ?? 5;
 
+  // Claim items atomically by setting status to 'processing' to prevent double-delivery
   const { data: items } = await supabase
     .from('webhook_queue')
     .select('*')
@@ -83,6 +85,13 @@ export async function processWebhookQueue(
   if (!items || items.length === 0) {
     return { processed: 0, delivered: 0, failed: 0 };
   }
+
+  // Claim batch — mark as processing so concurrent workers skip these
+  const ids = items.map((item: WebhookQueueItem) => item.id);
+  await supabase
+    .from('webhook_queue')
+    .update({ status: 'processing' })
+    .in('id', ids);
 
   let delivered = 0;
   let failed = 0;

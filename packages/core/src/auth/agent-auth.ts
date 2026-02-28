@@ -18,13 +18,15 @@ export interface AuthenticatedAgent {
 export function extractApiKey(request: Request): string | null {
   const authHeader = request.headers.get('Authorization');
   if (authHeader?.startsWith('Bearer ')) {
-    return authHeader.slice(7);
+    const key = authHeader.slice(7).trim();
+    return key.length > 0 ? key : null;
   }
-  return (
+  const key = (
     request.headers.get('X-Agent-Key') ||
     request.headers.get('X-API-Key') ||
-    null
-  );
+    ''
+  ).trim();
+  return key.length > 0 ? key : null;
 }
 
 /**
