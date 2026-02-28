@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
-import { execSync } from 'node:child_process';
+import { execFileSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 
 /**
@@ -13,10 +13,9 @@ import { randomUUID } from 'node:crypto';
 function xforFetch(path, apiKey) {
   const url = `https://xfor.bot/api/v1${path}`;
   try {
-    const result = execSync(
-      `curl -sS -H "X-API-Key: ${apiKey}" "${url}"`,
-      { encoding: 'utf8', timeout: 15000 }
-    );
+    const result = execFileSync('curl', ['-sS', '-H', `X-API-Key: ${apiKey}`, url], {
+      encoding: 'utf8', timeout: 15000
+    });
     return JSON.parse(result);
   } catch (e) {
     console.error(`  xfor fetch ${path} failed: ${e.message}`);

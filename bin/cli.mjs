@@ -845,15 +845,6 @@ async function main() {
       }
 
       console.log(`Platform watcher started with adapters: ${adapterNames.join(', ')}`);
-      for (const p of pollers) {
-        await p.seed();
-        setInterval(() => p.poll(), p.interval * 1000);
-      }
-
-      // Initial poll
-      for (const p of pollers) {
-        await p.poll();
-      }
 
       const shutdown = () => {
         console.log('\nPlatform watcher stopped.');
@@ -862,6 +853,11 @@ async function main() {
       };
       process.on('SIGINT', shutdown);
       process.on('SIGTERM', shutdown);
+
+      // start() handles seed, initial poll, and interval internally
+      for (const p of pollers) {
+        await p.start();
+      }
       return;
     }
 

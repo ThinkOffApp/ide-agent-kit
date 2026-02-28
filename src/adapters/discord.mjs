@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
-import { execSync } from 'node:child_process';
+import { execFileSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 
 /**
@@ -36,11 +36,20 @@ export const discordAdapter = {
       const channelName = typeof ch === 'string' ? ch : (ch.name || ch.id);
       const envPrefix = `export PATH=/opt/homebrew/bin:$PATH && export OPENCLAW_HOME=${oc.home}`;
       const ocCmd = `${oc.bin} message read --channel discord --target ${channelId} --limit 20 --json`;
-      const cmd = oc.ssh
-        ? `ssh ${oc.ssh} '${envPrefix} && ${ocCmd}'`
-        : `${envPrefix} && ${ocCmd}`;
       try {
-        const result = execSync(cmd, { encoding: 'utf8', timeout: 30000, stdio: ['pipe', 'pipe', 'pipe'] });
+        let result;
+        if (oc.ssh) {
+          result = execFileSync('ssh', [oc.ssh, `${envPrefix} && ${ocCmd}`], {
+            encoding: 'utf8', timeout: 30000, stdio: ['pipe', 'pipe', 'pipe']
+          });
+        } else {
+          result = execFileSync(oc.bin, [
+            'message', 'read', '--channel', 'discord', '--target', channelId, '--limit', '20', '--json'
+          ], {
+            encoding: 'utf8', timeout: 30000, stdio: ['pipe', 'pipe', 'pipe'],
+            env: { ...process.env, OPENCLAW_HOME: oc.home }
+          });
+        }
         const data = JSON.parse(result);
         if (!data?.payload?.ok) continue;
         const msgs = data.payload.messages || [];

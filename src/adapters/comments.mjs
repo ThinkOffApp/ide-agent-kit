@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
-import { execSync } from 'node:child_process';
+import { execFileSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 
 /**
@@ -10,10 +10,10 @@ import { randomUUID } from 'node:crypto';
 
 function fetchMoltbookComments(postId, baseUrl = 'https://www.moltbook.com') {
   try {
-    const result = execSync(
-      `curl -sS "${baseUrl}/api/v1/posts/${postId}/comments"`,
-      { encoding: 'utf8', timeout: 15000 }
-    );
+    const url = `${baseUrl}/api/v1/posts/${postId}/comments`;
+    const result = execFileSync('curl', ['-sS', url], {
+      encoding: 'utf8', timeout: 15000
+    });
     const data = JSON.parse(result);
     return Array.isArray(data) ? data : (data.comments || []);
   } catch (e) {
@@ -23,15 +23,16 @@ function fetchMoltbookComments(postId, baseUrl = 'https://www.moltbook.com') {
 }
 
 function fetchGitHubComments(owner, repo, number, type = 'issues', token = '') {
-  const authHeader = token ? `-H "Authorization: token ${token}"` : '';
   const endpoint = type === 'discussion'
     ? `https://api.github.com/repos/${owner}/${repo}/discussions/${number}/comments`
     : `https://api.github.com/repos/${owner}/${repo}/issues/${number}/comments`;
+  const curlArgs = ['-sS'];
+  if (token) curlArgs.push('-H', `Authorization: token ${token}`);
+  curlArgs.push(`${endpoint}?per_page=50&sort=created&direction=desc`);
   try {
-    const result = execSync(
-      `curl -sS ${authHeader} "${endpoint}?per_page=50&sort=created&direction=desc"`,
-      { encoding: 'utf8', timeout: 15000 }
-    );
+    const result = execFileSync('curl', curlArgs, {
+      encoding: 'utf8', timeout: 15000
+    });
     const data = JSON.parse(result);
     return Array.isArray(data) ? data : [];
   } catch (e) {
@@ -41,12 +42,13 @@ function fetchGitHubComments(owner, repo, number, type = 'issues', token = '') {
 }
 
 function fetchGitHubIssues(owner, repo, token = '') {
-  const authHeader = token ? `-H "Authorization: token ${token}"` : '';
+  const curlArgs = ['-sS'];
+  if (token) curlArgs.push('-H', `Authorization: token ${token}`);
+  curlArgs.push(`https://api.github.com/repos/${owner}/${repo}/issues?state=open&sort=updated&direction=desc&per_page=10`);
   try {
-    const result = execSync(
-      `curl -sS ${authHeader} "https://api.github.com/repos/${owner}/${repo}/issues?state=open&sort=updated&direction=desc&per_page=10"`,
-      { encoding: 'utf8', timeout: 15000 }
-    );
+    const result = execFileSync('curl', curlArgs, {
+      encoding: 'utf8', timeout: 15000
+    });
     const data = JSON.parse(result);
     return Array.isArray(data) ? data : [];
   } catch {

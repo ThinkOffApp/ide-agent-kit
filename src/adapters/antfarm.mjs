@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
-import { execSync } from 'node:child_process';
+import { execFileSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 
 /**
@@ -20,10 +20,9 @@ export const antfarmAdapter = {
     for (const room of rooms) {
       const url = `https://antfarm.world/api/v1/rooms/${room}/messages?limit=${limit}`;
       try {
-        const result = execSync(
-          `curl -sS -H "X-API-Key: ${apiKey}" "${url}"`,
-          { encoding: 'utf8', timeout: 15000 }
-        );
+        const result = execFileSync('curl', ['-sS', '-H', `X-API-Key: ${apiKey}`, url], {
+          encoding: 'utf8', timeout: 15000
+        });
         const data = JSON.parse(result);
         const msgs = data.messages || (Array.isArray(data) ? data : []);
         for (const m of msgs) {
