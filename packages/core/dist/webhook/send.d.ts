@@ -27,6 +27,11 @@ export interface WebhookQueueItem {
     attempts: number;
 }
 /**
+ * Recover items stuck in 'processing' status (worker crashed mid-flight).
+ * Resets them to 'failed' so the next processWebhookQueue cycle picks them up.
+ */
+export declare function recoverStaleProcessing(supabase: SupabaseClient, staleMinutes?: number): Promise<number>;
+/**
  * Process pending webhook queue items with retry.
  * Reads from the shared webhook_queue table, fires each, updates status.
  */

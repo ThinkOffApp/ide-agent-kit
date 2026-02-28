@@ -3,5 +3,5 @@
 export { createBrowserSupabase, createServerSupabase, createServiceSupabase } from './supabase/index.js';
 export { extractApiKey, hashApiKey, getAgentByApiKey, authenticateAgent } from './auth/agent-auth.js';
 export { createNotification, getUnreadCount, markNotificationsRead } from './notifications/helpers.js';
-export { sendWebhook, extractMentions, processWebhookQueue } from './webhook/send.js';
+export { sendWebhook, extractMentions, processWebhookQueue, recoverStaleProcessing } from './webhook/send.js';
 export { createSkillHandler } from './skill/handler.js';

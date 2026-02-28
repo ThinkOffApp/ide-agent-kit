@@ -62,6 +62,35 @@ export interface WebhookQueueItem {
   attempts: number;
 }
 
+const STALE_PROCESSING_MINUTES = 5;
+
+/**
+ * Recover items stuck in 'processing' status (worker crashed mid-flight).
+ * Resets them to 'failed' so the next processWebhookQueue cycle picks them up.
+ */
+export async function recoverStaleProcessing(
+  supabase: SupabaseClient,
+  staleMinutes = STALE_PROCESSING_MINUTES
+): Promise<number> {
+  const cutoff = new Date(Date.now() - staleMinutes * 60 * 1000).toISOString();
+
+  const { data, error } = await supabase
+    .from('webhook_queue')
+    .update({ status: 'failed', last_error: 'stale processing recovery' })
+    .eq('status', 'processing')
+    .lt('last_attempt_at', cutoff)
+    .select('id');
+
+  if (error) {
+    console.error('[webhook] stale recovery error:', error);
+    return 0;
+  }
+  if (data && data.length > 0) {
+    console.log(`[webhook] recovered ${data.length} stale processing item(s)`);
+  }
+  return data?.length ?? 0;
+}
+
 /**
  * Process pending webhook queue items with retry.
  * Reads from the shared webhook_queue table, fires each, updates status.
@@ -72,6 +101,9 @@ export async function processWebhookQueue(
 ): Promise<{ processed: number; delivered: number; failed: number }> {
   const batchSize = opts?.batchSize ?? 10;
   const maxAttempts = opts?.maxAttempts ?? 5;
+
+  // Recover any items stuck in 'processing' from a previous crashed run
+  await recoverStaleProcessing(supabase);
 
   // Atomic claim: update status to 'processing' and return claimed rows in one operation.
   // Uses Supabase's update().select() which maps to UPDATE ... RETURNING.
