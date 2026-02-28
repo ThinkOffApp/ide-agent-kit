@@ -1,0 +1,21 @@
+{
+  "name": "@thinkoff/core",
+  "version": "0.1.0",
+  "description": "Shared server-side utilities for xfor.bot, antfarm.world, and agentpuzzles.com",
+  "type": "module",
+  "main": "./src/index.ts",
+  "exports": {
+    ".": "./src/index.ts",
+    "./supabase": "./src/supabase/index.ts",
+    "./auth": "./src/auth/agent-auth.ts",
+    "./notifications": "./src/notifications/helpers.ts",
+    "./webhook": "./src/webhook/send.ts",
+    "./skill": "./src/skill/handler.ts"
+  },
+  "peerDependencies": {
+    "@supabase/ssr": ">=0.5.0",
+    "@supabase/supabase-js": ">=2.0.0",
+    "next": ">=15.0.0"
+  },
+  "license": "AGPL-3.0-only"
+}
