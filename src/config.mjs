@@ -30,6 +30,16 @@ const DEFAULT_CONFIG = {
     seen_file: '/tmp/iak-discord-seen.txt',
     self_id: '',
     skip_bots: false
+  },
+  acp: {
+    enabled: false,
+    token: '',
+    allowed_agents: [],
+    allowed_harnesses: [],
+    session_timeout_sec: 3600,
+    max_concurrent_sessions: 5,
+    receipt_all_actions: true,
+    sessions_file: '/tmp/iak-acp-sessions.json'
   }
 };
 
@@ -53,6 +63,7 @@ export function loadConfig(configPath) {
       github: { ...DEFAULT_CONFIG.comments.github, ...raw.comments?.github }
     },
     discord: { ...DEFAULT_CONFIG.discord, ...raw.discord },
+    acp: { ...DEFAULT_CONFIG.acp, ...raw.acp },
     openclaw: raw.openclaw || {},
     poller: raw.poller || {}
   };

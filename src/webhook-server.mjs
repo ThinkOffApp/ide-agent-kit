@@ -5,6 +5,7 @@ import { createHmac, timingSafeEqual } from 'node:crypto';
 import { appendFileSync } from 'node:fs';
 import { execSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
+import { isEnabled as acpEnabled, validateToken as acpValidateToken, createSession, sendToSession, closeSession, getSession, listSessions } from './acp-sessions.mjs';
 
 function nudgeTmux(session) {
   try {
@@ -192,6 +193,136 @@ export function startWebhookServer(config, onEvent) {
       return;
     }
 
+    // ACP (Agent Client Protocol) endpoint — locked internal mode
+    if (req.method === 'POST' && req.url === '/acp') {
+      if (!acpEnabled(config)) {
+        res.writeHead(403, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'ACP is not enabled' }));
+        return;
+      }
+
+      const chunks = [];
+      for await (const chunk of req) chunks.push(chunk);
+      let body;
+      try { body = JSON.parse(Buffer.concat(chunks).toString()); } catch {
+        res.writeHead(400);
+        res.end('Invalid JSON');
+        return;
+      }
+
+      // Token-gated access
+      const token = body.token || req.headers['x-acp-token'] || '';
+      if (!acpValidateToken(config, token)) {
+        res.writeHead(401, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'Invalid ACP token' }));
+        return;
+      }
+
+      const action = body.action;
+
+      if (action === 'session.create') {
+        const result = createSession(config, {
+          agentId: body.agent_id,
+          task: body.task,
+          harnessId: body.harness_id,
+          threadId: body.thread_id,
+          mode: body.mode
+        });
+
+        if (result.ok) {
+          // Queue an event for the session creation
+          const event = {
+            trace_id: randomUUID(),
+            event_id: result.session.id,
+            source: 'acp',
+            kind: 'acp.session.created',
+            timestamp: result.session.created_at,
+            actor: { login: body.agent_id || 'acp' },
+            payload: { task: body.task || '', session_id: result.session.id, mode: body.mode || 'one-shot' }
+          };
+          appendFileSync(queuePath, JSON.stringify(event) + '\n');
+          if (onEvent) onEvent(event);
+          nudgeTmux(config.tmux?.ide_session || config.tmux?.default_session || 'claude');
+          console.log(`[acp] Session created: ${result.session.id} for ${body.agent_id || 'unknown'}`);
+        }
+
+        const status = result.ok ? 201 : 403;
+        res.writeHead(status, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify(result));
+        return;
+      }
+
+      if (action === 'session.send') {
+        if (!body.session_id) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'session_id required' }));
+          return;
+        }
+        const result = sendToSession(config, body.session_id, {
+          from: body.from,
+          body: body.body,
+          role: body.role
+        });
+
+        if (result.ok) {
+          const event = {
+            trace_id: randomUUID(),
+            event_id: result.message.id,
+            source: 'acp',
+            kind: 'acp.session.message',
+            timestamp: result.message.created_at,
+            actor: { login: body.from || 'acp' },
+            payload: { body: (body.body || '').slice(0, 500), session_id: body.session_id }
+          };
+          appendFileSync(queuePath, JSON.stringify(event) + '\n');
+          if (onEvent) onEvent(event);
+          nudgeTmux(config.tmux?.ide_session || config.tmux?.default_session || 'claude');
+        }
+
+        const status = result.ok ? 200 : 400;
+        res.writeHead(status, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify(result));
+        return;
+      }
+
+      if (action === 'session.close') {
+        if (!body.session_id) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'session_id required' }));
+          return;
+        }
+        const result = closeSession(config, body.session_id, { reason: body.reason });
+        const status = result.ok ? 200 : 404;
+        res.writeHead(status, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify(result));
+        return;
+      }
+
+      if (action === 'session.status') {
+        if (!body.session_id) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'session_id required' }));
+          return;
+        }
+        const result = getSession(config, body.session_id);
+        const status = result.ok ? 200 : 404;
+        res.writeHead(status, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify(result));
+        return;
+      }
+
+      if (action === 'session.list') {
+        const result = listSessions(config, { status: body.status });
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify(result));
+        return;
+      }
+
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: `Unknown ACP action: ${action}` }));
+      return;
+    }
+
     if (req.method !== 'POST' || req.url !== '/webhook') {
       res.writeHead(404);
       res.end('Not found');
@@ -253,6 +384,7 @@ export function startWebhookServer(config, onEvent) {
     console.log(`  POST /webhook  — GitHub webhook endpoint`);
     console.log(`  POST /antfarm  — Ant Farm webhook endpoint`);
     console.log(`  POST /discord  — Discord message webhook endpoint`);
+    console.log(`  POST /acp      — ACP session endpoint${acpEnabled(config) ? '' : ' (disabled)'}`);
     console.log(`  GET  /health   — Health check`);
     console.log(`  Queue: ${queuePath}`);
   });

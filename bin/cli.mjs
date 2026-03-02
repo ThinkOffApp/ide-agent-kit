@@ -27,6 +27,7 @@ import { antfarmAdapter } from '../src/adapters/antfarm.mjs';
 import { discordAdapter } from '../src/adapters/discord.mjs';
 import { xforAdapter } from '../src/adapters/xfor.mjs';
 import { commentsAdapter } from '../src/adapters/comments.mjs';
+import { isEnabled as acpIsEnabled, createSession as acpCreate, sendToSession as acpSend, closeSession as acpClose, getSession as acpGet, listSessions as acpList } from '../src/acp-sessions.mjs';
 
 const pkg = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'));
 const args = process.argv.slice(2);
@@ -139,6 +140,15 @@ Usage:
     Unified platform poller — runs multiple adapters in one process.
     watch:  Start all adapters (or selected via --adapters).
     status: Show which adapters are configured.
+
+  ide-agent-kit acp <spawn|list|status|send|close> [options]
+    Agent Client Protocol (ACP) session management. Locked internal mode.
+    spawn:  --agent <handle> --task <text> [--harness <id>] [--mode one-shot|persistent]
+    list:   [--status active|closed|expired]
+    status: --session <id>
+    send:   --session <id> --body <text> [--from <handle>]
+    close:  --session <id> [--reason <text>]
+    Config: acp.enabled, acp.token, acp.allowed_agents, acp.allowed_harnesses
 
   ide-agent-kit init [--ide <claude-code|codex|cursor|vscode|gemini>] [--profile <balanced|low-friction>]
     Generate starter config for your IDE.
@@ -873,6 +883,93 @@ async function main() {
     }
 
     console.error('Usage: ide-agent-kit platform <watch|status> [--adapters antfarm,discord,xfor,comments]');
+    process.exit(1);
+  }
+
+  // ── ACP (Agent Client Protocol) ───────────────────────
+  if (command === 'acp') {
+    const opts = parseKV(args, subcommand || 'acp');
+    const config = loadConfig(opts.config);
+
+    if (!acpIsEnabled(config)) {
+      console.error('ACP is not enabled. Set acp.enabled=true and acp.token in your config.');
+      process.exit(1);
+    }
+
+    if (subcommand === 'spawn') {
+      if (!opts.task) { console.error('Error: --task is required'); process.exit(1); }
+      const result = acpCreate(config, {
+        agentId: opts.agent,
+        task: opts.task,
+        harnessId: opts.harness,
+        mode: opts.mode || 'one-shot'
+      });
+      if (!result.ok) {
+        console.error(`ACP spawn failed: ${result.error}`);
+        process.exit(1);
+      }
+      console.log(`ACP session created:`);
+      console.log(`  ID: ${result.session.id}`);
+      console.log(`  Agent: ${result.session.agent_id || 'none'}`);
+      console.log(`  Task: ${result.session.task}`);
+      console.log(`  Mode: ${result.session.mode}`);
+      console.log(`  Status: ${result.session.status}`);
+      return;
+    }
+
+    if (subcommand === 'list') {
+      const result = acpList(config, { status: opts.status });
+      if (result.sessions.length === 0) {
+        console.log('No ACP sessions.');
+      } else {
+        console.log(`${result.count} session(s):\n`);
+        for (const s of result.sessions) {
+          const age = s.created_at ? s.created_at.slice(0, 19) : '?';
+          console.log(`  ${s.id.slice(0, 8)}  ${s.status.padEnd(8)}  ${(s.agent_id || '-').padEnd(15)}  ${s.message_count} msgs  ${age}  ${(s.task || '').slice(0, 50)}`);
+        }
+      }
+      return;
+    }
+
+    if (subcommand === 'status') {
+      if (!opts.session) { console.error('Error: --session is required'); process.exit(1); }
+      const result = acpGet(config, opts.session);
+      if (!result.ok) {
+        console.error(`Session not found: ${opts.session}`);
+        process.exit(1);
+      }
+      console.log(JSON.stringify(result.session, null, 2));
+      return;
+    }
+
+    if (subcommand === 'send') {
+      if (!opts.session || !opts.body) { console.error('Error: --session and --body are required'); process.exit(1); }
+      const result = acpSend(config, opts.session, {
+        from: opts.from,
+        body: opts.body,
+        role: opts.role || 'user'
+      });
+      if (!result.ok) {
+        console.error(`Send failed: ${result.error}`);
+        process.exit(1);
+      }
+      console.log(`Message sent to session ${opts.session.slice(0, 8)}`);
+      console.log(`  Message ID: ${result.message.id}`);
+      return;
+    }
+
+    if (subcommand === 'close') {
+      if (!opts.session) { console.error('Error: --session is required'); process.exit(1); }
+      const result = acpClose(config, opts.session, { reason: opts.reason });
+      if (!result.ok) {
+        console.error(`Close failed: ${result.error}`);
+        process.exit(1);
+      }
+      console.log(`Session ${opts.session.slice(0, 8)} closed.`);
+      return;
+    }
+
+    console.error('Usage: ide-agent-kit acp <spawn|list|status|send|close>');
     process.exit(1);
   }
 

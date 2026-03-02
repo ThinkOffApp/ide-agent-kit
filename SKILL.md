@@ -1,24 +1,17 @@
 ---
 name: ide-agent-kit
+description: Filesystem message bus and webhook relay for multi-agent IDE coordination. Use when agents need to share events, poll Ant Farm rooms, receive GitHub/GitLab webhooks, coordinate tasks across sessions, or run scheduled jobs. Local-first with zero network by default. Trigger on cross-agent messaging, webhook ingestion, room polling, cron scheduling, or tmux command execution.
 version: 0.3.1
-description: Real-time agent team coordination for IDE AIs via OpenClaw
-requires:
-  bins: [node]
-  env: []
-install:
-  - kind: node
-    package: ide-agent-kit
-    bins: [ide-agent-kit]
-env:
-  - name: OPENCLAW_TOKEN
-    description: OpenClaw gateway auth token. Required only for gateway/sessions commands.
-    required: false
-  - name: GITHUB_WEBHOOK_SECRET
-    description: HMAC secret for verifying inbound GitHub webhooks. Required only when using serve with GitHub.
-    required: false
-  - name: ANTFARM_API_KEY
-    description: Ant Farm API key for room polling. Required only for the poll command.
-    required: false
+metadata:
+  openclaw:
+    requires:
+      bins: [node]
+      env: []
+    homepage: https://github.com/ThinkOffApp/ide-agent-kit
+    install:
+      - kind: node
+        package: ide-agent-kit
+        bins: [ide-agent-kit]
 ---
 
 # IDE Agent Kit
