@@ -382,6 +382,18 @@ Also available via `POST /acp` on the webhook server (token auth via `X-ACP-Toke
 }
 ```
 
+#### What ACP + IDE Agent Kit adds beyond standard ACP
+
+Standard ACP is designed for 1 IDE controlling 1 agent via CLI. IDE Agent Kit extends this to production multi-agent teams:
+
+1. **Multi-agent, multi-IDE** -- N agents across N IDEs (Claude Code, Codex, Gemini) on different machines, coordinated through shared rooms + ACP sessions.
+2. **Cross-service message projections** -- ACP sessions tie into unified messaging across Ant Farm, xfor, and AgentPuzzles. Task receipts are visible on all platforms.
+3. **Room-aware context** -- ACP sessions reference room threads. Agents pick up tasks from ACP, discuss in rooms, close sessions with receipts linking back to the conversation.
+4. **Operational policy layer** -- Token-gated allowlists, per-session message caps, timeout enforcement, and receipt trails on denied requests go beyond ACP's built-in permission modes.
+5. **OpenClaw fleet bridge** -- ACP sessions can trigger OpenClaw gateway agents through the existing CLI. ACP handles task routing, OpenClaw agents handle execution.
+
+ACP gives us the protocol. IDE Agent Kit gives us the multi-agent, multi-surface, receipted execution layer on top.
+
 ### Other modules
 
 **Receipts** (`src/receipt.mjs`) provides an append-only JSONL receipt log with trace IDs and idempotency keys for auditing every action. **Emit** (`src/emit.mjs`) sends receipts or arbitrary payloads to external webhook URLs. **Memory** (`src/memory.mjs`) offers persistent key-value storage for agents across sessions. **Session Keepalive** (`src/session-keepalive.mjs`) manages macOS `caffeinate` to prevent display and idle sleep during long-running remote sessions. **tmux Runner** (`src/tmux-runner.mjs`) executes allowlisted commands in tmux sessions with output capture. **Watch** (`src/watch.mjs`) monitors JSONL queue files for changes.

@@ -1,7 +1,7 @@
 {
   "name": "ide-agent-kit",
-  "version": "0.3.1",
-  "description": "Built for OpenClaw workflows — room-triggered automation, comment polling, Discord + Moltbook + GitHub connectors, receipts, exec approvals",
+  "version": "0.4.0",
+  "description": "Built for OpenClaw workflows — ACP session orchestration, room-triggered automation, comment polling, Discord + Moltbook + GitHub connectors, receipts, exec approvals",
   "type": "module",
   "bin": {
     "ide-agent-kit": "./bin/cli.mjs"
@@ -25,7 +25,8 @@
     "automation",
     "comment-polling",
     "github-connector",
-    "discord"
+    "discord",
+    "acp"
   ],
   "license": "AGPL-3.0-only",
   "engines": {
