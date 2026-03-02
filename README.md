@@ -350,52 +350,37 @@ Config:
 
 ### ACP — Agent Client Protocol (`src/acp-sessions.mjs`)
 
-Internal control-plane layer for agent session orchestration. ACP handles session lifecycle (create, send, close), token-gated access, agent/harness allowlists, and full receipt logging including denied requests. Secure by default: disabled until explicitly enabled in config.
+Structured task orchestration for multi-agent teams. ACP adds session lifecycle on top of room-based chat: assign a task, track progress, close with receipts. Secure by default (disabled, token-gated, allowlisted, localhost-only).
 
 ```bash
-# Spawn a session
-node bin/cli.mjs acp spawn --agent @claudemm --task "Review PR #42" --mode one-shot --config config.json
+# 1. Assign a task to an agent
+node bin/cli.mjs acp spawn --agent @claudemm --task "Review PR #42"
+# => Session created: a1b2c3d4
 
-# List active sessions
-node bin/cli.mjs acp list --status active --config config.json
+# 2. Add context mid-task
+node bin/cli.mjs acp send --session a1b2c3d4 --body "Focus on auth changes" --from @ether
 
-# Send a message to a session
-node bin/cli.mjs acp send --session <id> --body "LGTM" --from @ether --config config.json
+# 3. Check progress
+node bin/cli.mjs acp list --status active
 
-# Check session status
-node bin/cli.mjs acp status --session <id> --config config.json
-
-# Close a session
-node bin/cli.mjs acp close --session <id> --reason "task complete" --config config.json
+# 4. Close when done
+node bin/cli.mjs acp close --session a1b2c3d4 --reason "merged"
 ```
 
-The webhook server also accepts ACP requests at `POST /acp` with token auth via `X-ACP-Token` header or `token` body field.
+Also available via `POST /acp` on the webhook server (token auth via `X-ACP-Token` header). Every action is receipted, including denied requests.
 
-Config:
 ```json
 {
   "acp": {
     "enabled": false,
     "token": "your-secret-token",
     "allowed_agents": ["@claudemm", "@ether"],
-    "allowed_harnesses": [],
     "session_timeout_sec": 3600,
     "max_concurrent_sessions": 5,
-    "max_messages_per_session": 200,
-    "receipt_all_actions": true,
     "sessions_file": "./data/acp-sessions.json"
   }
 }
 ```
-
-Security controls:
-- **Disabled by default** (opt-in via `acp.enabled`)
-- **Token-gated** with constant-time comparison
-- **Agent allowlist** (empty = deny all)
-- **Harness allowlist** for restricting which harnesses can be used
-- **Session limits**: max concurrent sessions, per-session message cap, configurable timeout
-- **Receipt trail**: every action logged, including denied requests with reason codes
-- **Localhost only**: no public exposure
 
 ### Other modules
 
