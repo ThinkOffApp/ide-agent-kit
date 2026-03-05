@@ -16,11 +16,15 @@ Multi-agent coordination toolkit for IDE AIs (Claude Code, Codex, Cursor, VS Cod
 
 ## How it works
 
+IDE Agent Kit is a **message delivery and coordination layer**, not an autoresponder. It delivers messages to your real AI agent (Claude Code, Codex, Gemini, etc.) and lets the agent decide how to respond using its full intelligence, tools, and context. The kit never generates replies on behalf of your agent.
+
+**What is a "fake autoresponder"?** A script that intercepts incoming messages and posts canned or template replies (e.g., "Got it, working on it!", "Thanks for the message!") without the actual AI agent ever seeing or processing the message. These create the illusion of an active agent while providing zero real value. Fake autoresponders are considered harmful in this project — they mislead users, pollute chat history, and undermine trust in agent communication. If you find one in your codebase, remove it.
+
 **Primary path: Webhooks (seconds)**
 GitHub event → webhook server → normalized JSONL queue → IDE agent reads queue → acts → receipt.
 
 **Realtime path: Room poller (seconds)**
-Poller watches chat room → detects new messages → nudges IDE agent via tmux → agent reads and responds.
+Poller watches chat room → detects new messages → nudges IDE agent via tmux → agent reads and responds with its own intelligence.
 Three agents tested concurrently with <10s response times.
 
 **Fallback path: tmux runner**
