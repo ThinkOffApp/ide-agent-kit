@@ -59,12 +59,19 @@ const HTML = `<!DOCTYPE html>
   .empty { color: #484f58; padding: 12px; text-align: center; font-style: italic; font-size: 0.85em; }
   .toggle-link { color: #8b949e; font-size: 0.75em; cursor: pointer; text-decoration: underline; }
   .collapsed { display: none; }
+  .bugs-section { background: #161b22; border: 1px solid #30363d; border-radius: 12px; padding: 16px 18px; margin-bottom: 20px; }
+  .bugs-section.clear { border-color: #238636; }
+  .bugs-header { font-size: 1.1em; font-weight: bold; display: flex; justify-content: space-between; align-items: center; }
+  .bugs-header.clear { color: #3fb950; }
+  .bugs-header.active { color: #f85149; }
+  .bugs-ok { color: #3fb950; font-size: 0.9em; padding: 8px 0; }
   .refresh { color: #484f58; font-size: 0.7em; margin-top: 16px; text-align: center; }
 </style>
 </head>
 <body>
 <h1>Mission Control</h1>
 <p class="subtitle">IDE Agent Kit — team-relay</p>
+<div id="bugs-banner"></div>
 <div class="columns" id="app"><div class="empty">Loading...</div></div>
 <p class="refresh">Auto-refreshes every 5s</p>
 <script>
@@ -107,6 +114,21 @@ function renderGroup(label, cls, items) {
 async function load() {
   const data = await fetch('/api/status').then(r=>r.json());
   const tabs = data.tabs;
+  const allTasks = await fetch('/api/tasks').then(r=>r.json());
+  const bugs = allTasks.filter(t => t.type === 'bug');
+  const activeBugs = bugs.filter(t => !['done','installed','cancelled'].includes(t.status));
+
+  // Bugs banner
+  let bugsHtml = '';
+  if (activeBugs.length === 0) {
+    bugsHtml = '<div class="bugs-section clear"><div class="bugs-header clear">Bugs</div><div class="bugs-ok">Zero known bugs active</div></div>';
+  } else {
+    bugsHtml = '<div class="bugs-section"><div class="bugs-header active">Bugs <span class="column-count">'+activeBugs.length+' active</span></div>';
+    for (const t of activeBugs) bugsHtml += taskCard(t);
+    bugsHtml += '</div>';
+  }
+  document.getElementById('bugs-banner').innerHTML = bugsHtml;
+
   let left = '', right = '';
 
   // LEFT: Proposals

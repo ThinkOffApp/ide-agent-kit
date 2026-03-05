@@ -45,14 +45,17 @@ function save() {
   writeFileSync(tasksFile, JSON.stringify(tasks, null, 2));
 }
 
-export function addTask(agent, title, { priority = 0, type = 'feature' } = {}) {
+export function addTask(agent, title, { priority = 0, type = 'feature', hotfix = false } = {}) {
   const id = randomUUID().slice(0, 8);
-  const status = type === 'bug' ? 'queued' : 'proposed';
+  // Hotfix bugs skip review and go straight to active
+  // Regular bugs and features start as proposed (need review)
+  const status = (type === 'bug' && hotfix) ? 'active' : 'proposed';
   tasks[id] = {
     id,
     agent,
     title,
     type,               // 'feature' | 'bug'
+    hotfix: hotfix || false,
     status,
     priority,
     votes: {},          // { agentId: 'approve'|'reject' }
