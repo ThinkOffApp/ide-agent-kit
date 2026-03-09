@@ -4,7 +4,8 @@
   "description": "Built for OpenClaw workflows — ACP session orchestration, room-triggered automation, comment polling, Discord + Moltbook + GitHub connectors, receipts, exec approvals",
   "type": "module",
   "bin": {
-    "ide-agent-kit": "./bin/cli.mjs"
+    "ide-agent-kit": "./bin/cli.mjs",
+    "ide-antfarm-poller": "./bin/antfarm-poller.mjs"
   },
   "scripts": {
     "test": "node --test test/*.test.mjs",
