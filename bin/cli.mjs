@@ -1305,16 +1305,41 @@ async function initIdeConfig(ide, profile = 'balanced') {
   console.log(`Created ${outPath} for ${ide}`);
   console.log(preset.notes);
 
+  // Generate check-rooms hook script
+  if (['claude-code', 'antigravity'].includes(ide)) {
+    const scriptsDir = resolve('.claude', 'scripts');
+    if (!existsSync(scriptsDir)) mkdirSync(scriptsDir, { recursive: true });
+    const hookScript = resolve(scriptsDir, 'check-rooms.sh');
+    if (!existsSync(hookScript)) {
+      writeFileSync(hookScript, `#!/bin/bash
+# Hook: check for new room messages and inject them into the session
+MSG_FILE="/tmp/iak-new-messages.txt"
+if [ -s "$MSG_FILE" ]; then
+    echo ""
+    echo "=== NEW ROOM MESSAGES ==="
+    cat "$MSG_FILE"
+    echo "========================="
+    > "$MSG_FILE"
+fi
+`);
+      const { chmodSync } = await import('node:fs');
+      chmodSync(hookScript, 0o755);
+      console.log(`Created ${hookScript}`);
+    }
+  }
+
   // Generate IDE-specific permission settings
   if (ide === 'claude-code') {
     const claudeDir = resolve('.claude');
     if (!existsSync(claudeDir)) mkdirSync(claudeDir, { recursive: true });
     const settingsPath = resolve('.claude', 'settings.json');
     if (!existsSync(settingsPath)) {
+      const scriptsDir = resolve('.claude', 'scripts');
+      const hookScriptPath = resolve(scriptsDir, 'check-rooms.sh');
       const settings = {
         permissions: {
           allow: [
-            'Bash',
+            'Bash(*)',
             'Read',
             'Edit',
             'Write',
@@ -1322,11 +1347,24 @@ async function initIdeConfig(ide, profile = 'balanced') {
             'Grep',
             'WebFetch',
             'WebSearch',
+            'Agent',
+            'Skill',
           ],
+          defaultMode: 'bypassPermissions',
+        },
+        skipDangerousModePermissionPrompt: true,
+        hooks: {
+          UserPromptSubmit: [{
+            matcher: '',
+            hooks: [{
+              type: 'command',
+              command: `bash ${hookScriptPath}`,
+            }],
+          }],
         },
       };
       writeFileSync(settingsPath, JSON.stringify(settings, null, 2) + '\n');
-      console.log(`Created ${settingsPath} with auto-approved commands (profile: ${normalizedProfile})`);
+      console.log(`Created ${settingsPath} with auto-approve + room polling hook (profile: ${normalizedProfile})`);
     } else {
       console.log(`Claude Code settings already exist: ${settingsPath}`);
     }
@@ -1337,6 +1375,8 @@ async function initIdeConfig(ide, profile = 'balanced') {
     if (!existsSync(claudeDir)) mkdirSync(claudeDir, { recursive: true });
     const settingsPath = resolve('.claude', 'settings.json');
     if (!existsSync(settingsPath)) {
+      const scriptsDir = resolve('.claude', 'scripts');
+      const hookScriptPath = resolve(scriptsDir, 'check-rooms.sh');
       const settings = {
         permissions: {
           allow: [
@@ -1355,9 +1395,18 @@ async function initIdeConfig(ide, profile = 'balanced') {
           defaultMode: 'bypassPermissions',
         },
         skipDangerousModePermissionPrompt: true,
+        hooks: {
+          UserPromptSubmit: [{
+            matcher: '',
+            hooks: [{
+              type: 'command',
+              command: `bash ${hookScriptPath}`,
+            }],
+          }],
+        },
       };
       writeFileSync(settingsPath, JSON.stringify(settings, null, 2) + '\n');
-      console.log(`Created ${settingsPath} with Antigravity auto-approve settings (profile: ${normalizedProfile})`);
+      console.log(`Created ${settingsPath} with Antigravity auto-approve + room polling hook (profile: ${normalizedProfile})`);
     } else {
       console.log(`Claude Code settings already exist: ${settingsPath}`);
     }
