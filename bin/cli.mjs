@@ -1370,6 +1370,25 @@ fi
     if (!existsSync(settingsPath)) {
       const scriptsDir = resolve('.claude', 'scripts');
       const hookScriptPath = resolve(scriptsDir, 'check-rooms.sh');
+      const promptHooks = [
+        {
+          type: 'command',
+          command: `bash ${hookScriptPath}`,
+        }
+      ];
+      const sessionHooks = [];
+
+      if (hasClaudeMem) {
+        promptHooks.push({
+          type: 'command',
+          command: 'claude-mem hook user-message',
+        });
+        sessionHooks.push({
+          type: 'command',
+          command: 'claude-mem hook session-init',
+        });
+      }
+
       const settings = {
         permissions: {
           allow: [
@@ -1390,26 +1409,17 @@ fi
         hooks: {
           UserPromptSubmit: [{
             matcher: '',
-            hooks: [
-              {
-                type: 'command',
-                command: `bash ${hookScriptPath}`,
-              },
-              {
-                type: 'command',
-                command: 'claude-mem hook user-message',
-              }
-            ],
-          }],
-          SessionInit: [{
-            matcher: '',
-            hooks: [{
-              type: 'command',
-              command: 'claude-mem hook session-init',
-            }],
+            hooks: promptHooks,
           }],
         },
       };
+
+      if (sessionHooks.length > 0) {
+        settings.hooks.SessionInit = [{
+          matcher: '',
+          hooks: sessionHooks,
+        }];
+      }
       writeFileSync(settingsPath, JSON.stringify(settings, null, 2) + '\n');
       console.log(`Created ${settingsPath} with auto-approve + room polling hook (profile: ${normalizedProfile})`);
     } else {
@@ -1424,6 +1434,25 @@ fi
     if (!existsSync(settingsPath)) {
       const scriptsDir = resolve('.claude', 'scripts');
       const hookScriptPath = resolve(scriptsDir, 'check-rooms.sh');
+      const promptHooks = [
+        {
+          type: 'command',
+          command: `bash ${hookScriptPath}`,
+        }
+      ];
+      const sessionHooks = [];
+
+      if (hasClaudeMem) {
+        promptHooks.push({
+          type: 'command',
+          command: 'claude-mem hook user-message',
+        });
+        sessionHooks.push({
+          type: 'command',
+          command: 'claude-mem hook session-init',
+        });
+      }
+
       const settings = {
         permissions: {
           allow: [
@@ -1445,26 +1474,17 @@ fi
         hooks: {
           UserPromptSubmit: [{
             matcher: '',
-            hooks: [
-              {
-                type: 'command',
-                command: `bash ${hookScriptPath}`,
-              },
-              {
-                type: 'command',
-                command: 'claude-mem hook user-message',
-              }
-            ],
-          }],
-          SessionInit: [{
-            matcher: '',
-            hooks: [{
-              type: 'command',
-              command: 'claude-mem hook session-init',
-            }],
+            hooks: promptHooks,
           }],
         },
       };
+
+      if (sessionHooks.length > 0) {
+        settings.hooks.SessionInit = [{
+          matcher: '',
+          hooks: sessionHooks,
+        }];
+      }
       writeFileSync(settingsPath, JSON.stringify(settings, null, 2) + '\n');
       console.log(`Created ${settingsPath} with Antigravity auto-approve + room polling hook (profile: ${normalizedProfile})`);
     } else {
