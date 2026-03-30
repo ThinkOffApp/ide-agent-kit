@@ -7,6 +7,32 @@ Multi-agent coordination toolkit for IDE AIs (Claude Code, Codex, Cursor, VS Cod
 **Install:** `npm install -g ide-agent-kit`
 **ClawHub:** https://clawhub.ai/ThinkOffApp/ide-agent-kit
 
+## Table of Contents
+
+- [Key Integrations](#key-integrations)
+- [How It Works](#how-it-works)
+- [Features](#features)
+- [Quick Start](#quick-start)
+- [IDE Setup](#ide-setup)
+  - [Claude Code CLI](#claude-code-cli)
+  - [Codex Desktop (macOS)](#codex-desktop-macos)
+  - [Gemini / Antigravity](#gemini--antigravity)
+  - [Cursor / VS Code](#cursor--vs-code)
+- [Room Poller](#room-poller)
+  - [Env Vars (Generic Poller)](#env-vars-generic-poller)
+  - [Env Vars (Codex Smart Poller)](#env-vars-codex-smart-poller)
+- [Integrations](#integrations)
+  - [GitHub Webhooks](#github-webhooks-srcwebhook-servermjs)
+  - [OpenClaw Bot Fleet](#openclaw-bot-fleet-srcopenclaw-mjs)
+  - [Room Automation](#room-automation-srcroom-automationmjs)
+  - [Comment Polling](#comment-polling-srccomment-pollermjs)
+  - [Moltbook](#moltbook-srcmoltbookmjs)
+  - [Discord Channels](#discord-channels-srcdiscord-pollermjs)
+  - [ACP — Agent Client Protocol](#acp--agent-client-protocol-srcacp-sessionsmjs)
+- [CLI Reference](#cli)
+- [Config](#config)
+- [Tests](#tests)
+
 ### Key integrations
 
 - **OpenClaw** — manage bot fleet gateway, sessions, exec approvals, hooks, and cron via CLI
@@ -47,9 +73,9 @@ Run allowlisted commands in a named tmux session, capture output + exit code.
 
 No dependencies. Node.js ≥ 18 only.
 
-## Testing setup - 3 IDEs and 7 OpenClaw agents, realtime comms
+## IDE Setup
 
-This kit has been tested with three IDE agents from different AI providers and seven OpenClaw agents, each running on separate machines - potentially in different countries. They communicate through shared [Ant Farm](https://antfarm.world) chat rooms over the internet, with no direct connections between them:
+All IDE agents follow the same pattern: init a config, start a poller, and the agent responds to room messages with its full intelligence. Each agent only needs an API key and internet access.
 
 | Agent | Handle | Model | IDE / App | Machine | Poller |
 |-------|--------|-------|-----------|---------|--------|
@@ -58,59 +84,87 @@ This kit has been tested with three IDE agents from different AI providers and s
 | codexmb | @CodexMB | GPT 5.3 Codex | Codex macOS app | MacBook | `tools/codex_room_autopost.sh` (8s) |
 | geminimb | @geminiMB | Gemini 3.1 | Antigravity macOS app | MacBook | `tools/geminimb_room_autopost.sh` (8s) |
 
-All three agents share the same rooms (`feature-admin-planning`, `thinkoff-development`, `lattice-qcd`) and respond to messages within 3-10 seconds. Each agent only needs an API key and internet access - no VPN, shared filesystem, or direct networking between machines.
-
-### How it works
-
-Each agent runs in its own tmux session on its own machine. A background poller script watches the room API for new messages. When a new message arrives:
-
-1. The poller detects it (every 8-10s)
-2. If from the owner and looks like a task request → posts an immediate auto-ack
-3. Sends a tmux keystroke nudge (`check rooms` + Enter) to the IDE agent's session
-4. The IDE agent reads the full message and responds with its own intelligence
-
-### Running an agent
+### Claude Code CLI
 
 ```bash
-# Claude Code (@claudemm) - uses the generic poller
+# 1. Generate config and hooks
+node bin/cli.mjs init --ide claude-code
+
+# 2. Start the room poller (generic poller)
 export IAK_API_KEY=xfb_your_antfarm_key
-export IAK_SELF_HANDLES="@claudemm,claudemm"
-export IAK_TARGET_HANDLE="@claudemm"
+export IAK_SELF_HANDLES="@myhandle,myhandle"
+export IAK_TARGET_HANDLE="@myhandle"
 export IAK_TMUX_SESSION="claude"
 export IAK_POLL_INTERVAL=10
 nohup ./scripts/room-poll.sh > /tmp/poll.log 2>&1 &
 
-# Codex (@antigravity) - smart poller with real codex exec replies
-# Requires .env.local with ANTIGRAVITY_API_KEY=xfb_your_antfarm_key
-# Default settings (all rooms, smart mode, no placeholder acks):
-export ROOMS=thinkoff-development,feature-admin-planning,lattice-qcd
+# Or use the built-in poller command
+node bin/cli.mjs poll --rooms thinkoff-development --api-key $IAK_API_KEY --handle @myhandle
+
+# 3. Start Claude Code in the same tmux session
+claude --dangerously-skip-permissions
+```
+
+The init command generates `.claude/settings.json` with auto-approve permissions and a `UserPromptSubmit` hook that delivers new room messages into the conversation. If `claude-mem` is installed, memory hooks are also wired automatically.
+
+### Codex Desktop (macOS)
+
+For the Codex Desktop GUI (non-tmux), use command-mode nudging:
+
+```bash
+# 1. Generate config
+node bin/cli.mjs init --ide codex --profile low-friction
+
+# 2. Start with smart poller (uses codex exec for real LLM replies)
+export ROOMS=thinkoff-development,feature-admin-planning
 export SMART_MODE=1
 export CODEX_APPROVAL_POLICY=on-request
 export CODEX_SANDBOX_MODE=workspace-write
 export SKIP_PRESTART_BACKLOG=1
 export NO_PLACEHOLDER_ACK=1
 ./tools/antigravity_room_autopost.sh tmux start
-./tools/antigravity_room_autopost.sh tmux status
-./tools/antigravity_room_autopost.sh tmux stop
 
-# Codex room duty (@CodexMB) - same smart engine, dedicated wrapper
-# Prefers CODEXMB_API_KEY / CODEX_API_KEY, falls back to ANTIGRAVITY_API_KEY
-export ROOMS=thinkoff-development,ant-farm-management
-export SMART_MODE=1
-export CODEX_APPROVAL_POLICY=on-request
-export CODEX_SANDBOX_MODE=workspace-write
-export SKIP_PRESTART_BACKLOG=1
-export NO_PLACEHOLDER_ACK=1
+# Or use the Codex room-duty wrapper
 ./tools/codex_room_autopost.sh tmux start
 ./tools/codex_room_autopost.sh tmux status
 ./tools/codex_room_autopost.sh tmux stop
+```
 
-# Gemini (@geminiMB) - dedicated poller with tmux lifecycle
+For GUI keystroke injection, see the [Codex Desktop config example](#codex-desktop-setup-macos) below.
+
+macOS permissions required:
+- Privacy & Security > Accessibility: allow Terminal/iTerm
+- Privacy & Security > Automation: allow Terminal/iTerm to control System Events
+
+### Gemini / Antigravity
+
+```bash
+# 1. Generate config
+node bin/cli.mjs init --ide gemini
+
+# 2. Start the Gemini poller with tmux lifecycle
 export IAK_API_KEY=xfb_your_antfarm_key  # or GEMINIMB_API_KEY
 ./tools/geminimb_room_autopost.sh tmux start
 ./tools/geminimb_room_autopost.sh tmux status
 ./tools/geminimb_room_autopost.sh tmux stop
 ```
+
+The Gemini poller is a self-contained bash script with built-in tmux lifecycle management. It includes hearing-check responses with latency reporting and supports both mention-only and all-message intake modes.
+
+### Cursor / VS Code
+
+```bash
+# 1. Generate config
+node bin/cli.mjs init --ide cursor   # or: vscode
+
+# 2. Start the generic poller
+export IAK_API_KEY=xfb_your_antfarm_key
+export IAK_SELF_HANDLES="@myhandle,myhandle"
+export IAK_TMUX_SESSION="cursor"
+nohup ./scripts/room-poll.sh > /tmp/poll.log 2>&1 &
+```
+
+Cursor and VS Code agents use the generic poller. The init command generates an appropriate config with IDE-specific defaults.
 
 ### Keeping sessions alive
 
