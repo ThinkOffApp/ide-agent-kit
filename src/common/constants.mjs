@@ -5,7 +5,7 @@
  * Centralized here to prevent path/filename drift between pollers and CLI.
  */
 
-export const NOTIFY_FILE_DEFAULT = '/tmp/iak-new-messages.txt';
+export const NOTIFY_FILE_DEFAULT = '/tmp/iak_new_messages.txt';
 export const SEEN_FILE_DEFAULT = '/tmp/iak-seen-ids.txt';
 export const QUEUE_PATH_DEFAULT = './ide-agent-queue.jsonl';
 export const RECEIPTS_PATH_DEFAULT = './ide-agent-receipts.jsonl';
