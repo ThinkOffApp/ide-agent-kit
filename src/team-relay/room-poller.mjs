@@ -1,3 +1,4 @@
+import { NOTIFY_FILE_DEFAULT, SEEN_FILE_DEFAULT, QUEUE_PATH_DEFAULT } from '../common/constants.mjs';
 import { enrichEvent } from './enrichment.mjs';
 // SPDX-License-Identifier: AGPL-3.0-only
 
@@ -21,8 +22,8 @@ import { randomUUID } from 'node:crypto';
  *   ide-agent-kit rooms check --config <path>
  */
 
-const SEEN_FILE_DEFAULT = '/tmp/iak-seen-ids.txt';
-const NOTIFY_FILE_DEFAULT = '/tmp/iak_new_messages.txt';
+
+
 
 function loadSeenIds(path) {
   try {

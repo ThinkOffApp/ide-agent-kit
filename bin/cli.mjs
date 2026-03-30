@@ -5,6 +5,8 @@
 import { parseArgs } from 'node:util';
 import { readFileSync } from 'node:fs';
 import { loadConfig } from '../src/config.mjs';
+import { runSanityCheck } from '../src/common/check.mjs';
+
 // --- team-relay (generic room/comms) ---
 import { tailReceipts } from '../src/team-relay/receipt.mjs';
 import { startWebhookServer } from '../src/team-relay/webhook-server.mjs';
@@ -43,6 +45,10 @@ function usage() {
   console.log(`IDE Agent Kit v${pkg.version}
 
 Usage:
+  ide-agent-kit check [--config <path>]
+    Run environment and configuration sanity check.
+  ide-agent-kit check [--config <path>]
+    Run environment and configuration sanity check.
   ide-agent-kit serve [--config <path>]
     Start webhook relay server for inbound GitHub events.
 
@@ -183,6 +189,19 @@ function gwOpts(opts) {
 }
 
 async function main() {
+  if (command === 'check') {
+    const opts = parseKV(args, 'check');
+    const config = loadConfig(opts.config);
+    console.log('Running IDE Agent Kit sanity check...\n');
+    const { runSanityCheck } = await import('../src/common/check.mjs');
+    const results = await runSanityCheck(config);
+    results.forEach(r => {
+      const icon = r.status === 'ok' ? 'âœ…' : (r.status === 'warn' ? 'âš ' : 'â Œ');
+      console.log(`${icon} ${r.name}: ${r.detail}`);
+    });
+    console.log('\nCheck complete.');
+    return;
+  }
   if (!command || command === '--help' || command === '-h') {
     usage();
     process.exit(0);
@@ -1504,6 +1523,8 @@ fi
     }
   }
 }
+
+  
 
 main().catch(e => {
   console.error(e);
