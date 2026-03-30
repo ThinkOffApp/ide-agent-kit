@@ -309,8 +309,9 @@ async function main() {
     }
 
     if (subcommand === 'watch') {
-      const pollerRooms = config?.poller?.rooms;
-      const pollerApiKey = config?.poller?.api_key;
+      const rawRooms = config?.poller?.rooms;
+      const pollerRooms = Array.isArray(rawRooms) ? rawRooms : (typeof rawRooms === 'string' ? rawRooms.split(',').map(s=>s.trim()) : null);
+      const pollerApiKey = config?.poller?.api_key || config?.poller?.apiKey || config?.intent?.apiKey || process.env.ANTIGRAVITY_API_KEY;
       const pollerHandle = config?.poller?.handle;
       if (!pollerRooms || !pollerApiKey || !pollerHandle) {
         console.error('Error: poller.rooms, poller.api_key, and poller.handle must be set in config');
