@@ -1156,6 +1156,10 @@ async function initIdeConfig(ide, profile = 'balanced') {
           nudge_text: 'check rooms',
           allow: allowForProfile
         },
+        memory: {
+          dir: './memory',
+          backend: 'local'
+        },
         github: { webhook_secret: '', event_kinds: ['pull_request', 'issue_comment'] },
         outbound: { default_webhook_url: '' },
         openclaw: { host: '127.0.0.1', port: 18791, token: '' }
@@ -1186,6 +1190,10 @@ async function initIdeConfig(ide, profile = 'balanced') {
           nudge_text: 'check rooms',
           allow: allowForProfile
         },
+        memory: {
+          dir: './memory',
+          backend: 'local'
+        },
         github: { webhook_secret: '', event_kinds: ['pull_request', 'issue_comment'] },
         outbound: { default_webhook_url: '' },
         openclaw: { host: '127.0.0.1', port: 18791, token: '' }
@@ -1207,6 +1215,10 @@ async function initIdeConfig(ide, profile = 'balanced') {
           nudge_text: 'check rooms',
           allow: allowForProfile
         },
+        memory: {
+          dir: './memory',
+          backend: 'local'
+        },
         github: { webhook_secret: '', event_kinds: ['pull_request', 'issue_comment'] },
         outbound: { default_webhook_url: '' },
         openclaw: { host: '127.0.0.1', port: 18791, token: '' }
@@ -1227,6 +1239,10 @@ async function initIdeConfig(ide, profile = 'balanced') {
           nudge_text: 'check rooms',
           allow: allowForProfile
         },
+        memory: {
+          dir: './memory',
+          backend: 'local'
+        },
         github: { webhook_secret: '', event_kinds: ['pull_request', 'issue_comment'] },
         outbound: { default_webhook_url: '' },
         openclaw: { host: '127.0.0.1', port: 18791, token: '' }
@@ -1246,6 +1262,10 @@ async function initIdeConfig(ide, profile = 'balanced') {
           ide_session: 'claude',
           nudge_text: 'check rooms',
           allow: allowForProfile
+        },
+        memory: {
+          dir: './memory',
+          backend: 'local'
         },
         github: { webhook_secret: '', event_kinds: ['pull_request', 'issue_comment'] },
         outbound: { default_webhook_url: '' },
@@ -1268,6 +1288,10 @@ async function initIdeConfig(ide, profile = 'balanced') {
           ide_session: 'claude',
           nudge_text: 'check rooms',
           allow: allowForProfile
+        },
+        memory: {
+          dir: './memory',
+          backend: 'local'
         },
         github: { webhook_secret: '', event_kinds: ['pull_request', 'issue_comment'] },
         outbound: { default_webhook_url: '' },
@@ -1356,9 +1380,22 @@ fi
         hooks: {
           UserPromptSubmit: [{
             matcher: '',
+            hooks: [
+              {
+                type: 'command',
+                command: `bash ${hookScriptPath}`,
+              },
+              {
+                type: 'command',
+                command: 'claude-mem hook user-message',
+              }
+            ],
+          }],
+          SessionInit: [{
+            matcher: '',
             hooks: [{
               type: 'command',
-              command: `bash ${hookScriptPath}`,
+              command: 'claude-mem hook session-init',
             }],
           }],
         },
@@ -1398,9 +1435,22 @@ fi
         hooks: {
           UserPromptSubmit: [{
             matcher: '',
+            hooks: [
+              {
+                type: 'command',
+                command: `bash ${hookScriptPath}`,
+              },
+              {
+                type: 'command',
+                command: 'claude-mem hook user-message',
+              }
+            ],
+          }],
+          SessionInit: [{
+            matcher: '',
             hooks: [{
               type: 'command',
-              command: `bash ${hookScriptPath}`,
+              command: 'claude-mem hook session-init',
             }],
           }],
         },
