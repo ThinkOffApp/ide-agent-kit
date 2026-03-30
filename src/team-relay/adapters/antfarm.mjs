@@ -18,7 +18,7 @@ export const antfarmAdapter = {
     const all = [];
 
     for (const room of rooms) {
-      const url = `https://antfarm.world/api/v1/rooms/${room}/messages?limit=${limit}`;
+      const url = `https://groupmind.one/api/v1/rooms/${room}/messages?limit=${limit}`;
       try {
         const result = execFileSync('curl', ['-sS', '-H', `X-API-Key: ${apiKey}`, url], {
           encoding: 'utf8', timeout: 15000

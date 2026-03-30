@@ -54,7 +54,7 @@ function nudgeTmux(session, text) {
 }
 
 async function fetchRoomMessages(room, apiKey, limit = 10) {
-  const url = `https://antfarm.world/api/v1/rooms/${room}/messages?limit=${limit}`;
+  const url = `https://groupmind.one/api/v1/rooms/${room}/messages?limit=${limit}`;
   try {
     const result = execSync(
       `curl -sS -4 -H "X-API-Key: ${apiKey}" "${url}"`,

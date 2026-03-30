@@ -64,7 +64,7 @@ function saveSeenIds(path, ids) {
 }
 
 function fetchRoomMessages(room, apiKey, limit = 20) {
-  const url = `https://antfarm.world/api/v1/rooms/${room}/messages?limit=${limit}`;
+  const url = `https://groupmind.one/api/v1/rooms/${room}/messages?limit=${limit}`;
   try {
     const result = execSync(
       `curl -sS -H "X-API-Key: ${apiKey}" "${url}"`,
@@ -90,7 +90,7 @@ function postMessage(room, body, apiKey, config) {
   const payload = JSON.stringify({ room, body });
   try {
     execSync(
-      `curl -sS -X POST "https://antfarm.world/api/v1/messages" -H "X-API-Key: ${apiKey}" -H "Content-Type: application/json" -d '${payload.replace(/'/g, "'\\''")}'`,
+      `curl -sS -X POST "https://groupmind.one/api/v1/messages" -H "X-API-Key: ${apiKey}" -H "Content-Type: application/json" -d '${payload.replace(/'/g, "'\\''")}'`,
       { timeout: 15000 }
     );
     markSent();
