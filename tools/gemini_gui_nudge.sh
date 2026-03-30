@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-APP_NAME="${IAK_CODEX_APP_NAME:-iTerm}"
+APP_NAME="${IAK_GEMINI_APP_NAME:-Claude}"
 PROMPT_TEXT="${IAK_NUDGE_TEXT:-check room and respond if there is something you should comment on}"
 
 if ! command -v osascript >/dev/null 2>&1; then
