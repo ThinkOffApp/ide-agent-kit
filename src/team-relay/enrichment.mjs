@@ -10,7 +10,11 @@ export async function enrichEvent(event, config = {}) {
   if (!body) return event;
 
   const enriched = { ...event };
-  if (!enriched.enrichment_errors) enriched.enrichment_errors = [];
+  
+  const addError = (msg) => {
+    if (!enriched.enrichment_errors) enriched.enrichment_errors = [];
+    enriched.enrichment_errors.push(msg);
+  };
 
   // 1. Enrich with Memory Context (via claude-mem worker API)
   const memCfg = config.memory_api || {};
@@ -26,6 +30,15 @@ export async function enrichEvent(event, config = {}) {
         body: JSON.stringify({ query: body, limit: 3 })
       });
       
+      if (!resp.ok) {
+        throw new Error(\`HTTP \${resp.status} \${resp.statusText}\`);
+      }
+
+      const contentType = resp.headers.get('content-type') || '';
+      if (!contentType.includes('application/json')) {
+        throw new Error(\`Expected JSON but got \${contentType}\`);
+      }
+
       const data = await resp.json();
       if (data && data.results) {
         enriched.memory_context = {
@@ -36,10 +49,10 @@ export async function enrichEvent(event, config = {}) {
           }))
         };
       } else if (data && data.error) {
-        enriched.enrichment_errors.push(\`Memory enrichment API error: \${data.error} - \${data.message || ''}\`);
+        addError(\`Memory enrichment API error: \${data.error} - \${data.message || ''}\`);
       }
     } catch (e) {
-      enriched.enrichment_errors.push(\`Memory enrichment fetch failed: \${e.message}\`);
+      addError(\`Memory enrichment fetch failed: \${e.message}\`);
     }
   }
 
@@ -52,6 +65,15 @@ export async function enrichEvent(event, config = {}) {
         headers: { 'X-API-Key': intentCfg.apiKey }
       });
       
+      if (!resp.ok) {
+        throw new Error(\`HTTP \${resp.status} \${resp.statusText}\`);
+      }
+
+      const contentType = resp.headers.get('content-type') || '';
+      if (!contentType.includes('application/json')) {
+        throw new Error(\`Expected JSON but got \${contentType}\`);
+      }
+
       const data = await resp.json();
       if (data) {
         enriched.intent = {
@@ -60,7 +82,7 @@ export async function enrichEvent(event, config = {}) {
         };
       }
     } catch (e) {
-      enriched.enrichment_errors.push(\`Intent enrichment failed: \${e.message}\`);
+      addError(\`Intent enrichment failed: \${e.message}\`);
     }
   }
 

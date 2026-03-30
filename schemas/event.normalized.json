@@ -2,11 +2,31 @@
   "$schema": "http://json-schema.org/draft-07/schema#",
   "title": "TeamRelayNormalizedEvent",
   "type": "object",
-  "required": ["trace_id", "event_id", "source", "kind", "timestamp"],
+  "required": [
+    "trace_id",
+    "event_id",
+    "source",
+    "kind",
+    "timestamp"
+  ],
   "properties": {
-    "trace_id": {"type": "string", "description": "Stable trace id across the workflow"},
-    "event_id": {"type": "string", "description": "Idempotency key for inbound webhook/event"},
-    "source": {"type": "string", "enum": ["github", "antfarm", "discord"], "description": "Origin system"},
+    "trace_id": {
+      "type": "string",
+      "description": "Stable trace id across the workflow"
+    },
+    "event_id": {
+      "type": "string",
+      "description": "Idempotency key for inbound webhook/event"
+    },
+    "source": {
+      "type": "string",
+      "enum": [
+        "github",
+        "antfarm",
+        "discord"
+      ],
+      "description": "Origin system"
+    },
     "kind": {
       "type": "string",
       "enum": [
@@ -19,39 +39,85 @@
         "discord.message.created"
       ]
     },
-    "timestamp": {"type": "string", "format": "date-time"},
+    "timestamp": {
+      "type": "string",
+      "format": "date-time"
+    },
     "repo": {
       "type": "object",
       "properties": {
-        "owner": {"type": "string"},
-        "name": {"type": "string"},
-        "full_name": {"type": "string"},
-        "url": {"type": "string"}
+        "owner": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "full_name": {
+          "type": "string"
+        },
+        "url": {
+          "type": "string"
+        }
       }
     },
     "actor": {
       "type": "object",
       "properties": {
-        "login": {"type": "string"},
-        "url": {"type": "string"}
+        "login": {
+          "type": "string"
+        },
+        "url": {
+          "type": "string"
+        }
       }
     },
-    "room": {"type": "string", "description": "Ant Farm room name (antfarm source only)"},
-    "channel": {"type": "string", "description": "Discord channel name or ID (discord source only)"},
+    "room": {
+      "type": "string",
+      "description": "Ant Farm room name (antfarm source only)"
+    },
+    "channel": {
+      "type": "string",
+      "description": "Discord channel name or ID (discord source only)"
+    },
     "refs": {
       "type": "object",
       "description": "Pointers the IDE agent can act on",
       "properties": {
-        "pull_request_url": {"type": "string"},
-        "issue_url": {"type": "string"},
-        "comment_url": {"type": "string"},
-        "head_sha": {"type": "string"},
-        "branch": {"type": "string"}
+        "pull_request_url": {
+          "type": "string"
+        },
+        "issue_url": {
+          "type": "string"
+        },
+        "comment_url": {
+          "type": "string"
+        },
+        "head_sha": {
+          "type": "string"
+        },
+        "branch": {
+          "type": "string"
+        }
       }
     },
     "payload": {
       "type": "object",
       "description": "Optional minimized payload. Keep small. Store raw webhook separately if needed."
+    },
+    "intent": {
+      "type": "object",
+      "description": "Structured user intent sidecar"
+    },
+    "memory_context": {
+      "type": "object",
+      "description": "Relevant memory snippets sidecar"
+    },
+    "enrichment_errors": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "description": "Errors encountered during enrichment"
     }
   }
 }

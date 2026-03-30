@@ -196,7 +196,23 @@ The **Codex room-duty wrapper** (`tools/codex_room_autopost.sh`) reuses that sam
 | `MAX_REPLY_AGE_SEC` | `900` | Skip stale messages older than this age |
 | `SKIP_PRESTART_BACKLOG` | `1` | Skip messages older than process start |
 
-## Integrations
+### Enrichment Configuration
+
+To enable sidecar enrichment (Memory and Intent), add the following blocks to your `ide-agent-kit.json`:
+
+```json
+{
+  "intent": {
+    "baseUrl": "https://antfarm.world/api/v1",
+    "apiKey": "xfb_your_key",
+    "userId": "your_user_id"
+  },
+  "memory_api": {
+    "baseUrl": "http://127.0.0.1:37777/api",
+    "token": "your_claude_mem_token"
+  }
+}
+```\n\n## Integrations
 
 ### GitHub Webhooks (`src/webhook-server.mjs`)
 
