@@ -1110,6 +1110,13 @@ async function main() {
 }
 
 async function initIdeConfig(ide, profile = 'balanced') {
+  const { execSync } = await import('node:child_process');
+  let hasClaudeMem = false;
+  try {
+    execSync('claude-mem --version', { stdio: 'ignore' });
+    hasClaudeMem = true;
+  } catch {}
+
   const { writeFileSync, existsSync, mkdirSync } = await import('node:fs');
   const { resolve } = await import('node:path');
 
@@ -1328,6 +1335,9 @@ async function initIdeConfig(ide, profile = 'balanced') {
   writeFileSync(outPath, JSON.stringify(preset.config, null, 2) + '\n');
   console.log(`Created ${outPath} for ${ide}`);
   console.log(preset.notes);
+  if (!hasClaudeMem) {
+    console.warn('\nâš  WARNING: claude-mem is not installed. Hooks will be generated but will fail until you run: npm install -g claude-mem');
+  }
 
   // Generate check-rooms hook script
   if (['claude-code', 'antigravity'].includes(ide)) {
