@@ -1,10 +1,11 @@
 import { NOTIFY_FILE_DEFAULT, SEEN_FILE_DEFAULT, QUEUE_PATH_DEFAULT } from '../common/constants.mjs';
 import { enrichEvent } from './enrichment.mjs';
-import { nudgeTmux, nudgeCommand } from './common/notify.mjs';
 // SPDX-License-Identifier: AGPL-3.0-only
+
 import { execSync } from 'node:child_process';
 import { readFileSync, writeFileSync, appendFileSync, existsSync, unlinkSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
+import { nudgeCommand } from '../utils.mjs';
 
 /**
  * Room Poller — polls Ant Farm rooms and notifies IDE agent of new messages.
@@ -13,7 +14,7 @@ import { randomUUID } from 'node:crypto';
  *
  * Notification delivery (in order of priority):
  *   1. Notification file (always) — human-readable file that the IDE agent reads
- *   2. tmux nudge (optional) — types "check rooms" into a tmux session
+ *   2. Optional nudge path (tmux/command/none)
  *
  * The IDE agent calls `rooms check` to read and clear the notification file.
  *
@@ -39,7 +40,21 @@ function saveSeenIds(path, ids) {
   writeFileSync(path, arr.join('\n') + '\n');
 }
 
-
+function nudgeTmux(session, text) {
+  try {
+    execSync(`tmux has-session -t ${JSON.stringify(session)} 2>/dev/null`);
+  } catch {
+    return false;
+  }
+  try {
+    execSync(`tmux send-keys -t ${JSON.stringify(session)} -l ${JSON.stringify(text)}`);
+    execSync('sleep 0.3');
+    execSync(`tmux send-keys -t ${JSON.stringify(session)} Enter`);
+    return true;
+  } catch {
+    return false;
+  }
+}
 
 async function fetchRoomMessages(room, apiKey, limit = 10) {
   const url = `https://groupmind.one/api/v1/rooms/${room}/messages?limit=${limit}`;
@@ -79,6 +94,8 @@ export async function startRoomPoller({ rooms, apiKey, handle, interval, config 
   const queuePath = config?.queue?.path || './ide-agent-queue.jsonl';
   const session = config?.tmux?.ide_session || config?.tmux?.default_session || 'claude';
   const nudgeText = config?.tmux?.nudge_text || 'check rooms';
+  const nudgeMode = config?.poller?.nudge_mode || 'tmux';
+  const nudgeCommandText = config?.poller?.nudge_command || '';
   const pollInterval = interval || config?.poller?.interval_sec || 30;
   const selfHandle = handle || config?.poller?.handle || '@unknown';
 
@@ -87,7 +104,12 @@ export async function startRoomPoller({ rooms, apiKey, handle, interval, config 
   console.log(`  handle: ${selfHandle} (messages from self are ignored)`);
   console.log(`  interval: ${pollInterval}s`);
   console.log(`  notification file: ${notifyFile}`);
-  console.log(`  tmux session: ${session} (optional)`);
+  console.log(`  nudge mode: ${nudgeMode}`);
+  if (nudgeMode === 'tmux') {
+    console.log(`  tmux session: ${session} (optional)`);
+  } else if (nudgeMode === 'command') {
+    console.log(`  nudge command: ${nudgeCommandText || '(missing)'}`);
+  }
   console.log(`  seen file: ${seenFile}`);
   console.log(`  queue: ${queuePath}`);
 
@@ -156,18 +178,16 @@ export async function startRoomPoller({ rooms, apiKey, handle, interval, config 
       // Primary: write to notification file (always works)
       appendFileSync(notifyFile, newMessages.join('\n') + '\n');
 
-      // Secondary: try command nudge (GUI) or fallback to tmux nudge
-      const nudgeCmd = config?.tmux?.nudge_command;
+      // Secondary: try configured nudge mode.
       let nudged = false;
-      let nudgeType = '';
-      if (nudgeCmd) {
-        nudged = nudgeCommand(nudgeCmd, { text: nudgeText, session });
-        if (nudged) nudgeType = ' + gui nudge';
+      if (nudgeMode === 'command') {
+        nudged = nudgeCommand(nudgeCommandText, { text: nudgeText, session });
+      } else if (nudgeMode === 'none') {
+        nudged = true;
       } else {
         nudged = nudgeTmux(session, nudgeText);
-        if (nudged) nudgeType = ' + tmux nudge';
       }
-      console.log(`  ${newCount} new message(s) → notified${nudgeType}`);
+      console.log(`  ${newCount} new message(s) → notified${nudged ? ' + nudge' : ''}`);
     }
   }
 
