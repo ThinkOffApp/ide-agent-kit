@@ -1436,18 +1436,12 @@ fi
         },
         skipDangerousModePermissionPrompt: true,
         hooks: {
-          UserPromptSubmit: [{
-            matcher: '',
-            hooks: promptHooks,
-          }],
+          UserPromptSubmit: promptHooks,
         },
       };
 
       if (sessionHooks.length > 0) {
-        settings.hooks.SessionInit = [{
-          matcher: '',
-          hooks: sessionHooks,
-        }];
+        settings.hooks.SessionInit = sessionHooks;
       }
       writeFileSync(settingsPath, JSON.stringify(settings, null, 2) + '\n');
       console.log(`Created ${settingsPath} with auto-approve + room polling hook (profile: ${normalizedProfile})`);
@@ -1501,18 +1495,12 @@ fi
         },
         skipDangerousModePermissionPrompt: true,
         hooks: {
-          UserPromptSubmit: [{
-            matcher: '',
-            hooks: promptHooks,
-          }],
+          UserPromptSubmit: promptHooks,
         },
       };
 
       if (sessionHooks.length > 0) {
-        settings.hooks.SessionInit = [{
-          matcher: '',
-          hooks: sessionHooks,
-        }];
+        settings.hooks.SessionInit = sessionHooks;
       }
       writeFileSync(settingsPath, JSON.stringify(settings, null, 2) + '\n');
       console.log(`Created ${settingsPath} with Antigravity auto-approve + room polling hook (profile: ${normalizedProfile})`);

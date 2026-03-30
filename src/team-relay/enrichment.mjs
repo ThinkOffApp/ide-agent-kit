@@ -16,20 +16,16 @@ export async function enrichEvent(event, config = {}) {
   // 1. Enrich with Memory Context (via claude-mem)
   if (config.memory?.backend === 'local') {
     try {
-      // Use the global claude-mem CLI to search
-      const searchCmd = `claude-mem search --query ${JSON.stringify(body)} --limit 3 --json`;
-      const result = execSync(searchCmd, { encoding: 'utf8', stdio: ['pipe', 'pipe', 'ignore'] });
-      const data = JSON.parse(result);
+      /* 
+       * Temporarily disabled: 'claude-mem search' is not a valid global CLI command.
+       * Awaiting proper option (b) integration using the claude-mem Node SDK/API module.
+       * 
+       * const searchCmd = `claude-mem search --query ${JSON.stringify(body)} --limit 3 --json`;
+       * const result = execSync(searchCmd, { encoding: 'utf8', stdio: ['pipe', 'pipe', 'ignore'] });
+       */
+       
+      enriched.memory_context = null; // Bypass until Node API hook is written
       
-      if (data && data.results) {
-        enriched.memory_context = {
-          recent_observations: data.results.map(r => ({
-            snippet: r.snippet,
-            path: r.path,
-            score: r.score
-          }))
-        };
-      }
     } catch (e) {
       if (!enriched.enrichment_errors) enriched.enrichment_errors = [];
       enriched.enrichment_errors.push(`Memory enrichment failed: ${e.message}`);
