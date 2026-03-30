@@ -1127,7 +1127,7 @@ async function main() {
 
   if (command === 'init') {
     const opts = parseKV(args, 'init');
-    const ide = opts.ide || 'claude-code';
+    const ide = opts.ide; // Auto-detect if undefined
     const profile = opts.profile || opts.friction || 'balanced';
     await initIdeConfig(ide, profile);
     return;
@@ -1139,15 +1139,41 @@ async function main() {
 }
 
 async function initIdeConfig(ide, profile = 'balanced') {
-  const { execSync } = await import('node:child_process');
+  const { writeFileSync, existsSync, mkdirSync, readdirSync } = await import('node:fs');
+  const { resolve } = await import('node:path');
+
+  let targetIde = ide;
+  if (!targetIde) {
+    console.log('No --ide specified. Attempting to auto-detect environment...');
+    const cwd = process.cwd();
+    
+    if (existsSync(resolve(cwd, '.claude'))) {
+      targetIde = 'claude-code';
+    } else if (existsSync(resolve(cwd, 'codex.json'))) {
+      targetIde = 'codex';
+    } else if (existsSync(resolve(cwd, '.cursor')) || existsSync(resolve(cwd, '.cursorrules'))) {
+      targetIde = 'cursor';
+    } else if (existsSync(resolve(cwd, '.vscode'))) {
+      targetIde = 'vscode';
+    } else if (existsSync(resolve(cwd, 'gemini-config.json'))) {
+      targetIde = 'gemini';
+    }
+
+    if (targetIde) {
+      console.log(`Detected environment: ${targetIde}`);
+    } else {
+      console.log('Could not auto-detect environment. Defaulting to: claude-code');
+      targetIde = 'claude-code';
+    }
+  }
+
+
   let hasClaudeMem = false;
   try {
+    const { execSync } = await import('node:child_process');
     execSync('claude-mem --version', { stdio: 'ignore' });
     hasClaudeMem = true;
   } catch {}
-
-  const { writeFileSync, existsSync, mkdirSync } = await import('node:fs');
-  const { resolve } = await import('node:path');
 
   const defaultAllow = ['npm test', 'npm run build', 'pytest', 'git status', 'git diff'];
   const lowFrictionAllow = [
@@ -1349,9 +1375,9 @@ async function initIdeConfig(ide, profile = 'balanced') {
     }
   };
 
-  const preset = configs[ide];
+  const preset = configs[targetIde];
   if (!preset) {
-    console.error(`Unknown IDE: ${ide}. Choose from: ${Object.keys(configs).join(', ')}`);
+    console.error(`Unknown IDE: ${targetIde}. Choose from: ${Object.keys(configs).join(', ')}`);
     process.exit(1);
   }
 
@@ -1362,14 +1388,14 @@ async function initIdeConfig(ide, profile = 'balanced') {
   }
 
   writeFileSync(outPath, JSON.stringify(preset.config, null, 2) + '\n');
-  console.log(`Created ${outPath} for ${ide}`);
+  console.log(`Created ${outPath} for ${targetIde}`);
   console.log(preset.notes);
   if (!hasClaudeMem) {
     console.warn('\nâš  WARNING: claude-mem is not installed. Hooks will be generated but will fail until you run: npm install -g claude-mem');
   }
 
   // Generate check-rooms hook script
-  if (['claude-code', 'antigravity'].includes(ide)) {
+  if (['claude-code', 'antigravity'].includes(targetIde)) {
     const scriptsDir = resolve('.claude', 'scripts');
     if (!existsSync(scriptsDir)) mkdirSync(scriptsDir, { recursive: true });
     const hookScript = resolve(scriptsDir, 'check-rooms.sh');
@@ -1392,7 +1418,7 @@ fi
   }
 
   // Generate IDE-specific permission settings
-  if (ide === 'claude-code') {
+  if (targetIde === 'claude-code') {
     const claudeDir = resolve('.claude');
     if (!existsSync(claudeDir)) mkdirSync(claudeDir, { recursive: true });
     const settingsPath = resolve('.claude', 'settings.json');
@@ -1450,7 +1476,7 @@ fi
     }
   }
 
-  if (ide === 'antigravity') {
+  if (targetIde === 'antigravity') {
     const claudeDir = resolve('.claude');
     if (!existsSync(claudeDir)) mkdirSync(claudeDir, { recursive: true });
     const settingsPath = resolve('.claude', 'settings.json');
@@ -1509,7 +1535,7 @@ fi
     }
   }
 
-  if (ide === 'codex') {
+  if (targetIde === 'codex') {
     const codexPath = resolve('codex.json');
     if (!existsSync(codexPath)) {
       const codexSettings = {

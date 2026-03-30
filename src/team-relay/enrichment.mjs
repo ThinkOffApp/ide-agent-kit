@@ -10,7 +10,7 @@ export async function enrichEvent(event, config = {}) {
   if (!body) return event;
 
   const enriched = { ...event };
-  
+
   const addError = (msg) => {
     if (!enriched.enrichment_errors) enriched.enrichment_errors = [];
     enriched.enrichment_errors.push(msg);
@@ -20,23 +20,23 @@ export async function enrichEvent(event, config = {}) {
   const memCfg = config.memory_api || {};
   if (memCfg.baseUrl && memCfg.token) {
     try {
-      const url = \`\${memCfg.baseUrl}/observations/search\`;
+      const url = `${memCfg.baseUrl}/observations/search`;
       const resp = await fetch(url, {
         method: 'POST',
-        headers: { 
+        headers: {
           'Content-Type': 'application/json',
-          'Authorization': \`Bearer \${memCfg.token}\`
+          'Authorization': `Bearer ${memCfg.token}`
         },
         body: JSON.stringify({ query: body, limit: 3 })
       });
-      
+
       if (!resp.ok) {
-        throw new Error(\`HTTP \${resp.status} \${resp.statusText}\`);
+        throw new Error(`HTTP ${resp.status} ${resp.statusText}`);
       }
 
       const contentType = resp.headers.get('content-type') || '';
       if (!contentType.includes('application/json')) {
-        throw new Error(\`Expected JSON but got \${contentType}\`);
+        throw new Error(`Expected JSON but got ${contentType}`);
       }
 
       const data = await resp.json();
@@ -49,29 +49,29 @@ export async function enrichEvent(event, config = {}) {
           }))
         };
       } else if (data && data.error) {
-        addError(\`Memory enrichment API error: \${data.error} - \${data.message || ''}\`);
+        addError(`Memory enrichment API error: ${data.error} - ${data.message || ''}`);
       }
     } catch (e) {
-      addError(\`Memory enrichment fetch failed: \${e.message}\`);
+      addError(`Memory enrichment fetch failed: ${e.message}`);
     }
   }
 
-  // 2. Enrich with Intent (via user-intent-kit / Ant Farm API)
+  // 2. Enrich with Intent (via user-intent-kit / GroupMind API)
   const intentCfg = config.intent || {};
   if (intentCfg.baseUrl && intentCfg.apiKey && intentCfg.userId) {
     try {
-      const url = \`\${intentCfg.baseUrl}/intent/\${intentCfg.userId}\`;
+      const url = `${intentCfg.baseUrl}/intent/${intentCfg.userId}`;
       const resp = await fetch(url, {
         headers: { 'X-API-Key': intentCfg.apiKey }
       });
-      
+
       if (!resp.ok) {
-        throw new Error(\`HTTP \${resp.status} \${resp.statusText}\`);
+        throw new Error(`HTTP ${resp.status} ${resp.statusText}`);
       }
 
       const contentType = resp.headers.get('content-type') || '';
       if (!contentType.includes('application/json')) {
-        throw new Error(\`Expected JSON but got \${contentType}\`);
+        throw new Error(`Expected JSON but got ${contentType}`);
       }
 
       const data = await resp.json();
@@ -82,7 +82,7 @@ export async function enrichEvent(event, config = {}) {
         };
       }
     } catch (e) {
-      addError(\`Intent enrichment failed: \${e.message}\`);
+      addError(`Intent enrichment failed: ${e.message}`);
     }
   }
 
