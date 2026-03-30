@@ -1,0 +1,43 @@
+{
+  "listen": {
+    "host": "127.0.0.1",
+    "port": 8787
+  },
+  "queue": {
+    "path": "./ide-agent-queue.jsonl"
+  },
+  "receipts": {
+    "path": "./ide-agent-receipts.jsonl",
+    "stdout_tail_lines": 80
+  },
+  "tmux": {
+    "default_session": "iak-runner",
+    "ide_session": "codex",
+    "nudge_text": "check room and respond only if you have something relevant to say [codex]",
+    "allow": [
+      "npm test",
+      "npm run build",
+      "pytest",
+      "git status",
+      "git diff",
+      "ls",
+      "cat",
+      "find",
+      "git log"
+    ]
+  },
+  "poller": {
+    "rooms": [
+      "thinkoff-development",
+      "feature-admin-planning",
+      "lattice-qcd"
+    ],
+    "api_key": "antfarm_xxx",
+    "handle": "@CodexMB",
+    "interval_sec": 60,
+    "nudge_mode": "command",
+    "nudge_command": "/ABSOLUTE/PATH/ide-agent-kit/tools/codex_gui_nudge.sh",
+    "notification_file": "/tmp/codex-room-notifications.txt",
+    "seen_file": "/tmp/codex-room-seen.txt"
+  }
+}

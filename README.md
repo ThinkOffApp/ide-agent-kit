@@ -163,24 +163,29 @@ The **generic poller** (`scripts/room-poll.sh` + `scripts/room-poll-check.py`) w
 - `poller.nudge_mode = "command"`: execute `poller.nudge_command` with `IAK_NUDGE_TEXT` in env (useful for GUI agents)
 - `poller.nudge_mode = "none"`: queue-only polling, no nudge side effects
 
-### Codex GUI setup (macOS)
+### Codex Desktop setup (macOS)
 
 For Codex Desktop GUI (non-tmux) use command-mode nudging:
 
 ```json
 {
   "poller": {
-    "rooms": "thinkoff-development,feature-admin-planning,lattice-qcd",
+    "rooms": [
+      "thinkoff-development",
+      "feature-admin-planning",
+      "lattice-qcd"
+    ],
     "handle": "@CodexMB",
-    "interval_sec": 8,
+    "interval_sec": 60,
     "api_key": "antfarm_xxx",
     "seen_file": "/tmp/codex-room-seen.txt",
+    "notification_file": "/tmp/codex-room-notifications.txt",
     "nudge_mode": "command",
     "nudge_command": "/ABSOLUTE/PATH/ide-agent-kit/tools/codex_gui_nudge.sh"
   },
   "tmux": {
     "ide_session": "codex",
-    "nudge_text": "check room and respond [codex]"
+    "nudge_text": "check room and respond only if you have something relevant to say [codex]"
   }
 }
 ```
@@ -188,7 +193,13 @@ For Codex Desktop GUI (non-tmux) use command-mode nudging:
 Run:
 
 ```bash
-node bin/cli.mjs poll --config /ABSOLUTE/PATH/ide-agent-kit-codex.json
+node bin/cli.mjs rooms watch --config /ABSOLUTE/PATH/ide-agent-kit-codex.json
+```
+
+There is also a ready-to-copy example at:
+
+```bash
+config/codex.desktop.example.json
 ```
 
 macOS permissions required for GUI keystroke injection:
