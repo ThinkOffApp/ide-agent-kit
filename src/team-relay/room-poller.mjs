@@ -1,3 +1,4 @@
+import { enrichEvent } from './enrichment.mjs';
 // SPDX-License-Identifier: AGPL-3.0-only
 
 import { execSync } from 'node:child_process';
@@ -137,7 +138,7 @@ export async function startRoomPoller({ rooms, apiKey, handle, interval, config 
         const ts = m.created_at || new Date().toISOString();
 
         // Write to structured queue
-        const event = {
+        const rawEvent = {
           trace_id: randomUUID(),
           event_id: mid,
           source: 'antfarm',
@@ -146,10 +147,11 @@ export async function startRoomPoller({ rooms, apiKey, handle, interval, config 
           room,
           actor: { login: sender },
           payload: { body, room },
-          intent: null, // Enrichment: parsed intent via UIK
-          memory_context: null, // Enrichment: relevant context via claude-mem
+          intent: null,
+          memory_context: null,
           enrichment_errors: []
         };
+        const event = await enrichEvent(rawEvent, config);
         appendFileSync(queuePath, JSON.stringify(event) + '\n');
 
         // Collect for notification file
