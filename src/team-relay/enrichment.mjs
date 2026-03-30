@@ -62,7 +62,7 @@ export async function enrichEvent(event, config = {}) {
     try {
       const url = `${intentCfg.baseUrl}/intent/${intentCfg.userId}`;
       const resp = await fetch(url, {
-        headers: { 'X-API-Key': intentCfg.apiKey }
+        headers: { 'Authorization': `Bearer ${intentCfg.apiKey}` }
       });
 
       if (!resp.ok) {

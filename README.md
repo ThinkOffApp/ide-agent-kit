@@ -212,7 +212,11 @@ To enable sidecar enrichment (Memory and Intent), add the following blocks to yo
     "token": "your_claude_mem_token"
   }
 }
-```\n\n## Integrations
+```
+
+*Note: The Intent API integration is now fully LIVE and actively polls for user-intent-kit data upon every incoming message. Ensure your `"apiKey"` uses an `antfarm_...` prefix. The sidecar securely passes `Authorization: Bearer` and injects `urgency_mode` vectors directly into your queued room events.*
+
+## Integrations
 
 ### GitHub Webhooks (`src/webhook-server.mjs`)
 
