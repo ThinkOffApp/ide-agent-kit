@@ -21,9 +21,9 @@ MY_HANDLES = tuple(
 )
 OWNER_HANDLE = os.getenv("IAK_OWNER_HANDLE", "petrus").lower()
 TARGET_HANDLE = os.getenv("IAK_TARGET_HANDLE", "@claudemm")
-SEEN_FILE = os.getenv("IAK_SEEN_FILE", "/tmp/iak_seen_ids.txt")
+SEEN_FILE = os.getenv("IAK_SEEN_FILE", "/tmp/iak-seen-ids.txt")
 ACKED_FILE = os.getenv("IAK_ACKED_FILE", "/tmp/iak_acked_ids.txt")
-NEW_FILE = os.getenv("IAK_NEW_FILE", "/tmp/iak_new_messages.txt")
+NEW_FILE = os.getenv("IAK_NEW_FILE", "/tmp/iak-new-messages.txt")
 FETCH_LIMIT = int(os.getenv("IAK_FETCH_LIMIT", "20"))
 ACK_ENABLED = os.getenv("IAK_ACK_ENABLED", "1").lower() not in ("0", "false", "no")
 # Listen modes: "all" = every message, "humans" = skip bot messages,

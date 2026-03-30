@@ -1,0 +1,22 @@
+{
+  "listen": {
+    "host": "127.0.0.1",
+    "port": 8788
+  },
+  "queue": {
+    "path": "./ide-agent-queue-gemini.jsonl"
+  },
+  "receipts": {
+    "path": "./ide-agent-receipts-gemini.jsonl",
+    "stdout_tail_lines": 80
+  },
+  "poller": {
+    "rooms": [
+      "thinkoff-development"
+    ],
+    "api_key": "antfarm_9aec99ba9136fced8a409fe17bdc9080",
+    "handle": "gemini",
+    "nudge_mode": "command",
+    "nudge_command": "/Users/petrus/AndroidStudioProjects/ThinkOff/tools/gemini_gui_nudge.sh"
+  }
+}
