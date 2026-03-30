@@ -1,7 +1,7 @@
 import { NOTIFY_FILE_DEFAULT, SEEN_FILE_DEFAULT, QUEUE_PATH_DEFAULT } from '../common/constants.mjs';
 import { enrichEvent } from './enrichment.mjs';
+import { nudgeTmux, nudgeCommand } from './common/notify.mjs';
 // SPDX-License-Identifier: AGPL-3.0-only
-
 import { execSync } from 'node:child_process';
 import { readFileSync, writeFileSync, appendFileSync, existsSync, unlinkSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
@@ -39,21 +39,7 @@ function saveSeenIds(path, ids) {
   writeFileSync(path, arr.join('\n') + '\n');
 }
 
-function nudgeTmux(session, text) {
-  try {
-    execSync(`tmux has-session -t ${JSON.stringify(session)} 2>/dev/null`);
-  } catch {
-    return false;
-  }
-  try {
-    execSync(`tmux send-keys -t ${JSON.stringify(session)} -l ${JSON.stringify(text)}`);
-    execSync('sleep 0.3');
-    execSync(`tmux send-keys -t ${JSON.stringify(session)} Enter`);
-    return true;
-  } catch {
-    return false;
-  }
-}
+
 
 async function fetchRoomMessages(room, apiKey, limit = 10) {
   const url = `https://groupmind.one/api/v1/rooms/${room}/messages?limit=${limit}`;
@@ -170,9 +156,18 @@ export async function startRoomPoller({ rooms, apiKey, handle, interval, config 
       // Primary: write to notification file (always works)
       appendFileSync(notifyFile, newMessages.join('\n') + '\n');
 
-      // Secondary: try tmux nudge (bonus if IDE is in tmux)
-      const nudged = nudgeTmux(session, nudgeText);
-      console.log(`  ${newCount} new message(s) → notified${nudged ? ' + tmux nudge' : ''}`);
+      // Secondary: try command nudge (GUI) or fallback to tmux nudge
+      const nudgeCmd = config?.tmux?.nudge_command;
+      let nudged = false;
+      let nudgeType = '';
+      if (nudgeCmd) {
+        nudged = nudgeCommand(nudgeCmd, { text: nudgeText, session });
+        if (nudged) nudgeType = ' + gui nudge';
+      } else {
+        nudged = nudgeTmux(session, nudgeText);
+        if (nudged) nudgeType = ' + tmux nudge';
+      }
+      console.log(`  ${newCount} new message(s) → notified${nudgeType}`);
     }
   }
 

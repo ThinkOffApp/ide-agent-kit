@@ -24,6 +24,23 @@ export function nudgeTmux(session, text) {
   }
 }
 
+export function nudgeCommand(command, { text = 'check rooms', session = '' } = {}) {
+  if (!command || typeof command !== 'string') return false;
+  try {
+    execSync(command, {
+      stdio: 'ignore',
+      env: {
+        ...process.env,
+        IAK_NUDGE_TEXT: text,
+        IAK_TMUX_SESSION: session
+      }
+    });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 export function writeNotification(notifyFile, lines) {
   if (lines.length === 0) return;
   appendFileSync(notifyFile, lines.join('\n') + '\n');
