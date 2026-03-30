@@ -1,7 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
-import { execSync } from 'node:child_process';
-
 /**
  * Enrichment sidecar logic for ide-agent-kit queue events.
  * Populates 'intent' and 'memory_context' slots.
@@ -12,27 +10,61 @@ export async function enrichEvent(event, config = {}) {
   if (!body) return event;
 
   const enriched = { ...event };
-  
-  // 1. Enrich with Memory Context (via claude-mem)
-  if (config.memory?.backend === 'local') {
+  if (!enriched.enrichment_errors) enriched.enrichment_errors = [];
+
+  // 1. Enrich with Memory Context (via claude-mem worker API)
+  const memCfg = config.memory_api || {};
+  if (memCfg.baseUrl && memCfg.token) {
     try {
-      /* 
-       * Temporarily disabled: 'claude-mem search' is not a valid global CLI command.
-       * Awaiting proper option (b) integration using the claude-mem Node SDK/API module.
-       * 
-       * const searchCmd = `claude-mem search --query ${JSON.stringify(body)} --limit 3 --json`;
-       * const result = execSync(searchCmd, { encoding: 'utf8', stdio: ['pipe', 'pipe', 'ignore'] });
-       */
-       
-      enriched.memory_context = null; // Bypass until Node API hook is written
+      const url = \`\${memCfg.baseUrl}/observations/search\`;
+      const resp = await fetch(url, {
+        method: 'POST',
+        headers: { 
+          'Content-Type': 'application/json',
+          'Authorization': \`Bearer \${memCfg.token}\`
+        },
+        body: JSON.stringify({ query: body, limit: 3 })
+      });
       
+      const data = await resp.json();
+      if (data && data.results) {
+        enriched.memory_context = {
+          recent_observations: data.results.map(r => ({
+            snippet: r.snippet,
+            path: r.path,
+            score: r.score
+          }))
+        };
+      } else if (data && data.error) {
+        enriched.enrichment_errors.push(\`Memory enrichment API error: \${data.error} - \${data.message || ''}\`);
+      }
     } catch (e) {
-      if (!enriched.enrichment_errors) enriched.enrichment_errors = [];
-      enriched.enrichment_errors.push(`Memory enrichment failed: ${e.message}`);
+      enriched.enrichment_errors.push(\`Memory enrichment fetch failed: \${e.message}\`);
     }
   }
 
-  // 2. Enrich with Intent (Stub/Placeholder for UIK)
+  // 2. Enrich with Intent (via user-intent-kit / Ant Farm API)
+  const intentCfg = config.intent || {};
+  if (intentCfg.baseUrl && intentCfg.apiKey && intentCfg.userId) {
+    try {
+      const url = \`\${intentCfg.baseUrl}/intent/\${intentCfg.userId}\`;
+      const resp = await fetch(url, {
+        headers: { 'X-API-Key': intentCfg.apiKey }
+      });
+      
+      const data = await resp.json();
+      if (data) {
+        enriched.intent = {
+          ...data,
+          provider: 'antfarm'
+        };
+      }
+    } catch (e) {
+      enriched.enrichment_errors.push(\`Intent enrichment failed: \${e.message}\`);
+    }
+  }
+
+  // Fallback intent if still empty
   if (!enriched.intent) {
     enriched.intent = {
       action: 'unknown',
