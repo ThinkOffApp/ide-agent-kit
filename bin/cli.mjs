@@ -1256,6 +1256,36 @@ async function initIdeConfig(ide, profile = 'balanced') {
 # Broaden 'tmux.allow' for read/build tasks to reduce manual 'yes' clicking,
 # but keep destructive actions behind manual IDE approval barriers.
 # Profile: ${normalizedProfile}`
+    },
+    'antigravity': {
+      filename: 'ide-agent-kit.json',
+      config: {
+        listen: { host: '127.0.0.1', port: 8787 },
+        queue: { path: './ide-agent-queue.jsonl' },
+        receipts: { path: './ide-agent-receipts.jsonl', stdout_tail_lines: 80 },
+        tmux: {
+          default_session: 'iak-runner',
+          ide_session: 'claude',
+          nudge_text: 'check rooms',
+          allow: allowForProfile
+        },
+        github: { webhook_secret: '', event_kinds: ['pull_request', 'issue_comment'] },
+        outbound: { default_webhook_url: '' },
+        openclaw: { host: '127.0.0.1', port: 18791, token: '' }
+      },
+      notes: `# Antigravity IDE Agent Kit config
+# Antigravity does not use tmux for nudging. New messages are delivered via
+# the notification file (/tmp/iak-new-messages.txt) which the agent reads
+# on a cron or hook interval.
+#
+# Recommended setup:
+#   1. In your ~/.claude/settings.json, set up a CronCreate or UserPromptSubmit
+#      hook that periodically checks /tmp/iak-new-messages.txt
+#   2. Or add to MEMORY.md: "Check /tmp/iak-new-messages.txt on each prompt"
+#   3. The room poller writes new messages to the notification file automatically
+#   4. tmux nudge is still attempted as a fallback if a tmux session exists
+#
+# Profile: ${normalizedProfile}`
     }
   };
 
@@ -1297,6 +1327,37 @@ async function initIdeConfig(ide, profile = 'balanced') {
       };
       writeFileSync(settingsPath, JSON.stringify(settings, null, 2) + '\n');
       console.log(`Created ${settingsPath} with auto-approved commands (profile: ${normalizedProfile})`);
+    } else {
+      console.log(`Claude Code settings already exist: ${settingsPath}`);
+    }
+  }
+
+  if (ide === 'antigravity') {
+    const claudeDir = resolve('.claude');
+    if (!existsSync(claudeDir)) mkdirSync(claudeDir, { recursive: true });
+    const settingsPath = resolve('.claude', 'settings.json');
+    if (!existsSync(settingsPath)) {
+      const settings = {
+        permissions: {
+          allow: [
+            'Bash(*)',
+            'Read',
+            'Edit',
+            'Write',
+            'Glob',
+            'Grep',
+            'WebFetch',
+            'WebSearch',
+            'Agent',
+            'Skill',
+            'NotebookEdit',
+          ],
+          defaultMode: 'bypassPermissions',
+        },
+        skipDangerousModePermissionPrompt: true,
+      };
+      writeFileSync(settingsPath, JSON.stringify(settings, null, 2) + '\n');
+      console.log(`Created ${settingsPath} with Antigravity auto-approve settings (profile: ${normalizedProfile})`);
     } else {
       console.log(`Claude Code settings already exist: ${settingsPath}`);
     }
