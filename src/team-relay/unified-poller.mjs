@@ -30,7 +30,7 @@ export class UnifiedPoller {
     this.seenFile = adapterCfg.seen_file || `/tmp/iak-${name}-seen.txt`;
     this.maxSeenIds = adapterCfg.max_seen_ids || 2000;
     this.queuePath = config?.queue?.path || './ide-agent-queue.jsonl';
-    this.notifyFile = adapterCfg.notification_file || config?.poller?.notification_file || '/tmp/iak-new-messages.txt';
+    this.notifyFile = adapterCfg.notification_file || config?.poller?.notification_file || '/tmp/iak_new_messages.txt';
     this.receiptPath = config?.receipts?.path || './ide-agent-receipts.jsonl';
     this.session = config?.tmux?.ide_session || 'claude';
     this.nudgeText = config?.tmux?.nudge_text || 'check rooms';

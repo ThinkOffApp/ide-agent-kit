@@ -1306,13 +1306,13 @@ async function initIdeConfig(ide, profile = 'balanced') {
       },
       notes: `# Antigravity IDE Agent Kit config
 # Antigravity does not use tmux for nudging. New messages are delivered via
-# the notification file (/tmp/iak-new-messages.txt) which the agent reads
+# the notification file (/tmp/iak_new_messages.txt) which the agent reads
 # on a cron or hook interval.
 #
 # Recommended setup:
 #   1. In your ~/.claude/settings.json, set up a CronCreate or UserPromptSubmit
-#      hook that periodically checks /tmp/iak-new-messages.txt
-#   2. Or add to MEMORY.md: "Check /tmp/iak-new-messages.txt on each prompt"
+#      hook that periodically checks /tmp/iak_new_messages.txt
+#   2. Or add to MEMORY.md: "Check /tmp/iak_new_messages.txt on each prompt"
 #   3. The room poller writes new messages to the notification file automatically
 #   4. tmux nudge is still attempted as a fallback if a tmux session exists
 #
@@ -1347,7 +1347,7 @@ async function initIdeConfig(ide, profile = 'balanced') {
     if (!existsSync(hookScript)) {
       writeFileSync(hookScript, `#!/bin/bash
 # Hook: check for new room messages and inject them into the session
-MSG_FILE="/tmp/iak-new-messages.txt"
+MSG_FILE="/tmp/iak_new_messages.txt"
 if [ -s "$MSG_FILE" ]; then
     echo ""
     echo "=== NEW ROOM MESSAGES ==="

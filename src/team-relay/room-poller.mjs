@@ -22,7 +22,7 @@ import { randomUUID } from 'node:crypto';
  */
 
 const SEEN_FILE_DEFAULT = '/tmp/iak-seen-ids.txt';
-const NOTIFY_FILE_DEFAULT = '/tmp/iak-new-messages.txt';
+const NOTIFY_FILE_DEFAULT = '/tmp/iak_new_messages.txt';
 
 function loadSeenIds(path) {
   try {
