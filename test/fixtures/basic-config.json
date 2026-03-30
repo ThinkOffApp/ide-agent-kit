@@ -1,0 +1,19 @@
+{
+  "listen": {
+    "host": "127.0.0.1",
+    "port": 8787
+  },
+  "queue": {
+    "path": "./test-queue.jsonl"
+  },
+  "receipts": {
+    "path": "./test-receipts.jsonl",
+    "stdout_tail_lines": 10
+  },
+  "poller": {
+    "rooms": "test-room",
+    "api_key": "antfarm_test",
+    "handle": "@testbot",
+    "interval_sec": 60
+  }
+}

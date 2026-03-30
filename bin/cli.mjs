@@ -45,9 +45,9 @@ function usage() {
   console.log(`IDE Agent Kit v${pkg.version}
 
 Usage:
-  ide-agent-kit check [--config <path>]
+  ide-agent-kit check [--config <path>] [--json]
     Run environment and configuration sanity check.
-  ide-agent-kit check [--config <path>]
+  ide-agent-kit check [--config <path>] [--json]
     Run environment and configuration sanity check.
   ide-agent-kit serve [--config <path>]
     Start webhook relay server for inbound GitHub events.
@@ -192,14 +192,24 @@ async function main() {
   if (command === 'check') {
     const opts = parseKV(args, 'check');
     const config = loadConfig(opts.config);
-    console.log('Running IDE Agent Kit sanity check...\n');
     const { runSanityCheck } = await import('../src/common/check.mjs');
     const results = await runSanityCheck(config);
-    results.forEach(r => {
-      const icon = r.status === 'ok' ? 'âœ…' : (r.status === 'warn' ? 'âš ' : 'â Œ');
-      console.log(`${icon} ${r.name}: ${r.detail}`);
-    });
-    console.log('\nCheck complete.');
+
+    if (opts.json) {
+      console.log(JSON.stringify(results, null, 2));
+    } else {
+      console.log('Running IDE Agent Kit sanity check...\n');
+      results.forEach(r => {
+        const icon = r.status === 'ok' ? 'âœ…' : (r.status === 'warn' ? 'âš ' : 'â Œ');
+        console.log(`${icon} ${r.name}: ${r.detail}`);
+      });
+      console.log('\nCheck complete.');
+    }
+
+    const hasFailures = results.some(r => r.status === 'fail');
+    if (hasFailures) {
+      process.exit(1);
+    }
     return;
   }
   if (!command || command === '--help' || command === '-h') {
