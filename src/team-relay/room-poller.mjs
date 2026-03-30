@@ -145,7 +145,10 @@ export async function startRoomPoller({ rooms, apiKey, handle, interval, config 
           timestamp: ts,
           room,
           actor: { login: sender },
-          payload: { body, room }
+          payload: { body, room },
+          intent: null, // Enrichment: parsed intent via UIK
+          memory_context: null, // Enrichment: relevant context via claude-mem
+          enrichment_errors: []
         };
         appendFileSync(queuePath, JSON.stringify(event) + '\n');
 
