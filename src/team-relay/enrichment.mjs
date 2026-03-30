@@ -20,14 +20,12 @@ export async function enrichEvent(event, config = {}) {
   const memCfg = config.memory_api || {};
   if (memCfg.baseUrl && memCfg.token) {
     try {
-      const url = `${memCfg.baseUrl}/observations/search`;
+      const params = new URLSearchParams({ query: body, limit: '3' });
+      const url = `${memCfg.baseUrl}/search/observations?${params}`;
       const resp = await fetch(url, {
-        method: 'POST',
         headers: {
-          'Content-Type': 'application/json',
           'Authorization': `Bearer ${memCfg.token}`
-        },
-        body: JSON.stringify({ query: body, limit: 3 })
+        }
       });
 
       if (!resp.ok) {
@@ -40,14 +38,14 @@ export async function enrichEvent(event, config = {}) {
       }
 
       const data = await resp.json();
-      if (data && data.results) {
-        enriched.memory_context = {
-          recent_observations: data.results.map(r => ({
-            snippet: r.snippet,
-            path: r.path,
-            score: r.score
-          }))
-        };
+      if (data && data.content) {
+        // claude-mem returns MCP-style {content: [{type, text}]}
+        const texts = data.content
+          .filter(c => c.type === 'text' && c.text)
+          .map(c => c.text);
+        if (texts.length > 0) {
+          enriched.memory_context = { raw: texts };
+        }
       } else if (data && data.error) {
         addError(`Memory enrichment API error: ${data.error} - ${data.message || ''}`);
       }

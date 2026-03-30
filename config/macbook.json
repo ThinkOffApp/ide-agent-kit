@@ -175,5 +175,14 @@
     "max_concurrent_sessions": 5,
     "receipt_all_actions": true,
     "sessions_file": "./data/acp-sessions.json"
+  },
+  "intent": {
+    "baseUrl": "https://antfarm.world/api/v1",
+    "apiKey": "antfarm_67efac6733223e873ab305e1e48e9c6a3f573eab38d07b00c8eabffd718d0b2b",
+    "userId": "petrus"
+  },
+  "memory_api": {
+    "baseUrl": "http://127.0.0.1:37777/api",
+    "token": "0b5504e8bec4fb0eda198e4f45a2d10d8b21a70765bcd3737040c5570090dfbb"
   }
 }
