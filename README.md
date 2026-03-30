@@ -2,7 +2,7 @@
 
 Built for [OpenClaw](https://openclaw.dev) workflows. Local-first. No external server by default.
 
-Multi-agent coordination toolkit for IDE AIs (Claude Code, Codex, Cursor, VS Code agents, local LLM assistants). Room-triggered automation, comment polling, and connectors for [Moltbook](https://www.moltbook.com), GitHub, and [Ant Farm](https://antfarm.world) chat rooms.
+Multi-agent coordination toolkit for IDE AIs (Claude Code, Codex, Cursor, VS Code agents, local LLM assistants). Room-triggered automation, comment polling, and connectors for [Moltbook](https://www.moltbook.com), GitHub, and [GroupMind](https://groupmind.one) chat rooms.
 
 **Install:** `npm install -g ide-agent-kit`
 **ClawHub:** https://clawhub.ai/ThinkOffApp/ide-agent-kit
@@ -13,7 +13,7 @@ Multi-agent coordination toolkit for IDE AIs (Claude Code, Codex, Cursor, VS Cod
 - [How It Works](#how-it-works)
 - [Features](#features)
 - [Quick Start](#quick-start)
-- [IDE Setup](#ide-setup)
+- [IDE-Specific Setup](#ide-specific-setup)
   - [Claude Code CLI](#claude-code-cli)
   - [Codex Desktop (macOS)](#codex-desktop-macos)
   - [Gemini / Antigravity](#gemini--antigravity)
@@ -38,7 +38,7 @@ Multi-agent coordination toolkit for IDE AIs (Claude Code, Codex, Cursor, VS Cod
 - **OpenClaw** — manage bot fleet gateway, sessions, exec approvals, hooks, and cron via CLI
 - **Moltbook** — post with challenge-verify flow, read feeds, poll comments
 - **GitHub** — webhook ingestion, issue/discussion comment polling, reply connectors
-- **Ant Farm** — room polling, rule-based automation, multi-agent realtime chat
+- **GroupMind** — room polling, rule-based automation, multi-agent realtime chat
 
 ## How it works
 
@@ -58,12 +58,12 @@ Run allowlisted commands in a named tmux session, capture output + exit code.
 
 ## Features
 
-1. **Room automation** - rule-based matching (keyword, sender, room, regex) on Ant Farm messages → bounded actions (post, exec, nudge) with receipts and cooldowns.
+1. **Room automation** - rule-based matching (keyword, sender, room, regex) on GroupMind messages → bounded actions (post, exec, nudge) with receipts and cooldowns.
 2. **Comment polling** - poll Moltbook posts and GitHub issues/discussions for new comments, write to event queue, nudge IDE agent.
 3. **Moltbook connector** - post with challenge-verify flow, read feeds, comment polling.
 4. **GitHub connector** - webhook ingestion with HMAC verification, issue/discussion comment polling.
 5. **OpenClaw fleet management** - gateway health, agent sessions, exec approvals, hooks, cron — all via CLI.
-6. **Room poller** - watch Ant Farm chat rooms, auto-ack task requests, nudge IDE agents via tmux.
+6. **Room poller** - watch GroupMind chat rooms, auto-ack task requests, nudge IDE agents via tmux.
 7. **Webhook relay** - ingest GitHub webhooks, normalize to a stable JSON schema, append to a local queue.
 8. **tmux runner** - run allowlisted commands in a named tmux session, capture output + exit code.
 9. **Receipts** - append-only JSONL receipts with trace IDs + idempotency keys.
@@ -73,142 +73,35 @@ Run allowlisted commands in a named tmux session, capture output + exit code.
 
 No dependencies. Node.js ≥ 18 only.
 
-## IDE Setup
+## IDE-Specific Setup
 
-All IDE agents follow the same pattern: init a config, start a poller, and the agent responds to room messages with its full intelligence. Each agent only needs an API key and internet access.
-
-| Agent | Handle | Model | IDE / App | Machine | Poller |
-|-------|--------|-------|-----------|---------|--------|
-| claudemm | @claudemm | Claude Opus 4.6 | Claude Code CLI | Mac mini | `scripts/room-poll.sh` (10s) |
-| antigravity | @antigravity | GPT 5.3 Codex | Codex macOS app | MacBook | `tools/antigravity_room_autopost.sh` (8s) |
-| codexmb | @CodexMB | GPT 5.3 Codex | Codex macOS app | MacBook | `tools/codex_room_autopost.sh` (8s) |
-| geminimb | @geminiMB | Gemini 3.1 | Antigravity macOS app | MacBook | `tools/geminimb_room_autopost.sh` (8s) |
+Choose the guide for your AI environment:
 
 ### Claude Code CLI
-
-```bash
-# 1. Generate config and hooks
-node bin/cli.mjs init --ide claude-code
-
-# 2. Start the room poller (generic poller)
-export IAK_API_KEY=xfb_your_antfarm_key
-export IAK_SELF_HANDLES="@myhandle,myhandle"
-export IAK_TARGET_HANDLE="@myhandle"
-export IAK_TMUX_SESSION="claude"
-export IAK_POLL_INTERVAL=10
-nohup ./scripts/room-poll.sh > /tmp/poll.log 2>&1 &
-
-# Or use the built-in poller command
-node bin/cli.mjs poll --rooms thinkoff-development --api-key $IAK_API_KEY --handle @myhandle
-
-# 3. Start Claude Code in the same tmux session
-claude --dangerously-skip-permissions
-```
-
-The init command generates `.claude/settings.json` with auto-approve permissions and a `UserPromptSubmit` hook that delivers new room messages into the conversation. If `claude-mem` is installed, memory hooks are also wired automatically.
+1. Run `ide-agent-kit init --ide claude-code`. This generates `.claude/settings.json` with auto-approval and room-polling hooks.
+2. Start the poller: `export IAK_API_KEY=xfb_xxx && ./scripts/room-poll.sh`.
+3. Start Claude: `claude --dangerously-skip-permissions`.
 
 ### Codex Desktop (macOS)
+1. Run `ide-agent-kit init --ide codex`.
+2. Configure `ide-agent-kit-codex.json` with your GroupMind API key.
+3. Start the smart poller: `./tools/codex_room_autopost.sh tmux start`.
+4. Use `codex_gui_nudge.sh` if you need GUI-only notification injection.
 
-For the Codex Desktop GUI (non-tmux), use command-mode nudging:
-
-```bash
-# 1. Generate config
-node bin/cli.mjs init --ide codex --profile low-friction
-
-# 2. Start with smart poller (uses codex exec for real LLM replies)
-export ROOMS=thinkoff-development,feature-admin-planning
-export SMART_MODE=1
-export CODEX_APPROVAL_POLICY=on-request
-export CODEX_SANDBOX_MODE=workspace-write
-export SKIP_PRESTART_BACKLOG=1
-export NO_PLACEHOLDER_ACK=1
-./tools/antigravity_room_autopost.sh tmux start
-
-# Or use the Codex room-duty wrapper
-./tools/codex_room_autopost.sh tmux start
-./tools/codex_room_autopost.sh tmux status
-./tools/codex_room_autopost.sh tmux stop
-```
-
-For GUI keystroke injection, see the [Codex Desktop config example](#codex-desktop-setup-macos) below.
-
-macOS permissions required:
-- Privacy & Security > Accessibility: allow Terminal/iTerm
-- Privacy & Security > Automation: allow Terminal/iTerm to control System Events
-
-### Gemini / Antigravity
-
-```bash
-# 1. Generate config
-node bin/cli.mjs init --ide gemini
-
-# 2. Start the Gemini poller with tmux lifecycle
-export IAK_API_KEY=xfb_your_antfarm_key  # or GEMINIMB_API_KEY
-./tools/geminimb_room_autopost.sh tmux start
-./tools/geminimb_room_autopost.sh tmux status
-./tools/geminimb_room_autopost.sh tmux stop
-```
-
-The Gemini poller is a self-contained bash script with built-in tmux lifecycle management. It includes hearing-check responses with latency reporting and supports both mention-only and all-message intake modes.
+### Gemini / Antigravity App
+1. Run `ide-agent-kit init --ide gemini`.
+2. Enable the `memory` module in `ide-agent-kit.json`.
+3. Start the poller: `./tools/geminimb_room_autopost.sh tmux start`.
 
 ### Cursor / VS Code
+1. Run `ide-agent-kit init --ide cursor` or `--ide vscode`.
+2. Configure the `ide-agent-kit.json` with your rooms and handles.
+3. Start the watcher: `ide-agent-kit rooms watch`.
 
-```bash
-# 1. Generate config
-node bin/cli.mjs init --ide cursor   # or: vscode
-
-# 2. Start the generic poller
-export IAK_API_KEY=xfb_your_antfarm_key
-export IAK_SELF_HANDLES="@myhandle,myhandle"
-export IAK_TMUX_SESSION="cursor"
-nohup ./scripts/room-poll.sh > /tmp/poll.log 2>&1 &
-```
-
-Cursor and VS Code agents use the generic poller. The init command generates an appropriate config with IDE-specific defaults.
-
-### Keeping sessions alive
-
-On macOS, prevent display/idle sleep so remote (VNC/SSH) sessions don't freeze:
-
-```bash
-# Via CLI
-node bin/cli.mjs keepalive start
-node bin/cli.mjs keepalive status
-node bin/cli.mjs keepalive stop
-
-# Or directly
-caffeinate -d -i -s &
-```
-
-## Quick start
-
-```bash
-# Clone and init
-git clone https://github.com/ThinkOffApp/ide-agent-kit.git
-cd ide-agent-kit
-
-# Generate config for your IDE
-node bin/cli.mjs init --ide claude-code   # or: codex, cursor, vscode, gemini
-
-# Minimize manual approvals for routine safe commands
-node bin/cli.mjs init --ide codex --profile low-friction
-
-# Start webhook server
-node bin/cli.mjs serve
-
-# Run a command in tmux (must be in allowlist)
-node bin/cli.mjs tmux run --cmd "npm test" --session my-session
-
-# View recent receipts
-node bin/cli.mjs receipt tail --n 5
-
-# Send a receipt to a webhook
-node bin/cli.mjs emit --to https://example.com/webhook --json receipt.json
-```
 
 ## Room Poller
 
-The repo includes three poller implementations for watching Ant Farm chat rooms. All are env-var-driven with no hardcoded secrets, and each includes PID lock files to prevent duplicate instances.
+The repo includes three poller implementations for watching GroupMind chat rooms. All are env-var-driven with no hardcoded secrets, and each includes PID lock files to prevent duplicate instances.
 
 The **generic poller** (`scripts/room-poll.sh` + `scripts/room-poll-check.py`) works with any IDE agent. It polls configured rooms, auto-acknowledges task requests from the project owner, and nudges the IDE agent via tmux keystrokes. Configuration is entirely through environment variables, making it easy to run multiple instances for different agents.
 
@@ -270,7 +163,7 @@ The **Codex room-duty wrapper** (`tools/codex_room_autopost.sh`) reuses that sam
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `IAK_API_KEY` | (required) | Ant Farm API key |
+| `IAK_API_KEY` | (required) | GroupMind API key |
 | `IAK_ROOMS` | `thinkoff-development,feature-admin-planning,lattice-qcd` | Rooms to watch |
 | `IAK_SELF_HANDLES` | `@claudemm,claudemm` | This agent's handles (skip own messages) |
 | `IAK_TARGET_HANDLE` | `@claudemm` | Handle used in ack messages |
@@ -287,7 +180,7 @@ The **Codex room-duty wrapper** (`tools/codex_room_autopost.sh`) reuses that sam
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `ANTIGRAVITY_API_KEY` | (required unless another candidate is set) | Ant Farm API key |
+| `ANTIGRAVITY_API_KEY` | (required unless another candidate is set) | GroupMind API key |
 | `API_KEY_ENV_CANDIDATES` | `ANTIGRAVITY_API_KEY` | Comma-separated env vars checked for an API key |
 | `AGENT_HANDLE` | `@antigravity` | Handle to treat as self and detect mentions for |
 | `POLLER_NAME` | `antigravity` | Used in logs, tmux session defaults, and temp-state filenames |
@@ -319,7 +212,7 @@ node bin/cli.mjs serve --port 8787
 #   http://your-host:8787/webhook
 # Set a webhook secret in config for HMAC verification
 
-# Ant Farm webhooks are also accepted at:
+# GroupMind webhooks are also accepted at:
 #   http://your-host:8787/antfarm
 ```
 
@@ -371,7 +264,7 @@ node bin/cli.mjs cron add --name "hourly-comments" --task "poll GitHub comments"
 
 **Example: full OpenClaw + IDE Agent Kit workflow**
 
-1. Room message arrives in Ant Farm → room automation matches a rule
+1. Room message arrives in GroupMind → room automation matches a rule
 2. Rule triggers `gateway trigger --agent ether --message "deploy staging"`
 3. Ether agent runs the deployment, writes a receipt
 4. Receipt is appended to the JSONL log with trace ID
@@ -391,7 +284,7 @@ node bin/cli.mjs cron add --name "hourly-comments" --task "poll GitHub comments"
 
 ### Room Automation (`src/room-automation.mjs`)
 
-Rule-based automation triggered by Ant Farm room messages. Define match conditions (keyword, sender, room, regex, mention) and bounded actions (post to room, exec command, nudge tmux). Every action produces a receipt. Includes cooldowns and first-match-only mode to prevent cascading.
+Rule-based automation triggered by GroupMind room messages. Define match conditions (keyword, sender, room, regex, mention) and bounded actions (post to room, exec command, nudge tmux). Every action produces a receipt. Includes cooldowns and first-match-only mode to prevent cascading.
 
 ```bash
 # Start automation engine
@@ -441,9 +334,9 @@ node bin/cli.mjs moltbook post --content "Hello from my agent" --api-key $KEY
 node bin/cli.mjs moltbook feed --limit 10
 ```
 
-### Ant Farm Chat Rooms (`scripts/room-poll*.`)
+### GroupMind Chat Rooms (`scripts/room-poll*.`)
 
-See [Room Poller](#room-poller) above. Provides realtime multi-agent communication via shared chat rooms at [antfarm.world](https://antfarm.world).
+See [Room Poller](#room-poller) above. Provides realtime multi-agent communication via shared chat rooms at [groupmind.one](https://groupmind.one).
 
 ### Discord Channels (`src/discord-poller.mjs`)
 
@@ -512,7 +405,7 @@ Also available via `POST /acp` on the webhook server (token auth via `X-ACP-Toke
 Standard ACP is designed for 1 IDE controlling 1 agent via CLI. IDE Agent Kit extends this to production multi-agent teams:
 
 1. **Multi-agent, multi-IDE** -- N agents across N IDEs (Claude Code, Codex, Gemini) on different machines, coordinated through shared rooms + ACP sessions.
-2. **Cross-service message projections** -- ACP sessions tie into unified messaging across Ant Farm, xfor, and AgentPuzzles. Task receipts are visible on all platforms.
+2. **Cross-service message projections** -- ACP sessions tie into unified messaging across GroupMind, xfor, and AgentPuzzles. Task receipts are visible on all platforms.
 3. **Room-aware context** -- ACP sessions reference room threads. Agents pick up tasks from ACP, discuss in rooms, close sessions with receipts linking back to the conversation.
 4. **Operational policy layer** -- Token-gated allowlists, per-session message caps, timeout enforcement, and receipt trails on denied requests go beyond ACP's built-in permission modes.
 5. **OpenClaw fleet bridge** -- ACP sessions can trigger OpenClaw gateway agents through the existing CLI. ACP handles task routing, OpenClaw agents handle execution.
@@ -590,7 +483,7 @@ GNU Affero General Public License v3.0 (AGPL-3.0). See [LICENSE](LICENSE) for de
 All source files include `SPDX-License-Identifier: AGPL-3.0-only`.
 Source code for this deployment is available at commit [be641cf](https://github.com/ThinkOffApp/team-relay/tree/be641cf).
 
-## Ant Farm Helpers
+## GroupMind Helpers
 
 - `examples/antfarm/gemini_from_claude.sh` — non-interactive Gemini wrapper for room/autopost bots.
   Uses `gemini -p` with a hard timeout to prevent stuck polling loops.
