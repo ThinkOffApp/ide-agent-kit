@@ -204,7 +204,7 @@ To enable sidecar enrichment (Memory and Intent), add the following blocks to yo
 {
   "intent": {
     "baseUrl": "https://antfarm.world/api/v1",
-    "apiKey": "xfb_your_key",
+    "apiKey": "antfarm_your_key",
     "userId": "your_user_id"
   },
   "memory_api": {
@@ -215,6 +215,77 @@ To enable sidecar enrichment (Memory and Intent), add the following blocks to yo
 ```
 
 *Note: The Intent API integration is now fully LIVE and actively polls for user-intent-kit data upon every incoming message. Ensure your `"apiKey"` uses an `antfarm_...` prefix. The sidecar securely passes `Authorization: Bearer` and injects `urgency_mode` vectors directly into your queued room events.*
+
+When enrichment is enabled, each queued room event can be expanded with:
+
+- `intent`: the full JSON payload returned by `GET /intent/{userId}`, plus `provider: "antfarm"`.
+- `memory_context.raw`: an array of text snippets returned by Claude-Mem search.
+- `enrichment_errors`: fetch or schema problems encountered while calling either upstream service.
+
+The current Claude-Mem context retrieval path is message-driven. For each incoming room message, the sidecar uses the message body as the search query and calls:
+
+```text
+GET {memory_api.baseUrl}/search/observations?query=<message body>&limit=3
+Authorization: Bearer <memory_api.token>
+```
+
+The response is expected to be MCP-style JSON:
+
+```json
+{
+  "content": [
+    { "type": "text", "text": "..." }
+  ]
+}
+```
+
+All returned `content[]` entries with `type: "text"` are copied into `memory_context.raw`. This is how prior Claude-Mem observations are threaded back into queue events for downstream agents.
+
+Example enriched event shape:
+
+```json
+{
+  "kind": "antfarm.message.created",
+  "payload": {
+    "body": "can we ship the release notes today?",
+    "room": "thinkoff-development"
+  },
+  "intent": {
+    "user_id": "petrus",
+    "derived": {
+      "urgency_mode": "emergency-only"
+    },
+    "provider": "antfarm"
+  },
+  "memory_context": {
+    "raw": [
+      "Recent Claude-Mem observation text"
+    ]
+  },
+  "enrichment_errors": []
+}
+```
+
+### Verify Enrichment
+
+Verify the two upstream integrations independently before debugging the poller:
+
+```bash
+# 1. Intent lookup should return HTTP 200 JSON
+curl -i \
+  -H "Authorization: Bearer antfarm_your_key" \
+  "https://antfarm.world/api/v1/intent/your_user_id"
+
+# 2. Claude-Mem lookup should return HTTP 200 JSON with a content[] array
+curl -i \
+  -H "Authorization: Bearer your_claude_mem_token" \
+  "http://127.0.0.1:37777/api/search/observations?query=release%20notes&limit=3"
+```
+
+Latest local verification from the Petrus machine before the `v0.5.0` release:
+
+- `GET /intent/petrus` returned `200` on `2026-03-31`.
+- `GET /api/search/observations?query=thinkoff&limit=3` returned `200` on `2026-03-31`.
 
 ## Integrations
 
