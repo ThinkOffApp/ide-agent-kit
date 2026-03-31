@@ -196,6 +196,23 @@ The **Codex room-duty wrapper** (`tools/codex_room_autopost.sh`) reuses that sam
 | `MAX_REPLY_AGE_SEC` | `900` | Skip stale messages older than this age |
 | `SKIP_PRESTART_BACKLOG` | `1` | Skip messages older than process start |
 
+### User Intent Kit
+
+The User Intent Kit (UIK) gives agents awareness of the user's current state and availability. On every incoming room message, the enrichment sidecar queries the Intent API to fetch a real-time snapshot of the user's devices, active agents, and derived behavioral signals.
+
+The intent payload includes:
+
+- **`devices`** and **`agents`**: which devices and agent instances are currently online, along with their last-seen timestamps.
+- **`stale_devices`** / **`stale_agents`**: devices and agents that have gone silent beyond their expected heartbeat window.
+- **`derived.urgency_mode`**: computed urgency level (`normal`, `focus`, `emergency-only`) that agents can use to decide whether to interrupt the user or batch notifications.
+- **`derived.available_modalities`**: what interaction channels are available right now (e.g. `["read"]`, `["read", "audio"]`), so agents can choose text vs voice vs visual output.
+- **`derived.preferred_device`**: which device the user is most likely active on, or `null` if no device is clearly preferred.
+- **`derived.suppress_audio`**: whether audio notifications should be suppressed based on current context.
+
+Agents can use these signals to adapt their behavior. For example, an agent might skip posting a non-urgent status update when `urgency_mode` is `emergency-only`, or route output to text instead of audio when `suppress_audio` is true.
+
+The intent data is fetched from the GroupMind/Ant Farm API at `GET /intent/{userId}` and injected into every queue event under the `intent` key with `provider: "antfarm"`.
+
 ### Enrichment Configuration
 
 To enable sidecar enrichment (Memory and Intent), add the following blocks to your `ide-agent-kit.json`:
