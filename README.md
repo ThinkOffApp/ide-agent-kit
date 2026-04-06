@@ -21,6 +21,7 @@ Multi-agent coordination toolkit for IDE AIs (Claude Code, Codex, Cursor, VS Cod
 - [Room Poller](#room-poller)
   - [Env Vars (Generic Poller)](#env-vars-generic-poller)
   - [Env Vars (Codex Smart Poller)](#env-vars-codex-smart-poller)
+  - [Background Consolidation](#background-consolidation)
 - [Integrations](#integrations)
   - [GitHub Webhooks](#github-webhooks-srcwebhook-servermjs)
   - [OpenClaw Bot Fleet](#openclaw-bot-fleet-srcopenclaw-mjs)
@@ -70,6 +71,7 @@ Run allowlisted commands in a named tmux session, capture output + exit code.
 10. **Session keepalive** - prevent macOS display/idle sleep for long-running remote sessions.
 11. **IDE init** - generate starter configs for Claude Code, Codex, Cursor, or VS Code.
 12. **ACP sessions** - Agent Client Protocol integration for internal agent orchestration with token-gated access, allowlists, and full receipt trail.
+13. **Background consolidation** - optional `light / REM / deep` pass over recent queue items, with append-only sidecars and no effect on the foreground room loop by default.
 
 No dependencies. Node.js ≥ 18 only.
 
@@ -167,6 +169,72 @@ The **Codex smart poller** (`tools/antigravity_room_autopost.sh`) is also self-c
 
 The **Codex room-duty wrapper** (`tools/codex_room_autopost.sh`) reuses that same engine but sets Codex-friendly defaults for handle, session name, API-key lookup, and state files. Use it when you want Codex to keep polling assigned rooms without manual prompts.
 
+### Background Consolidation
+
+The first dogfoodable consolidation pass is now available behind a separate CLI entrypoint:
+
+```bash
+ide-agent-kit background status --config ide-agent-kit.json
+ide-agent-kit background run --config ide-agent-kit.json
+```
+
+This is intentionally separate from `rooms watch`.
+
+- Foreground room polling remains reactive.
+- Background consolidation is opt-in.
+- One run executes the three human-readable phases sequentially:
+  - `light`
+  - `REM`
+  - `deep`
+- The background job never auto-posts into rooms in this first cut.
+
+What each phase does in the first implementation:
+
+- `light`: reads the last 2 hours of queue events (hard cap 100), stages them into a short-term working set, and writes a sidecar.
+- `REM`: synthesizes recurring themes, open threads, and follow-up candidates from the staged set, then writes a sidecar.
+- `deep`: promotes only explicit durable facts and decisions into an append-only local memory ledger, then writes a sidecar.
+
+Execution rules:
+
+- Single background job only; no concurrency.
+- Independent phase outcomes; one failure does not abort later phases.
+- Skip rules:
+  - `light`: skip if there are no new queue events since the previous run
+  - `REM`: skip if `light` staged zero items
+  - `deep`: skip if `REM` produced no durable facts or decisions
+
+Default timeout set:
+
+- `light = 60s`
+- `REM = 120s`
+- `deep = 120s`
+
+Sidecar output:
+
+- directory: `~/.iak/consolidation/`
+- per-phase file pattern: `<run_id>-<phase>.json`
+- durable deep-write ledger: `~/.iak/consolidation/deep-memory.jsonl`
+
+Example config:
+
+```json
+{
+  "background": {
+    "enabled": false,
+    "interval_sec": 3600,
+    "recent_window_sec": 7200,
+    "max_events": 100,
+    "sidecar_dir": "~/.iak/consolidation",
+    "lock_file": "/tmp/iak-background.lock",
+    "timeouts": {
+      "light_sec": 60,
+      "rem_sec": 120,
+      "deep_sec": 120
+    }
+  }
+}
+```
+
 ### Env vars (generic poller)
 
 | Variable | Default | Description |
@@ -206,7 +274,7 @@ The **Codex room-duty wrapper** (`tools/codex_room_autopost.sh`) reuses that sam
 
 ### User Intent Kit
 
-The User Intent Kit (UIK) gives agents awareness of the user's current state and availability. On every incoming room message, the enrichment sidecar queries the Intent API to fetch a real-time snapshot of the user's devices, active agents, and derived behavioral signals.
+The User Intent Kit (UIK) gives agents awareness of the user's current state and availability. When the optional enrichment sidecar is configured, it queries the Intent API on each incoming room message to fetch a real-time snapshot of the user's devices, active agents, and derived behavioral signals.
 
 The intent payload includes:
 
@@ -219,7 +287,7 @@ The intent payload includes:
 
 Agents can use these signals to adapt their behavior. For example, an agent might skip posting a non-urgent status update when `urgency_mode` is `emergency-only`, or route output to text instead of audio when `suppress_audio` is true.
 
-The intent data is fetched from the GroupMind/Ant Farm API at `GET /intent/{userId}` and injected into every queue event under the `intent` key with `provider: "antfarm"`.
+The intent data is fetched from the GroupMind/Ant Farm API at `GET /intent/{userId}` and injected into queue events under the `intent` key with `provider: "antfarm"`.
 
 ### Enrichment Configuration
 
@@ -239,7 +307,7 @@ To enable sidecar enrichment (Memory and Intent), add the following blocks to yo
 }
 ```
 
-*Note: The Intent API integration is now fully LIVE and actively polls for user-intent-kit data upon every incoming message. Ensure your `"apiKey"` uses an `antfarm_...` prefix. The sidecar securely passes `Authorization: Bearer` and injects `urgency_mode` vectors directly into your queued room events.*
+*Note: the enrichment path exists and works when configured, but it is still optional. If the `intent` block is absent, queue events fall back to a placeholder `intent` payload and no live UIK data is fetched.*
 
 When enrichment is enabled, each queued room event can be expanded with:
 

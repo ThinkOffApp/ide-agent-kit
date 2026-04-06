@@ -2,16 +2,17 @@
 
 import { describe, it, afterEach } from 'node:test';
 import { strict as assert } from 'node:assert';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { loadConfig } from '../src/config.mjs';
 
-const tempDirs = [];
+const tempPaths = [];
 
 afterEach(() => {
-  while (tempDirs.length > 0) {
-    rmSync(tempDirs.pop(), { recursive: true, force: true });
+  while (tempPaths.length > 0) {
+    const path = tempPaths.pop();
+    rmSync(path, { recursive: true, force: true });
   }
 });
 
@@ -44,9 +45,17 @@ describe('config', () => {
     assert.equal(cfg.comments.interval_sec, 120);
   });
 
-  it('merges partial poller and dm_poller config with defaults', () => {
+  it('default config has background section', () => {
+    const cfg = loadConfig('/tmp/iak-nonexistent-config.json');
+    assert.equal(cfg.background.enabled, false);
+    assert.equal(cfg.background.recent_window_sec, 7200);
+    assert.equal(cfg.background.max_events, 100);
+    assert.equal(cfg.background.timeouts.light_sec, 60);
+  });
+
+  it('merges partial poller, dm_poller, and background config with defaults', () => {
     const dir = mkdtempSync(join(tmpdir(), 'iak-config-'));
-    tempDirs.push(dir);
+    tempPaths.push(dir);
     const configPath = join(dir, 'config.json');
     writeFileSync(configPath, JSON.stringify({
       poller: {
@@ -55,6 +64,10 @@ describe('config', () => {
       },
       dm_poller: {
         enabled: true
+      },
+      background: {
+        enabled: true,
+        timeouts: { rem_sec: 90 }
       }
     }));
 
@@ -68,5 +81,10 @@ describe('config', () => {
     assert.equal(cfg.dm_poller.interval_sec, 30);
     assert.equal(cfg.dm_poller.seen_file, '/tmp/iak-dm-seen-ids.txt');
     assert.equal(cfg.dm_poller.limit, 100);
+    assert.equal(cfg.background.enabled, true);
+    assert.equal(cfg.background.recent_window_sec, 7200);
+    assert.equal(cfg.background.max_events, 100);
+    assert.equal(cfg.background.timeouts.light_sec, 60);
+    assert.equal(cfg.background.timeouts.rem_sec, 90);
   });
 });

@@ -6,6 +6,7 @@ import { parseArgs } from 'node:util';
 import { readFileSync } from 'node:fs';
 import { loadConfig } from '../src/config.mjs';
 import { runSanityCheck } from '../src/common/check.mjs';
+import { runBackground, backgroundStatus } from '../src/background.mjs';
 
 // --- team-relay (generic room/comms) ---
 import { tailReceipts } from '../src/team-relay/receipt.mjs';
@@ -71,6 +72,11 @@ Usage:
   ide-agent-kit rooms watch [--config <path>]
     Long-running room poller. Writes new messages to a notification file and
     optional tmux nudge. Uses rooms/apiKey/handle from config.poller section.
+
+  ide-agent-kit background <run|status> [--config <path>]
+    Run or inspect the background consolidation job.
+    run:    executes light -> REM -> deep sequentially and writes sidecars
+    status: shows whether background mode is enabled and the latest sidecar path
 
   ide-agent-kit poll --rooms <room1,room2> --api-key <key> --handle <@handle> [--interval <sec>] [--config <path>]
     (Legacy) Poll Ant Farm rooms with explicit CLI args. Prefer "rooms watch".
@@ -288,6 +294,30 @@ async function main() {
     });
     process.on('SIGINT', () => { console.log('\nStopping watcher.'); process.exit(0); });
     return;
+  }
+
+  // ── Background Consolidation ───────────────────────────
+  if (command === 'background') {
+    const opts = parseKV(args, subcommand || 'background');
+    const config = loadConfig(opts.config);
+
+    if (subcommand === 'status') {
+      console.log(JSON.stringify(backgroundStatus(config), null, 2));
+      return;
+    }
+
+    if (subcommand === 'run') {
+      const result = runBackground(config);
+      if (!result.ok) {
+        console.error(result.error);
+        process.exit(1);
+      }
+      console.log(JSON.stringify(result, null, 2));
+      return;
+    }
+
+    console.error('Usage: ide-agent-kit background <run|status> [--config <path>]');
+    process.exit(1);
   }
 
   // ── Rooms ──────────────────────────────────────────────

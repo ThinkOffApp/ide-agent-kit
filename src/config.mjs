@@ -59,6 +59,19 @@ const DEFAULT_CONFIG = {
     receipt_all_actions: true,
     max_messages_per_session: 200,
     sessions_file: '/tmp/iak-acp-sessions.json'
+  },
+  background: {
+    enabled: false,
+    interval_sec: 3600,
+    recent_window_sec: 7200,
+    max_events: 100,
+    sidecar_dir: '~/.iak/consolidation',
+    lock_file: '/tmp/iak-background.lock',
+    timeouts: {
+      light_sec: 60,
+      rem_sec: 120,
+      deep_sec: 120
+    }
   }
 };
 
@@ -85,6 +98,14 @@ export function loadConfig(configPath) {
     },
     discord: { ...DEFAULT_CONFIG.discord, ...raw.discord },
     acp: { ...DEFAULT_CONFIG.acp, ...raw.acp },
+    background: {
+      ...DEFAULT_CONFIG.background,
+      ...raw.background,
+      timeouts: {
+        ...DEFAULT_CONFIG.background.timeouts,
+        ...raw.background?.timeouts
+      }
+    },
     openclaw: raw.openclaw || {}
   };
 }
