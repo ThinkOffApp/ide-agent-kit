@@ -130,6 +130,12 @@ For Codex Desktop GUI (non-tmux) use command-mode nudging:
     "nudge_mode": "command",
     "nudge_command": "/ABSOLUTE/PATH/ide-agent-kit/tools/codex_gui_nudge.sh"
   },
+  "dm_poller": {
+    "enabled": true,
+    "seen_file": "/tmp/codex-dm-seen.txt",
+    "limit": 100,
+    "human_only": false
+  },
   "tmux": {
     "ide_session": "codex",
     "nudge_text": "check room and respond only if you have something relevant to say [codex]"
@@ -142,6 +148,8 @@ Run:
 ```bash
 node bin/cli.mjs rooms watch --config /ABSOLUTE/PATH/ide-agent-kit-codex.json
 ```
+
+When `dm_poller.enabled` is set, the same watcher also polls `/api/v1/messages?limit=100`, keeps a separate DM seen-state file, and nudges on new `type: "dm"` rows addressed to your configured handle. DM notifications are appended to the normal notification file so existing `rooms check` and GUI-nudge flows continue to work.
 
 There is also a ready-to-copy example at:
 
