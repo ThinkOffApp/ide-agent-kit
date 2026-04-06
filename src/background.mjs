@@ -238,6 +238,55 @@ export function backgroundStatus(config) {
   };
 }
 
+/**
+ * Fetch live UIK state to decide whether dreaming is allowed.
+ * Returns { allowed, lightOnly, state, reason } or null on failure.
+ */
+export async function fetchIntentGate(config) {
+  const intent = config.intent || {};
+  if (!intent.baseUrl || !intent.apiKey || !intent.userId) return null;
+
+  const url = `${intent.baseUrl.replace(/\/+$/, '')}/intent/${intent.userId}`;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 5000);
+
+  try {
+    const res = await fetch(url, {
+      headers: { 'X-API-Key': intent.apiKey },
+      signal: controller.signal
+    });
+    clearTimeout(timer);
+    if (!res.ok) return null;
+    const data = await res.json();
+    const derived = data.derived || {};
+
+    const state = derived.overall_state || 'unknown';
+    const urgency = derived.urgency_mode || 'normal';
+    const reachability = derived.reachability_mode || 'unknown';
+
+    // Emergency-only: no dreaming at all
+    if (urgency === 'emergency-only') {
+      return { allowed: false, lightOnly: false, state, reason: 'urgency is emergency-only' };
+    }
+
+    // Active desktop/focus work: light only
+    if (state === 'working' && (reachability === 'desktop' || reachability === 'mobile_full_focus')) {
+      return { allowed: true, lightOnly: true, state, reason: 'active work session, light only' };
+    }
+
+    // Meeting, outdoors, exercising: light only
+    if (['meeting_people', 'outdoors', 'exercising'].includes(state)) {
+      return { allowed: true, lightOnly: true, state, reason: `${state}, light only` };
+    }
+
+    // Sleeping, resting, unknown, transitioning: full dreaming
+    return { allowed: true, lightOnly: false, state, reason: `${state}, full dreaming allowed` };
+  } catch {
+    clearTimeout(timer);
+    return null; // On failure, don't block (allow run)
+  }
+}
+
 export function runBackground(config, options = {}) {
   const background = config.background || {};
   const queuePath = resolve(config.queue?.path || './ide-agent-queue.jsonl');
@@ -245,8 +294,14 @@ export function runBackground(config, options = {}) {
   const lockFile = resolve(expandHome(background.lock_file || '/tmp/iak-background.lock'));
   const now = options.now ? new Date(options.now) : new Date();
   const runId = options.runId || randomUUID();
+  const intentGate = options.intentGate || null; // Pre-fetched gate result
 
   ensureDir(sidecarDir);
+
+  // If intent gate says not allowed, exit early
+  if (intentGate && !intentGate.allowed) {
+    return { ok: false, skipped: true, reason: intentGate.reason, state: intentGate.state };
+  }
 
   return withLock(lockFile, () => {
     const latestWindowEnd = loadLatestWindowEnd(sidecarDir);
@@ -291,11 +346,12 @@ export function runBackground(config, options = {}) {
     })));
 
     const stagedItems = lightResult.output?.items || [];
+    const lightOnly = intentGate?.lightOnly || false;
     const remResult = runPhase('REM', () => ({
       sourceEventIds: stagedItems.map(item => item.event_id),
       output: buildRemOutput(stagedItems)
     }), background.timeouts?.rem_sec || 120);
-    const remStatus = stagedItems.length === 0 ? 'skipped' : remResult.status;
+    const remStatus = lightOnly ? 'skipped_light_only' : stagedItems.length === 0 ? 'skipped' : remResult.status;
     phasePaths.push(writeSidecar(sidecarDir, runId, 'REM', makeSidecar({
       phase: 'REM',
       runId,
@@ -310,7 +366,7 @@ export function runBackground(config, options = {}) {
     })));
 
     const remOutput = remResult.output || { themes: [], open_threads: [], follow_ups: [] };
-    const hasDurableItems = (remOutput.follow_ups?.length || 0) > 0 || (remOutput.open_threads?.length || 0) > 0;
+    const hasDurableItems = !lightOnly && ((remOutput.follow_ups?.length || 0) > 0 || (remOutput.open_threads?.length || 0) > 0);
     const deepResult = runPhase('deep', () => {
       const output = buildDeepOutput(remOutput);
       const artifactPath = writeDeepLedger(sidecarDir, output);

@@ -6,7 +6,7 @@ import { parseArgs } from 'node:util';
 import { readFileSync } from 'node:fs';
 import { loadConfig } from '../src/config.mjs';
 import { runSanityCheck } from '../src/common/check.mjs';
-import { runBackground, backgroundStatus } from '../src/background.mjs';
+import { runBackground, backgroundStatus, fetchIntentGate } from '../src/background.mjs';
 
 // --- team-relay (generic room/comms) ---
 import { tailReceipts } from '../src/team-relay/receipt.mjs';
@@ -307,9 +307,18 @@ async function main() {
     }
 
     if (subcommand === 'run') {
-      const result = runBackground(config);
+      const force = args.includes('--force');
+      let intentGate = null;
+      if (!force) {
+        intentGate = await fetchIntentGate(config);
+        if (intentGate && !intentGate.allowed) {
+          console.log(JSON.stringify({ ok: false, skipped: true, reason: intentGate.reason, state: intentGate.state }, null, 2));
+          return;
+        }
+      }
+      const result = runBackground(config, { intentGate });
       if (!result.ok) {
-        console.error(result.error);
+        console.error(result.error || result.reason);
         process.exit(1);
       }
       console.log(JSON.stringify(result, null, 2));
