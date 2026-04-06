@@ -17,6 +17,15 @@ const DEFAULT_CONFIG = {
     nudge_mode: 'tmux',
     nudge_command: ''
   },
+  dm_poller: {
+    enabled: false,
+    handle: '',
+    interval_sec: 30,
+    seen_file: '/tmp/iak-dm-seen-ids.txt',
+    api_key: '',
+    human_only: false,
+    limit: 100
+  },
   github: { webhook_secret: '', event_kinds: ['pull_request', 'issue_comment', 'check_suite', 'workflow_run'] },
   outbound: { default_webhook_url: '' },
   rate_limit: { message_interval_sec: 30 },
@@ -63,6 +72,7 @@ export function loadConfig(configPath) {
     receipts: { ...DEFAULT_CONFIG.receipts, ...raw.receipts },
     tmux: { ...DEFAULT_CONFIG.tmux, ...raw.tmux },
     poller: { ...DEFAULT_CONFIG.poller, ...raw.poller },
+    dm_poller: { ...DEFAULT_CONFIG.dm_poller, ...raw.dm_poller },
     github: { ...DEFAULT_CONFIG.github, ...raw.github },
     outbound: { ...DEFAULT_CONFIG.outbound, ...raw.outbound },
     rate_limit: { ...DEFAULT_CONFIG.rate_limit, ...raw.rate_limit },
@@ -75,7 +85,6 @@ export function loadConfig(configPath) {
     },
     discord: { ...DEFAULT_CONFIG.discord, ...raw.discord },
     acp: { ...DEFAULT_CONFIG.acp, ...raw.acp },
-    openclaw: raw.openclaw || {},
-    poller: raw.poller || {}
+    openclaw: raw.openclaw || {}
   };
 }
