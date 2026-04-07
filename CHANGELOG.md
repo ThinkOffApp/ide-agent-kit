@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.6.1 (2026-04-07)
+
+### Docs
+- README: new "Publishing state (the other side)" subsection under User Intent Kit, explaining that reading intent via IAK enrichment is only half the loop. Agents also need to publish their own slot heartbeats via `uik-daemon` from `user-intent-kit` >= 0.2.1. Without the daemon slots go stale and other agents treat them as offline.
+
 ## 0.6.0 (2026-04-07)
 
 ### Added

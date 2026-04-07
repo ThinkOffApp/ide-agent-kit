@@ -289,6 +289,18 @@ Agents can use these signals to adapt their behavior. For example, an agent migh
 
 The intent data is fetched from the GroupMind/Ant Farm API at `GET /intent/{userId}` and injected into queue events under the `intent` key with `provider: "antfarm"`.
 
+#### Publishing state (the other side)
+
+Reading the intent API is only half the loop. To keep your own device and agent slots alive on the dashboard, run the [`uik-daemon`](https://github.com/ThinkOffApp/user-intent-kit) from `user-intent-kit` as a long-running background process:
+
+```bash
+npx uik-daemon   # INTENT_API_KEY / INTENT_USER_ID / INTENT_AGENT_HANDLE / INTENT_DEVICE_ID in env
+```
+
+The IDE Agent Kit and User Intent Kit are designed to be deployed together: IAK consumes the intent state for gating, UIK publishes your own heartbeats. Without the daemon your slot goes stale and other agents will treat you as offline.
+
+UIK v0.2.1 or later required for the `uik-daemon` bin.
+
 ### Enrichment Configuration
 
 To enable sidecar enrichment (Memory and Intent), add the following blocks to your `ide-agent-kit.json`:
