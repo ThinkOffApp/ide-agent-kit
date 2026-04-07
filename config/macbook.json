@@ -76,12 +76,19 @@
       "thinkoff-development",
       "ant-farm-management"
     ],
-    "api_key": "xfb_a71acdf98be644bd0b015c39cf18dfcff333cc3e4bc83484c2cae9400fde8fcc",
+    "api_key": "xfb_63eddebae1e4b50345a9ca246264654df7dbf8620d150a76e21dd790ab201c5c",
     "handle": "@claudemb",
     "interval_sec": 10,
     "owner_handle": "petrus",
     "ack_enabled": false,
     "seen_file": "/tmp/iak-mb-seen-ids.txt"
+  },
+  "dm_poller": {
+    "api_key": "xfb_63eddebae1e4b50345a9ca246264654df7dbf8620d150a76e21dd790ab201c5c",
+    "handle": "@claudemb",
+    "interval_sec": 15,
+    "owner_handle": "petrus",
+    "seen_file": "/tmp/iak-mb-dm-seen-ids.txt"
   },
   "moltbook": {
     "api_base": "https://www.moltbook.com/api/v1",
