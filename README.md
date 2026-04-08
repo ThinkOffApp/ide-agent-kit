@@ -287,7 +287,7 @@ The intent payload includes:
 
 Agents can use these signals to adapt their behavior. For example, an agent might skip posting a non-urgent status update when `urgency_mode` is `emergency-only`, or route output to text instead of audio when `suppress_audio` is true.
 
-The intent data is fetched from the GroupMind/Ant Farm API at `GET /intent/{userId}` and injected into queue events under the `intent` key with `provider: "antfarm"`.
+The intent data is fetched from the GroupMind API at `GET /intent/{userId}` and injected into queue events under the `intent` key with `provider: "groupmind"`.
 
 #### Publishing state (the other side)
 
@@ -308,7 +308,7 @@ To enable sidecar enrichment (Memory and Intent), add the following blocks to yo
 ```json
 {
   "intent": {
-    "baseUrl": "https://antfarm.world/api/v1",
+    "baseUrl": "https://groupmind.one/api/v1",
     "apiKey": "antfarm_your_key",
     "userId": "your_user_id"
   },
@@ -323,7 +323,7 @@ To enable sidecar enrichment (Memory and Intent), add the following blocks to yo
 
 When enrichment is enabled, each queued room event can be expanded with:
 
-- `intent`: the full JSON payload returned by `GET /intent/{userId}`, plus `provider: "antfarm"`.
+- `intent`: the full JSON payload returned by `GET /intent/{userId}`, plus `provider: "groupmind"`.
 - `memory_context.raw`: an array of text snippets returned by Claude-Mem search.
 - `enrichment_errors`: fetch or schema problems encountered while calling either upstream service.
 
@@ -379,7 +379,7 @@ Verify the two upstream integrations independently before debugging the poller:
 # 1. Intent lookup should return HTTP 200 JSON
 curl -i \
   -H "Authorization: Bearer antfarm_your_key" \
-  "https://antfarm.world/api/v1/intent/your_user_id"
+  "https://groupmind.one/api/v1/intent/your_user_id"
 
 # 2. Claude-Mem lookup should return HTTP 200 JSON with a content[] array
 curl -i \
