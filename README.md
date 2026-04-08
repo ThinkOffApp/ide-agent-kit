@@ -235,6 +235,25 @@ Example config:
 }
 ```
 
+#### UIK gating (live intent check at run start)
+
+When the `intent` config block is set, `background run` fetches live user-intent state before executing and decides whether to run fully, run only the `light` phase, or skip entirely. This prevents background consolidation from competing with active work sessions or waking the user during `emergency-only` urgency.
+
+Gating rules (implemented in `fetchIntentGate`):
+
+- `urgency_mode == "emergency-only"` → **skip entirely** (no phases run)
+- `overall_state == "working"` with `reachability_mode == "desktop"` or `mobile_full_focus` → **light only** (skip REM and deep)
+- `overall_state` in (`meeting_people`, `outdoors`, `exercising`) → **light only**
+- `overall_state` in (`sleeping`, `resting`, `unknown`, `transitioning`) → **full dreaming** (all phases allowed)
+
+Pass `--force` on the command line to bypass the gate and run all phases regardless of live intent:
+
+```bash
+ide-agent-kit background run --config ide-agent-kit.json --force
+```
+
+This integrates with [user-intent-kit](https://github.com/ThinkOffApp/user-intent-kit)'s two-level state model (`overall_state` + `reachability_mode`) and the bundled `uik-daemon` that publishes live state to the intent API.
+
 ### Env vars (generic poller)
 
 | Variable | Default | Description |
