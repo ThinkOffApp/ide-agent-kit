@@ -299,7 +299,7 @@ npx uik-daemon   # INTENT_API_KEY / INTENT_USER_ID / INTENT_AGENT_HANDLE / INTEN
 
 The IDE Agent Kit and User Intent Kit are designed to be deployed together: IAK consumes the intent state for gating, UIK publishes your own heartbeats. Without the daemon your slot goes stale and other agents will treat you as offline.
 
-UIK v0.2.1 or later required for the `uik-daemon` bin.
+UIK v0.2.2 or later recommended for the `uik-daemon` bin. v0.2.0 introduced the daemon, v0.2.1 fixed a silent-exit in the example file, and v0.2.2 added agent-status republish on the heartbeat cadence so the agent slot does not expire while the daemon is running. Pre-0.2.2 daemons publish device state correctly but the agent slot still goes stale after its TTL.
 
 ### Enrichment Configuration
 
@@ -387,10 +387,10 @@ curl -i \
   "http://127.0.0.1:37777/api/search/observations?query=release%20notes&limit=3"
 ```
 
-Latest local verification from the Petrus machine before the `v0.5.0` release:
+Latest local verification from the Petrus machine, dogfooded against `v0.6.1`:
 
-- `GET /intent/petrus` returned `200` on `2026-03-31`.
-- `GET /api/search/observations?query=thinkoff&limit=3` returned `200` on `2026-03-31`.
+- `GET /intent/petrus` returned `200` on `2026-04-08`, with `agents=[claudemb, claudemm]` and `devices=[macbook, mac-mini]` both active and zero stale slots after the UIK v0.2.2 deployment.
+- `GET /api/search/observations?query=thinkoff&limit=3` returned `200` on `2026-03-31` (claude-mem path unchanged since v0.5.0).
 
 ## Integrations
 
