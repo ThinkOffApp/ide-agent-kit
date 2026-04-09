@@ -3,7 +3,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { UnifiedPoller } from '../src/unified-poller.mjs';
-import { antfarmAdapter } from '../src/adapters/antfarm.mjs';
+import { groupmindAdapter } from '../src/adapters/groupmind.mjs';
 import { discordAdapter } from '../src/adapters/discord.mjs';
 import { xforAdapter } from '../src/adapters/xfor.mjs';
 import { commentsAdapter } from '../src/adapters/comments.mjs';
@@ -16,10 +16,10 @@ describe('unified-poller', () => {
     assert.equal(typeof UnifiedPoller, 'function');
   });
 
-  it('creates a poller with antfarm adapter', () => {
+  it('creates a poller with groupmind adapter', () => {
     const config = { poller: { rooms: [], api_key: 'test', handle: '@test' } };
-    const poller = new UnifiedPoller(antfarmAdapter, config);
-    assert.equal(poller.adapter.name, 'antfarm');
+    const poller = new UnifiedPoller(groupmindAdapter, config);
+    assert.equal(poller.adapter.name, 'groupmind');
   });
 
   it('creates a poller with discord adapter', () => {
@@ -42,12 +42,12 @@ describe('unified-poller', () => {
 });
 
 describe('adapters', () => {
-  it('antfarm adapter has required methods', () => {
-    assert.equal(typeof antfarmAdapter.fetch, 'function');
-    assert.equal(typeof antfarmAdapter.getKey, 'function');
-    assert.equal(typeof antfarmAdapter.shouldSkip, 'function');
-    assert.equal(typeof antfarmAdapter.normalize, 'function');
-    assert.equal(typeof antfarmAdapter.formatLine, 'function');
+  it('groupmind adapter has required methods', () => {
+    assert.equal(typeof groupmindAdapter.fetch, 'function');
+    assert.equal(typeof groupmindAdapter.getKey, 'function');
+    assert.equal(typeof groupmindAdapter.shouldSkip, 'function');
+    assert.equal(typeof groupmindAdapter.normalize, 'function');
+    assert.equal(typeof groupmindAdapter.formatLine, 'function');
   });
 
   it('discord adapter has required methods', () => {
@@ -79,16 +79,16 @@ describe('adapters', () => {
     assert.deepEqual(result, []);
   });
 
-  it('antfarm adapter returns empty with no rooms', async () => {
-    const result = await antfarmAdapter.fetch({ poller: { rooms: [] } });
+  it('groupmind adapter returns empty with no rooms', async () => {
+    const result = await groupmindAdapter.fetch({ poller: { rooms: [] } });
     assert.deepEqual(result, []);
   });
 
-  it('antfarm adapter skips self messages', () => {
+  it('groupmind adapter skips self messages', () => {
     const config = { poller: { handle: '@claudemm' } };
-    assert.equal(antfarmAdapter.shouldSkip({ from: '@claudemm' }, config), true);
-    assert.equal(antfarmAdapter.shouldSkip({ from: 'claudemm' }, config), true);
-    assert.equal(antfarmAdapter.shouldSkip({ from: 'petrus' }, config), false);
+    assert.equal(groupmindAdapter.shouldSkip({ from: '@claudemm' }, config), true);
+    assert.equal(groupmindAdapter.shouldSkip({ from: 'claudemm' }, config), true);
+    assert.equal(groupmindAdapter.shouldSkip({ from: 'petrus' }, config), false);
   });
 
   it('discord adapter skips self messages', () => {
@@ -97,11 +97,11 @@ describe('adapters', () => {
     assert.equal(discordAdapter.shouldSkip({ author: { id: '456' } }, config), false);
   });
 
-  it('antfarm adapter normalizes messages', () => {
+  it('groupmind adapter normalizes messages', () => {
     const msg = { id: 'msg1', from: 'petrus', body: 'hello', created_at: '2026-01-01T00:00:00Z', _room: 'test-room' };
-    const event = antfarmAdapter.normalize(msg, {});
-    assert.equal(event.source, 'antfarm');
-    assert.equal(event.kind, 'antfarm.message.created');
+    const event = groupmindAdapter.normalize(msg, {});
+    assert.equal(event.source, 'groupmind');
+    assert.equal(event.kind, 'groupmind.message.created');
     assert.equal(event.actor.login, 'petrus');
     assert.equal(event.payload.body, 'hello');
     assert.equal(event.room, 'test-room');

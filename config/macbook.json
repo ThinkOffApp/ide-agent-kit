@@ -184,7 +184,7 @@
     "sessions_file": "./data/acp-sessions.json"
   },
   "intent": {
-    "baseUrl": "https://antfarm.world/api/v1",
+    "baseUrl": "https://groupmind.one/api/v1",
     "apiKey": "antfarm_67efac6733223e873ab305e1e48e9c6a3f573eab38d07b00c8eabffd718d0b2b",
     "userId": "petrus"
   },

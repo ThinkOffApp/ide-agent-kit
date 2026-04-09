@@ -23,7 +23,7 @@ function isAckOnly(body) {
 }
 
 /**
- * Room Automation — rule-based automation triggered by Ant Farm room messages.
+ * Room Automation — rule-based automation triggered by GroupMind room messages.
  *
  * Watch room messages, match against rules (keyword, sender, room, regex),
  * execute bounded actions, and write a receipt for every action taken.

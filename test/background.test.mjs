@@ -46,8 +46,8 @@ describe('background consolidation', () => {
         timestamp: '2026-04-06T17:00:00.000Z',
         room: 'thinkoff-development',
         actor: { login: 'petrus' },
-        kind: 'antfarm.message.created',
-        source: 'antfarm',
+        kind: 'groupmind.message.created',
+        source: 'groupmind',
         payload: { body: 'Please update README and review the plan.' }
       },
       {
@@ -55,8 +55,8 @@ describe('background consolidation', () => {
         timestamp: '2026-04-06T17:10:00.000Z',
         room: 'thinkoff-development',
         actor: { login: '@claudemm' },
-        kind: 'antfarm.message.created',
-        source: 'antfarm',
+        kind: 'groupmind.message.created',
+        source: 'groupmind',
         payload: { body: 'The plan should keep foreground replies reactive.' }
       }
     ];
@@ -93,8 +93,8 @@ describe('background consolidation', () => {
         timestamp: '2026-04-06T17:00:00.000Z',
         room: 'thinkoff-development',
         actor: { login: 'petrus' },
-        kind: 'antfarm.message.created',
-        source: 'antfarm',
+        kind: 'groupmind.message.created',
+        source: 'groupmind',
         payload: { body: 'Please update README and review the plan.' }
       }
     ];

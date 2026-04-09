@@ -18,7 +18,7 @@ import { moltbookPost, moltbookFeed } from '../src/team-relay/moltbook.mjs';
 import { startRoomAutomation } from '../src/team-relay/room-automation.mjs';
 import { pollDiscord, startDiscordPoller } from '../src/team-relay/discord-poller.mjs';
 import { UnifiedPoller } from '../src/team-relay/unified-poller.mjs';
-import { antfarmAdapter } from '../src/team-relay/adapters/antfarm.mjs';
+import { groupmindAdapter } from '../src/team-relay/adapters/groupmind.mjs';
 import { discordAdapter } from '../src/team-relay/adapters/discord.mjs';
 import { xforAdapter } from '../src/team-relay/adapters/xfor.mjs';
 import { commentsAdapter } from '../src/team-relay/adapters/comments.mjs';
@@ -79,7 +79,7 @@ Usage:
     status: shows whether background mode is enabled and the latest sidecar path
 
   ide-agent-kit poll --rooms <room1,room2> --api-key <key> --handle <@handle> [--interval <sec>] [--config <path>]
-    (Legacy) Poll Ant Farm rooms with explicit CLI args. Prefer "rooms watch".
+    (Legacy) Poll GroupMind rooms with explicit CLI args. Prefer "rooms watch".
 
   ide-agent-kit memory <list|get|set|append|delete|search> [options]
     Manage agent memory (local or OpenClaw backend).
@@ -153,7 +153,7 @@ Usage:
     watch:  Long-running poller.
     Config: xfor.api_key, xfor.handle, xfor.interval_sec
 
-  ide-agent-kit platform <watch|status> [--adapters antfarm,discord,xfor,comments] [--config <path>]
+  ide-agent-kit platform <watch|status> [--adapters groupmind,discord,xfor,comments] [--config <path>]
     Unified platform poller — runs multiple adapters in one process.
     watch:  Start all adapters (or selected via --adapters).
     status: Show which adapters are configured.
@@ -914,8 +914,8 @@ async function main() {
     const config = loadConfig(opts.config);
 
     if (subcommand === 'watch') {
-      const adapterNames = (opts.adapters || 'antfarm,discord,comments,xfor').split(',');
-      const adapterMap = { antfarm: antfarmAdapter, discord: discordAdapter, xfor: xforAdapter, comments: commentsAdapter };
+      const adapterNames = (opts.adapters || 'groupmind,discord,comments,xfor').split(',');
+      const adapterMap = { groupmind: groupmindAdapter, discord: discordAdapter, xfor: xforAdapter, comments: commentsAdapter };
       const pollers = [];
 
       for (const name of adapterNames) {
@@ -946,17 +946,17 @@ async function main() {
     }
 
     if (subcommand === 'status') {
-      const adapterMap = { antfarm: antfarmAdapter, discord: discordAdapter, xfor: xforAdapter, comments: commentsAdapter };
+      const adapterMap = { groupmind: groupmindAdapter, discord: discordAdapter, xfor: xforAdapter, comments: commentsAdapter };
       console.log('Platform adapters:');
       for (const [name, adapter] of Object.entries(adapterMap)) {
-        const cfgKey = name === 'antfarm' ? 'poller' : name;
+        const cfgKey = name === 'groupmind' ? 'poller' : name;
         const hasCfg = !!(config?.[cfgKey]);
         console.log(`  ${name}: ${hasCfg ? 'configured' : 'not configured'}`);
       }
       return;
     }
 
-    console.error('Usage: ide-agent-kit platform <watch|status> [--adapters antfarm,discord,xfor,comments]');
+    console.error('Usage: ide-agent-kit platform <watch|status> [--adapters groupmind,discord,xfor,comments]');
     process.exit(1);
   }
 

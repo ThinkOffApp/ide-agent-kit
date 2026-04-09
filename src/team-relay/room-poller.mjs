@@ -8,7 +8,7 @@ import { randomUUID } from 'node:crypto';
 import { nudgeCommand } from '../utils.mjs';
 
 /**
- * Room Poller — polls Ant Farm rooms and notifies IDE agent of new messages.
+ * Room Poller — polls GroupMind rooms and notifies IDE agent of new messages.
  * Works for any IDE agent (Claude Code, Codex, Gemini, Cursor).
  * No webhooks required — just an API key.
  *
@@ -243,8 +243,8 @@ export async function startRoomPoller({ rooms, apiKey, handle, interval, config 
         const rawEvent = {
           trace_id: randomUUID(),
           event_id: mid,
-          source: 'antfarm',
-          kind: 'antfarm.message.created',
+          source: 'groupmind',
+          kind: 'groupmind.message.created',
           timestamp: ts,
           room,
           actor: { login: sender },
@@ -299,8 +299,8 @@ export async function startRoomPoller({ rooms, apiKey, handle, interval, config 
         const rawEvent = {
           trace_id: randomUUID(),
           event_id: mid,
-          source: 'antfarm',
-          kind: 'antfarm.dm.created',
+          source: 'groupmind',
+          kind: 'groupmind.dm.created',
           timestamp: ts,
           room: null,
           actor: { login: sender },

@@ -76,7 +76,7 @@ export async function enrichEvent(event, config = {}) {
       if (data) {
         enriched.intent = {
           ...data,
-          provider: 'antfarm'
+          provider: 'groupmind'
         };
       }
     } catch (e) {

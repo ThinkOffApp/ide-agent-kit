@@ -114,8 +114,8 @@ export function startWebhookServer(config, onEvent) {
       return;
     }
 
-    // Ant Farm webhook endpoint
-    if (req.method === 'POST' && req.url === '/antfarm') {
+    // GroupMind webhook endpoint
+    if (req.method === 'POST' && req.url === '/groupmind') {
       const chunks = [];
       for await (const chunk of req) chunks.push(chunk);
       let body;
@@ -125,7 +125,7 @@ export function startWebhookServer(config, onEvent) {
         return;
       }
 
-      // Ant Farm sends nested objects: room can be {slug, name, id}, author can be {handle, name}
+      // GroupMind sends nested objects: room can be {slug, name, id}, author can be {handle, name}
       const roomSlug = typeof body.room === 'object' ? (body.room?.slug || body.room?.name || '') : (body.room || '');
       const authorHandle = typeof body.author === 'object' ? (body.author?.handle || body.author?.name || '?') : (body.from || body.author || '?');
       const rawBody = body.body || body.message || body.content || '';
@@ -134,8 +134,8 @@ export function startWebhookServer(config, onEvent) {
       const event = {
         trace_id: randomUUID(),
         event_id: body.id || randomUUID(),
-        source: 'antfarm',
-        kind: 'antfarm.message.created',
+        source: 'groupmind',
+        kind: 'groupmind.message.created',
         timestamp: body.created_at || new Date().toISOString(),
         room: roomSlug,
         actor: { login: authorHandle },
@@ -144,7 +144,7 @@ export function startWebhookServer(config, onEvent) {
 
       appendFileSync(queuePath, JSON.stringify(event) + '\n');
       if (onEvent) onEvent(event);
-      console.log(`[${event.timestamp}] antfarm message from ${event.actor.login} in ${event.room} → queued`);
+      console.log(`[${event.timestamp}] groupmind.message from ${event.actor.login} in ${event.room} → queued`);
 
       // Wake up the IDE agent via tmux
       nudgeTmux(config.tmux?.ide_session || config.tmux?.default_session || 'claude');
@@ -382,7 +382,7 @@ export function startWebhookServer(config, onEvent) {
   server.listen(port, host, () => {
     console.log(`IDE Agent Kit webhook server listening on ${host}:${port}`);
     console.log(`  POST /webhook  — GitHub webhook endpoint`);
-    console.log(`  POST /antfarm  — Ant Farm webhook endpoint`);
+    console.log(`  POST /groupmind  — GroupMind webhook endpoint`);
     console.log(`  POST /discord  — Discord message webhook endpoint`);
     console.log(`  POST /acp      — ACP session endpoint${acpEnabled(config) ? '' : ' (disabled)'}`);
     console.log(`  GET  /health   — Health check`);

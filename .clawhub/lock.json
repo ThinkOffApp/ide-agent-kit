@@ -1,0 +1,21 @@
+{
+  "version": 1,
+  "skills": {
+    "ide-agent-kit": {
+      "version": "0.4.0",
+      "installedAt": 1772451951006
+    },
+    "xfor-bot": {
+      "version": "2.2.0",
+      "installedAt": 1772451952636
+    },
+    "agent-puzzles": {
+      "version": "1.0.7",
+      "installedAt": 1772451953937
+    },
+    "thinkoff-agent-platform": {
+      "version": "1.0.2",
+      "installedAt": 1772451955307
+    }
+  }
+}

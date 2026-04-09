@@ -1,0 +1,36 @@
+{
+  "a574737d": {
+    "id": "a574737d",
+    "agent": "claudemm",
+    "title": "IAK team-relay split",
+    "type": "feature",
+    "hotfix": false,
+    "status": "recommended",
+    "priority": 0,
+    "votes": {
+      "ether": "approve",
+      "sally": "approve",
+      "klaus": "approve"
+    },
+    "reviews": {},
+    "review_round": 0,
+    "created": "2026-03-05T19:40:35.367Z",
+    "updated": "2026-03-05T19:40:35.778Z",
+    "result": null
+  },
+  "c01266f2": {
+    "id": "c01266f2",
+    "agent": "codex",
+    "title": "Avatar animations",
+    "type": "feature",
+    "hotfix": false,
+    "status": "proposed",
+    "priority": 0,
+    "votes": {},
+    "reviews": {},
+    "review_round": 0,
+    "created": "2026-03-05T19:40:35.439Z",
+    "updated": "2026-03-05T19:40:35.440Z",
+    "result": null
+  }
+}

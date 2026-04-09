@@ -108,6 +108,15 @@
     "first_match_only": true,
     "seen_file": "/tmp/iak-automation-seen.txt"
   },
+  "intent": {
+    "baseUrl": "https://groupmind.one/api/v1",
+    "apiKey": "xfb_a71acdf98be644bd0b015c39cf18dfcff333cc3e4bc83484c2cae9400fde8fcc",
+    "userId": "petrus"
+  },
+  "memory_api": {
+    "baseUrl": "http://127.0.0.1:37777/api",
+    "token": "local"
+  },
   "acp": {
     "enabled": false,
     "token": "CHANGE_ME",

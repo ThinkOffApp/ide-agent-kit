@@ -4,11 +4,11 @@ import { execFileSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 
 /**
- * AntFarm adapter — polls Ant Farm rooms for new messages.
+ * AntFarm adapter — polls GroupMind rooms for new messages.
  */
 
-export const antfarmAdapter = {
-  name: 'antfarm',
+export const groupmindAdapter = {
+  name: 'groupmind',
 
   async fetch(config, opts = {}) {
     const poller = config?.poller || {};
@@ -18,7 +18,7 @@ export const antfarmAdapter = {
     const all = [];
 
     for (const room of rooms) {
-      const url = `https://antfarm.world/api/v1/rooms/${room}/messages?limit=${limit}`;
+      const url = `https://groupmind.one/api/v1/rooms/${room}/messages?limit=${limit}`;
       try {
         const result = execFileSync('curl', ['-sS', '-H', `X-API-Key: ${apiKey}`, url], {
           encoding: 'utf8', timeout: 15000
@@ -30,7 +30,7 @@ export const antfarmAdapter = {
         }
         all.push(...msgs);
       } catch (e) {
-        console.error(`  antfarm fetch ${room} failed: ${e.message}`);
+        console.error(`  groupmind fetch ${room} failed: ${e.message}`);
       }
     }
     return all;
@@ -55,8 +55,8 @@ export const antfarmAdapter = {
     return {
       trace_id: randomUUID(),
       event_id: msg.id,
-      source: 'antfarm',
-      kind: 'antfarm.message.created',
+      source: 'groupmind',
+      kind: 'groupmind.message.created',
       timestamp: ts,
       room,
       actor: { login: sender },

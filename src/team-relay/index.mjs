@@ -17,7 +17,7 @@ export { isEnabled as acpIsEnabled, createSession, sendToSession, closeSession, 
 export { initTaskQueue, addTask, startTask, completeTask, failTask, cancelTask, getTask, listTasks, nextTask, agentStatus, missionControlData } from './task-queue.mjs';
 
 // Adapters
-export { antfarmAdapter } from './adapters/antfarm.mjs';
+export { groupmindAdapter } from './adapters/groupmind.mjs';
 export { discordAdapter } from './adapters/discord.mjs';
 export { xforAdapter } from './adapters/xfor.mjs';
 export { commentsAdapter } from './adapters/comments.mjs';

@@ -10,7 +10,7 @@ import { appendFileSync } from 'node:fs';
  * deduplication, event queuing, receipt logging, rate limiting, and notifications.
  *
  * Each adapter implements:
- *   name        — string identifier (e.g. 'antfarm', 'xfor')
+ *   name        — string identifier (e.g. 'groupmind', 'xfor')
  *   fetch(cfg)  — returns raw messages from the platform
  *   getKey(msg) — returns a unique dedup key for a message
  *   normalize(msg, ctx) — returns a normalized event object
