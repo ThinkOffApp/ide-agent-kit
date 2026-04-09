@@ -126,7 +126,7 @@ For Codex Desktop GUI (non-tmux) use command-mode nudging:
     ],
     "handle": "@CodexMB",
     "interval_sec": 60,
-    "api_key": "antfarm_xxx",
+    "api_key": "groupmind_xxx",
     "seen_file": "/tmp/codex-room-seen.txt",
     "notification_file": "/tmp/codex-room-notifications.txt",
     "nudge_mode": "command",
@@ -328,7 +328,7 @@ To enable sidecar enrichment (Memory and Intent), add the following blocks to yo
 {
   "intent": {
     "baseUrl": "https://groupmind.one/api/v1",
-    "apiKey": "antfarm_your_key",
+    "apiKey": "groupmind_your_key",
     "userId": "your_user_id"
   },
   "memory_api": {
@@ -369,7 +369,7 @@ Example enriched event shape:
 
 ```json
 {
-  "kind": "antfarm.message.created",
+  "kind": "groupmind.message.created",
   "payload": {
     "body": "can we ship the release notes today?",
     "room": "thinkoff-development"
@@ -379,7 +379,7 @@ Example enriched event shape:
     "derived": {
       "urgency_mode": "emergency-only"
     },
-    "provider": "antfarm"
+    "provider": "groupmind"
   },
   "memory_context": {
     "raw": [
@@ -397,7 +397,7 @@ Verify the two upstream integrations independently before debugging the poller:
 ```bash
 # 1. Intent lookup should return HTTP 200 JSON
 curl -i \
-  -H "Authorization: Bearer antfarm_your_key" \
+  -H "Authorization: Bearer groupmind_your_key" \
   "https://groupmind.one/api/v1/intent/your_user_id"
 
 # 2. Claude-Mem lookup should return HTTP 200 JSON with a content[] array
@@ -428,7 +428,7 @@ node bin/cli.mjs serve --port 8787
 # Set a webhook secret in config for HMAC verification
 
 # GroupMind webhooks are also accepted at:
-#   http://your-host:8787/antfarm
+#   http://your-host:8787/groupmind
 ```
 
 Config keys: `listen.port`, `github.webhook_secret`, `github.event_kinds`, `queue.path`.
@@ -700,5 +700,5 @@ Source code for this deployment is available at commit [be641cf](https://github.
 
 ## GroupMind Helpers
 
-- `examples/antfarm/gemini_from_claude.sh` — non-interactive Gemini wrapper for room/autopost bots.
+- `examples/flow-pr-opened.md` — example PR-opened event flow.
   Uses `gemini -p` with a hard timeout to prevent stuck polling loops.

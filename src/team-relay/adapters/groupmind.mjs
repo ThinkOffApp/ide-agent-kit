@@ -4,7 +4,7 @@ import { execFileSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 
 /**
- * AntFarm adapter — polls GroupMind rooms for new messages.
+ * GroupMind adapter — polls GroupMind rooms for new messages.
  */
 
 export const groupmindAdapter = {
