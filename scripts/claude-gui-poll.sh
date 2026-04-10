@@ -1,0 +1,87 @@
+#!/usr/bin/env bash
+# claude-gui-poll.sh — poll GroupMind rooms + DMs for Claude Code desktop app
+# Runs in tmux via launchd. Wakes the GUI via osascript on new messages.
+#
+# Required env: IAK_API_KEY
+# Optional env: SELF_HANDLE (default @claudemm), ROOM, POLL_INTERVAL, etc.
+#
+# Setup: see examples/claude-gui-launchd.plist and README
+
+set -euo pipefail
+
+API_KEY="${IAK_API_KEY:-}"
+ROOM="${ROOM:-thinkoff-development}"
+SELF_HANDLE="${SELF_HANDLE:-@claudemm}"
+BASE_URL="${BASE_URL:-https://groupmind.one/api/v1}"
+POLL_INTERVAL="${POLL_INTERVAL:-15}"
+FETCH_LIMIT="${FETCH_LIMIT:-20}"
+SEEN_IDS_FILE="${SEEN_IDS_FILE:-/tmp/claude-gui-seen-ids.txt}"
+WAKE_SCRIPT="${WAKE_SCRIPT:-$(dirname "$0")/claude-gui-wake.sh}"
+NUDGE_TEXT="${NUDGE_TEXT:-check rooms}"
+WAKE_COOLDOWN_SEC="${WAKE_COOLDOWN_SEC:-45}"
+LAST_WAKE_FILE="${LAST_WAKE_FILE:-/tmp/claude-gui-last-wake.txt}"
+NEW_FILE="${NEW_FILE:-/tmp/iak-new-messages.txt}"
+
+[[ -z "$API_KEY" ]] && { echo "ERROR: Set IAK_API_KEY" >&2; exit 1; }
+
+can_wake_now() {
+    local now=$(date +%s) last=0
+    [[ -f "$LAST_WAKE_FILE" ]] && last="$(cat "$LAST_WAKE_FILE" 2>/dev/null || echo 0)"
+    [[ ! "$last" =~ ^[0-9]+$ ]] && last=0
+    (( now - last >= WAKE_COOLDOWN_SEC )) && { echo "$now" > "$LAST_WAKE_FILE"; return 0; }
+    return 1
+}
+
+do_wake() {
+    [[ -x "$WAKE_SCRIPT" ]] && can_wake_now && "$WAKE_SCRIPT" "$NUDGE_TEXT" 2>/dev/null || true
+}
+
+parse_msgs='
+import sys, json
+try:
+    data = json.load(sys.stdin)
+    msgs = data if isinstance(data, list) else data.get("messages", data.get("data", []))
+    for m in msgs:
+        mid = m.get("id", "")
+        mfrom = m.get("from", "?")
+        mbody = (m.get("body", "") or "").replace("\n", " ").replace("\t", " ")
+        print(f"{mid}\t{mfrom}\t{mbody}")
+except Exception: pass
+'
+
+process_messages() {
+    local source="$1" response="$2" count=0
+    while IFS=$'\t' read -r msg_id msg_from msg_body; do
+        [[ -z "$msg_id" ]] && continue
+        [[ "$msg_from" == "$SELF_HANDLE" || "$msg_from" == "${SELF_HANDLE#@}" ]] && {
+            grep -qF "$msg_id" "$SEEN_IDS_FILE" || echo "$msg_id" >> "$SEEN_IDS_FILE"; continue; }
+        grep -qF "$msg_id" "$SEEN_IDS_FILE" && continue
+        echo "$msg_id" >> "$SEEN_IDS_FILE"
+        count=$((count + 1))
+        echo "[$(date +%H:%M:%S)] $source ${msg_from}: ${msg_body:0:120}"
+        printf '[%s] [%s] %s: %s\n' "$(date -u +%FT%TZ)" "$source" "$msg_from" "${msg_body:0:600}" >> "$NEW_FILE"
+    done < <(echo "$response" | python3 -c "$parse_msgs" 2>/dev/null)
+    echo $count
+}
+
+touch "$SEEN_IDS_FILE" "$NEW_FILE" "$LAST_WAKE_FILE"
+[[ ! -s "$LAST_WAKE_FILE" ]] && echo 0 > "$LAST_WAKE_FILE"
+echo "[claude-gui] Polling $ROOM every ${POLL_INTERVAL}s | Self: $SELF_HANDLE | Wake: $WAKE_SCRIPT"
+
+while true; do
+    room_resp=$(curl -sS --connect-timeout 5 --max-time 20 -H "X-API-Key: $API_KEY" \
+        "$BASE_URL/rooms/$ROOM/messages?limit=$FETCH_LIMIT" 2>/dev/null) || room_resp=""
+    [[ -n "$room_resp" ]] && {
+        n=$(process_messages "$ROOM" "$room_resp")
+        [[ $n -gt 0 ]] && do_wake
+    }
+
+    dm_resp=$(curl -sS --connect-timeout 5 --max-time 20 -H "X-API-Key: $API_KEY" \
+        "$BASE_URL/messages?to=$SELF_HANDLE&limit=$FETCH_LIMIT" 2>/dev/null) || dm_resp=""
+    [[ -n "$dm_resp" ]] && {
+        n=$(process_messages "DM" "$dm_resp")
+        [[ $n -gt 0 ]] && do_wake
+    }
+
+    sleep "$POLL_INTERVAL"
+done

@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.claude-gui.poll</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>-c</string>
+        <string>/opt/homebrew/bin/tmux new-session -d -s claude-gui-poll "$HOME/.openclaw/claude-gui-poll.sh" 2>/dev/null || true</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <false/>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+        <key>IAK_API_KEY</key>
+        <string>YOUR_GROUPMIND_API_KEY</string>
+        <key>SELF_HANDLE</key>
+        <string>@your_handle</string>
+    </dict>
+    <key>StandardOutPath</key>
+    <string>/tmp/claude-gui-poll-launch.log</string>
+    <key>StandardErrorPath</key>
+    <string>/tmp/claude-gui-poll-launch.err</string>
+</dict>
+</plist>
