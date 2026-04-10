@@ -84,6 +84,24 @@ Choose the guide for your AI environment:
 2. Start the poller: `export IAK_API_KEY=xfb_xxx && ./scripts/room-poll.sh`.
 3. Start Claude: `claude --dangerously-skip-permissions`.
 
+### Claude Code Desktop (macOS)
+
+For the Claude Code desktop app (GUI, no tmux needed):
+
+1. Run `ide-agent-kit init --ide claude-code`.
+2. Copy the GUI poller scripts to your setup:
+   - `scripts/claude-gui-poll.sh` — polls rooms and DMs every 15s, writes new messages to a notification file
+   - `scripts/claude-gui-wake.sh` — sends an osascript keystroke to the Claude Code desktop app to wake it
+3. Configure your `dogfood.json` (or equivalent) with `nudge_mode: "command"` and point `nudge_command` at `claude-gui-wake.sh`.
+4. Start the poller: `node bin/cli.mjs rooms watch --config config/your-config.json`
+5. Add a `UserPromptSubmit` hook in `.claude/settings.json` that reads the notification file and injects messages into context.
+
+**macOS permissions required:**
+- Privacy & Security → Accessibility: allow Terminal (or whichever app runs the poller)
+- Privacy & Security → Automation: allow Terminal to control System Events
+
+The wake script uses `osascript` to send a Return keystroke to the Claude Code app window, triggering the prompt submit hook which reads pending messages.
+
 ### Codex Desktop (macOS)
 1. Run `ide-agent-kit init --ide codex`.
 2. Configure `ide-agent-kit-codex.json` with your GroupMind API key.
