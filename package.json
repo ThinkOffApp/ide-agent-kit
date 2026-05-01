@@ -4,16 +4,20 @@
   "description": "Built for OpenClaw workflows — ACP session orchestration, room-triggered automation, comment polling, Discord + Moltbook + GitHub connectors, receipts, exec approvals",
   "type": "module",
   "bin": {
-    "ide-agent-kit": "./bin/cli.mjs"
+    "ide-agent-kit": "./bin/cli.mjs",
+    "ide-agent-kit-mcp": "./bin/iak-mcp.mjs"
   },
   "scripts": {
     "test": "node --test test/*.test.mjs",
-    "start": "node bin/cli.mjs serve"
+    "start": "node bin/cli.mjs serve",
+    "mcp": "node bin/iak-mcp.mjs"
   },
   "keywords": [
     "ide",
     "agent",
     "ai",
+    "mcp",
+    "model-context-protocol",
     "webhook",
     "tmux",
     "receipts",
@@ -40,5 +44,8 @@
   "author": "ThinkOff",
   "bugs": {
     "url": "https://github.com/ThinkOffApp/ide-agent-kit/issues"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0"
   }
 }

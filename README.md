@@ -413,6 +413,45 @@ Latest local verification from the Petrus machine, dogfooded against `v0.6.1`:
 
 ## Integrations
 
+### MCP server (`src/mcp-server.mjs`)
+
+Exposes IAK's tmux-backed wake / list / run primitives as MCP tools so any
+MCP-aware client (Claude Desktop / Code, Cursor, custom agents) can drive the
+agent fleet directly without re-implementing tmux send-keys.
+
+Tools exposed (stdio transport):
+
+| Tool            | Args                              | Notes |
+|-----------------|-----------------------------------|-------|
+| `wake_ide`      | `session`, `text?` (default `"check rooms"`) | Sends nudge text and presses Enter in the named tmux session. |
+| `list_sessions` | (none)                            | Returns every live tmux session on the host with attach state + window count. |
+| `wake_all`      | `text?` (default `"check rooms"`) | Sends the same nudge to every session IAK knows about (per-session pass/fail). |
+| `tmux_run`      | `cmd`, `session?`, `cwd?`, `timeoutSec?` | Runs an allowlisted command in a tmux session. Same allowlist as the CLI's `tmux run` subcommand. |
+
+Run standalone:
+
+```bash
+node bin/iak-mcp.mjs              # default config
+node bin/iak-mcp.mjs --config /path/to/config.json
+npm run mcp                       # via package.json script
+```
+
+Wire into Claude Desktop / Code:
+
+```json
+{
+  "mcpServers": {
+    "ide-agent-kit": {
+      "command": "node",
+      "args": ["/absolute/path/to/ide-agent-kit/bin/iak-mcp.mjs"]
+    }
+  }
+}
+```
+
+After install: restart the MCP client. The four tools above appear in the tool
+picker and can be called directly.
+
 ### GitHub Webhooks (`src/webhook-server.mjs`)
 
 Receives GitHub webhook events, verifies HMAC signatures, normalizes them to a stable JSON schema, and appends to a local JSONL queue. Optionally nudges a tmux session when events arrive.
