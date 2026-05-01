@@ -425,8 +425,27 @@ Tools exposed (stdio transport):
 |-----------------|-----------------------------------|-------|
 | `wake_ide`      | `session`, `text?` (default `"check rooms"`) | Sends nudge text and presses Enter in the named tmux session. |
 | `list_sessions` | (none)                            | Returns every live tmux session on the host with attach state + window count. |
-| `wake_all`      | `text?` (default `"check rooms"`) | Sends the same nudge to every session IAK knows about (per-session pass/fail). |
-| `tmux_run`      | `cmd`, `session?`, `cwd?`, `timeoutSec?` | Runs an allowlisted command in a tmux session. Same allowlist as the CLI's `tmux run` subcommand. |
+| `wake_all`      | `text?` (default `"check rooms"`) | Sends the same nudge to every session IAK knows about (per-session pass/fail). Configure via `mcp.sessions: ["...", ...]`. Falls back to `tmux.ide_session` + `tmux.default_session`. |
+| `read_session`  | `session`, `lines?` (default 50)  | `tmux capture-pane` of the named session — see what the agent printed in response to a `wake_ide`. |
+| `tmux_run`      | `cmd`, `session?`, `cwd?`, `timeoutSec?` | Runs an allowlisted command in a tmux session. **Only registered when `tmux.allow` is non-empty or `mcp.allow_unrestricted: true` is set.** Otherwise omitted entirely from the tool list (fail-closed). Same allowlist as the CLI's `tmux run` subcommand. |
+
+### MCP-specific config keys
+
+Added to `ide-agent-kit.json` (or your own config path passed via `--config`):
+
+```jsonc
+{
+  "mcp": {
+    // Explicit list of sessions wake_all should target.
+    // If omitted, falls back to [tmux.ide_session, tmux.default_session].
+    "sessions": ["claudemb", "antigravity", "codex"],
+
+    // Set true to expose tmux_run with NO allowlist filter — any command runs.
+    // Default: false. Use only on a trusted host with a trusted MCP client.
+    "allow_unrestricted": false
+  }
+}
+```
 
 Run standalone:
 

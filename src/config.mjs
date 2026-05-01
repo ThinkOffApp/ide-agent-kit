@@ -106,6 +106,9 @@ export function loadConfig(configPath) {
         ...raw.background?.timeouts
       }
     },
-    openclaw: raw.openclaw || {}
+    openclaw: raw.openclaw || {},
+    // Pass-through for MCP server-specific config (sessions, allow_unrestricted).
+    // See src/mcp-server.mjs.
+    mcp: raw.mcp || {}
   };
 }
