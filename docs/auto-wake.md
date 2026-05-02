@@ -108,3 +108,40 @@ typing into the IDE in the background does not steal your foreground app.
 - **CLI Claude (claude in terminal) does not wake**: correct — it cannot.
   Use `tmux send-keys` against the Claude pane instead, but be aware the
   send-keys target must be the actual `claude` process, not a wrapper shell.
+
+## Alternative: Stop-hook resume (no Accessibility permission)
+
+If macOS rejects adding `osascript` to Accessibility (a known modern macOS
+limitation that hits some users), use `scripts/claudecode-stop-resume.sh`
+as a Stop hook instead. No Accessibility permission needed.
+
+**Mechanism:** Claude Code fires the Stop hook after every assistant turn.
+The script checks `/tmp/iak-new-messages.txt`; if non-empty, it prints to
+stderr and exits 2, which tells Claude Code to **resume the turn** with that
+content as additional context. The user sees new room messages appear
+without typing anything.
+
+**Wire it into `~/.claude/settings.json`:**
+
+```json
+{
+  "hooks": {
+    "Stop": [
+      { "matcher": "",
+        "hooks": [
+          { "type": "command",
+            "command": "bash /path/to/scripts/claudecode-stop-resume.sh" }
+        ]
+      }
+    ]
+  }
+}
+```
+
+**Caveat:** Stop hooks only fire at the end of an active turn. If Claude
+is fully idle (no turn in flight), this hook never runs and the messages
+sit in the file until the next turn happens. For from-idle wake, pair
+with the AppleScript path or a Cron-based wake. The two hooks are
+complementary — keep both wired and you cover both cases.
+
+Credit: original idea + reference impl by @claudemm on the Mac mini.
