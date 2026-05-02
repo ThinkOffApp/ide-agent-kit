@@ -431,6 +431,95 @@ Latest local verification from the Petrus machine, dogfooded against `v0.6.1`:
 
 ## Integrations
 
+### MCP server (`src/mcp-server.mjs`)
+
+Exposes IAK's tmux-backed wake / list / run primitives as MCP tools so any
+MCP-aware client (Claude Desktop / Code, Cursor, custom agents) can drive the
+agent fleet directly without re-implementing tmux send-keys.
+
+Tools exposed (stdio transport):
+
+| Tool            | Args                              | Notes |
+|-----------------|-----------------------------------|-------|
+| `wake_ide`      | `session`, `text?` (default `"check rooms"`) | Sends nudge text and presses Enter in the named tmux session. |
+| `list_sessions` | (none)                            | Returns every live tmux session on the host with attach state + window count. |
+| `wake_all`      | `text?` (default `"check rooms"`) | Sends the same nudge to every session IAK knows about (per-session pass/fail). Configure via `mcp.sessions: ["...", ...]`. Falls back to `tmux.ide_session` + `tmux.default_session`. |
+| `read_session`  | `session`, `lines?` (default 50)  | `tmux capture-pane` of the named session — see what the agent printed in response to a `wake_ide`. |
+| `tmux_run`      | `cmd`, `session?`, `cwd?`, `timeoutSec?` | Runs an allowlisted command in a tmux session. **Only registered when `tmux.allow` is non-empty or `mcp.allow_unrestricted: true` is set.** Otherwise omitted entirely from the tool list (fail-closed). Same allowlist as the CLI's `tmux run` subcommand. |
+
+### MCP-specific config keys
+
+Added to `ide-agent-kit.json` (or your own config path passed via `--config`):
+
+```jsonc
+{
+  "mcp": {
+    // Explicit list of sessions wake_all should target.
+    // If omitted, falls back to [tmux.ide_session, tmux.default_session].
+    "sessions": ["claudemb", "antigravity", "codex"],
+
+    // Set true to expose tmux_run with NO allowlist filter — any command runs.
+    // Default: false. Use only on a trusted host with a trusted MCP client.
+    "allow_unrestricted": false,
+
+    // User-confirmation flow (request_confirmation, list_intents,
+    // approve_intent, deny_intent tools). Tools are only registered if at
+    // least one channel below is configured.
+    "confirmations": {
+      "port": 8788,                    // HTTP port for /intent/:id/decision
+      "host": "127.0.0.1",             // bind host (keep local unless tunneled)
+      "auth_token": "",                // optional bearer for the HTTP endpoint
+      "callback_base": "http://...",   // URL the watch / chat reach back on; defaults to http://host:port
+      "room": "thinkoff-development",  // GroupMind room to post the prompt in (uses poller.api_key)
+      "codewatch_gate_url": "http://family@localhost:18791/intent",
+      "codewatch_gate_token": ""       // bearer for CLAWWATCH_GATE
+    }
+  }
+}
+```
+
+### Confirmation flow (request_confirmation tool)
+
+When `mcp.confirmations` is configured, four extra tools appear:
+
+| Tool                  | Args                                              | Notes |
+|-----------------------|---------------------------------------------------|-------|
+| `request_confirmation`| `prompt`, `session?`, `channels?`, `timeoutSec?`  | Posts an Approve / Deny prompt to GroupMind and/or Codewatch and BLOCKS until user decides or timeout. Returns `{decision: "approve"\|"deny"}` or `{status: "timeout", id}`. |
+| `list_intents`        | (none)                                            | All intents — pending and recently decided. |
+| `approve_intent`      | `id`                                              | Manually settle a pending intent (e.g. MCP override). |
+| `deny_intent`         | `id`                                              |  |
+
+End-to-end:
+1. MCP-aware agent calls `request_confirmation({prompt: "Drop production DB?"})`.
+2. The IAK MCP server posts to GroupMind room (`/approve <id>` / `/deny <id>` quick replies) and to the CLAWWATCH_GATE (Android interactive notification with Approve / Deny buttons that vibrate the watch).
+3. User taps Approve / Deny on the watch — Codewatch's notification action POSTs to `http://<callback_base>/intent/<id>/decision` with `{decision: "approve"}`.
+4. The MCP tool's blocking `request_confirmation` call resolves with the decision.
+5. The agent proceeds (or doesn't) based on the decision.
+
+Run standalone:
+
+```bash
+node bin/iak-mcp.mjs              # default config
+node bin/iak-mcp.mjs --config /path/to/config.json
+npm run mcp                       # via package.json script
+```
+
+Wire into Claude Desktop / Code:
+
+```json
+{
+  "mcpServers": {
+    "ide-agent-kit": {
+      "command": "node",
+      "args": ["/absolute/path/to/ide-agent-kit/bin/iak-mcp.mjs"]
+    }
+  }
+}
+```
+
+After install: restart the MCP client. The four tools above appear in the tool
+picker and can be called directly.
+
 ### GitHub Webhooks (`src/webhook-server.mjs`)
 
 Receives GitHub webhook events, verifies HMAC signatures, normalizes them to a stable JSON schema, and appends to a local JSONL queue. Optionally nudges a tmux session when events arrive.
