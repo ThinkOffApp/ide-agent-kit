@@ -160,8 +160,18 @@ bold "Daemon: tmux session '$TMUX_SESSION'"
 echo "  - logs: tmux attach -t $TMUX_SESSION"
 echo "  - listener: $LAN_URL"
 echo
-bold "CodeWatch on phone:"
-echo "  - Account tab → IAK gate URLs → paste: $LAN_URL"
+bold "CodeWatch on phone — pair via QR or manual paste:"
+echo "  - URL: $LAN_URL"
+echo
+# Print a scannable QR if qrencode is available. Install with: brew install qrencode
+if command -v qrencode >/dev/null 2>&1; then
+  echo "Scan from CodeWatch (Account tab → Scan Pairing QR):"
+  echo
+  qrencode -t UTF8 "$LAN_URL"
+  echo
+else
+  yellow "Tip: brew install qrencode  →  re-run installer to get a scannable QR for CodeWatch pairing."
+fi
 echo
 bold "macOS Accessibility (one-time, for osascript-based desktop-app wake):"
 echo "  - System Settings → Privacy & Security → Accessibility"
