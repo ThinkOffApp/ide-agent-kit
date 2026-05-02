@@ -142,6 +142,16 @@ while true; do
             line="[${ts}] [${ROOM}] ${msg_from}: ${msg_body:0:600}"
             printf '%s\n---\n' "$line" >> "$NEW_FILE"
             printf '%s\n---\n' "$line" >> "$NEW_FILE_COMPAT"
+
+            # Wake-on-mention: if the message body contains @<peer> tokens
+            # for any handle in mcp.confirmations.peers, fire POST /wake on
+            # that peer's daemon URL. Sub-second cross-machine nudge so the
+            # mentioned agent responds without waiting for their poll cycle.
+            # Configured via mcp.confirmations.peers in ide-agent-kit.json
+            # OR IAK_PEERS_JSON env override. Skips IAK_SELF_HANDLE.
+            if [[ -x "$(dirname "$0")/wake-on-mention.sh" ]]; then
+                "$(dirname "$0")/wake-on-mention.sh" "$msg_body" "$msg_from" 2>/dev/null || true
+            fi
         fi
     done < <(echo "$response" | python3 -c "
 import sys, json
