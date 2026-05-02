@@ -199,11 +199,114 @@ export function startConfirmationsServer({
       res.end(JSON.stringify(listIntents()));
       return;
     }
+    // Tiny mobile-first HTML UI: pending intents with Approve / Deny buttons.
+    // Auto-refresh every 2s. Same origin, no auth (caller is the local LAN
+    // unless authToken is set on the server, in which case the page is
+    // unreachable without it). Renders fine on Wear OS browser + phone + Mac.
+    if (req.method === 'GET' && (url.pathname === '/' || url.pathname === '/intents.html')) {
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+      res.end(renderIntentsHtml());
+      return;
+    }
     res.writeHead(404, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ ok: false, error: 'not found' }));
   });
   server.listen(port, host);
   return server;
+}
+
+// Tiny self-contained HTML UI for tap-to-approve. Inlined so the
+// confirmations server has no external assets / templates to ship.
+function renderIntentsHtml() {
+  return `<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>IAK confirmations</title>
+<style>
+  :root { --bg:#0c0f17; --card:#141a26; --line:#2a3447; --text:#e9eef7; --muted:#8896ad; --accent:#22c55e; --warn:#f59e0b; --hot:#ef4444; }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  body { margin: 0; background: var(--bg); color: var(--text); font: 14px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; padding: 12px; }
+  h1 { font-size: 14px; margin: 0 0 10px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.06em; }
+  .empty { color: var(--muted); padding: 18px 0; text-align: center; }
+  .intent { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; margin-bottom: 10px; }
+  .prompt { font-weight: 600; margin-bottom: 4px; word-break: break-word; }
+  .meta   { font-size: 11px; color: var(--muted); margin-bottom: 8px; font-variant-numeric: tabular-nums; word-break: break-word; }
+  .row    { display: flex; gap: 6px; }
+  .btn    { flex: 1; padding: 10px; border-radius: 8px; border: 1px solid var(--line); color: var(--text); background: #0f1627; font-weight: 700; text-align: center; user-select: none; cursor: pointer; }
+  .btn.ok  { background: var(--accent); color: #06120a; border-color: var(--accent); }
+  .btn.no  { background: var(--hot);    color: #fff;    border-color: var(--hot); }
+  .decided { opacity: 0.55; }
+  .decided .pill { display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: 10px; font-weight: 700; text-transform: uppercase; }
+  .decided .pill.approve { background: var(--accent); color: #06120a; }
+  .decided .pill.deny    { background: var(--hot); color: #fff; }
+  .toast { position: fixed; left: 50%; bottom: 18px; transform: translateX(-50%); background: rgba(20,26,38,0.95); border: 1px solid var(--line); padding: 6px 10px; border-radius: 6px; font-size: 11px; opacity: 0; transition: opacity 0.2s; pointer-events: none; }
+  .toast.on { opacity: 1; }
+</style>
+</head>
+<body>
+<h1>IAK confirmations</h1>
+<div id="list"></div>
+<div class="toast" id="toast"></div>
+<script>
+  const list = document.getElementById('list');
+  const toast = document.getElementById('toast');
+  let lastSig = '';
+  function showToast(t) { toast.textContent = t; toast.classList.add('on'); setTimeout(() => toast.classList.remove('on'), 1800); }
+  async function refresh() {
+    let intents = [];
+    try { intents = await (await fetch('/intents', { cache: 'no-store' })).json(); } catch { return; }
+    intents.sort((a, b) => b.createdAt - a.createdAt);
+    const sig = intents.map(i => i.id + i.status).join('|');
+    if (sig === lastSig) return;
+    lastSig = sig;
+    list.innerHTML = '';
+    if (intents.length === 0) {
+      const e = document.createElement('div'); e.className = 'empty';
+      e.textContent = 'No intents yet. The next request_confirmation tool call will appear here.';
+      list.appendChild(e);
+      return;
+    }
+    for (const i of intents) {
+      const el = document.createElement('div');
+      el.className = 'intent' + (i.status === 'pending' ? '' : ' decided');
+      const meta = [i.session ? 'session: ' + i.session : null, 'id: ' + i.id, 'channels: ' + (i.channels || []).join(', ')].filter(Boolean).join(' · ');
+      el.innerHTML =
+        '<div class="prompt"></div>' +
+        '<div class="meta"></div>' +
+        (i.status === 'pending'
+          ? '<div class="row"><div class="btn ok" data-d="approve">Approve</div><div class="btn no" data-d="deny">Deny</div></div>'
+          : '<span class="pill ' + i.decision + '">' + i.decision + '</span>');
+      el.querySelector('.prompt').textContent = i.prompt;
+      el.querySelector('.meta').textContent = meta;
+      for (const b of el.querySelectorAll('.btn')) {
+        b.addEventListener('click', async () => {
+          const decision = b.dataset.d;
+          b.style.opacity = '0.5';
+          try {
+            const r = await fetch('/intent/' + i.id + '/decision', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ decision }),
+            });
+            const j = await r.json();
+            showToast(j.ok ? decision + ' sent' : 'error: ' + (j.error || 'unknown'));
+            lastSig = ''; refresh();
+          } catch (e) {
+            showToast('network error: ' + e.message);
+            b.style.opacity = '1';
+          }
+        });
+      }
+      list.appendChild(el);
+    }
+  }
+  refresh();
+  setInterval(refresh, 2000);
+</script>
+</body>
+</html>`;
 }
 
 // --- announcers ------------------------------------------------------------
@@ -214,13 +317,12 @@ export function startConfirmationsServer({
 export function makeGroupmindAnnouncer({ apiKey, room, callbackBase }) {
   return async ({ id, prompt, session }) => {
     if (!apiKey || !room) return;
+    const uiLink = callbackBase ? `${callbackBase}/` : null;
     const body =
       `[Confirmation needed] **${prompt}**\n` +
       `Target session: \`${session || '(none)'}\`\n` +
-      `Approve: \`/approve ${id}\` · Deny: \`/deny ${id}\`\n` +
-      (callbackBase
-        ? `Or: \`curl -X POST ${callbackBase}/intent/${id}/decision -H 'Content-Type: application/json' -d '{"decision":"approve"}'\``
-        : '');
+      (uiLink ? `Tap to decide: ${uiLink}\n` : '') +
+      `Or reply: \`/approve ${id}\` · \`/deny ${id}\``;
     const data = JSON.stringify({ room, body });
     const req = await import('node:https');
     return new Promise((resolve, reject) => {
