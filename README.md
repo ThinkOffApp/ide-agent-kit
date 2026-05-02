@@ -4,8 +4,45 @@ Built for [OpenClaw](https://openclaw.dev) workflows. Local-first. No external s
 
 Multi-agent coordination toolkit for IDE AIs (Claude Code, Codex, Cursor, VS Code agents, local LLM assistants). Room-triggered automation, comment polling, and connectors for [Moltbook](https://www.moltbook.com), GitHub, and [GroupMind](https://groupmind.one) chat rooms.
 
-**Install:** `npm install -g ide-agent-kit`
+**One-shot install (macOS):**
+```bash
+curl -fsSL https://raw.githubusercontent.com/ThinkOffApp/ide-agent-kit/main/scripts/install.sh | bash
+```
+Idempotent. Installs prereqs via brew, clones the repo, writes a starter
+config, wires UserPromptSubmit + Stop hooks, starts the daemon, prints the
+LAN URL to paste into [CodeWatch](https://github.com/ThinkOffApp/CodeWatch).
+
+**Manual install:** `npm install -g ide-agent-kit`
 **ClawHub:** https://clawhub.ai/ThinkOffApp/ide-agent-kit
+
+## What's new in v0.7.0
+
+- **MCP server** (`src/mcp-server.mjs`): exposes IAK as MCP tools to any
+  Claude Code / Codex / Cursor agent. Tools: `wake_ide`, `wake_all`,
+  `wake_remote` (cross-machine), `request_confirmation`, `tmux_run`,
+  `read_session`, `list_intents`, `approve_intent`, `deny_intent`.
+- **Confirmation registry** (`iak-mcp-daemon`): HTTP server on port 8788
+  with `POST /intent`, `GET /intents`, `POST /intent/<id>/decision`,
+  `POST /wake`. Browser UI at `/` with Approve/Deny buttons that work on
+  Wear OS, phone, and Mac.
+- **wake_remote MCP tool**: cross-machine direct nudge. Agent A on the
+  MacBook calls `wake_remote(gateUrl="http://<mini>:8788")`; mini's
+  daemon spawns the wake script and the mini's Claude desktop app
+  receives a prompt within ~500ms.
+- **CodeWatch integration**: Android phone + Wear OS app surfaces
+  confirmation requests inline in the IDE chat with Approve/Deny
+  buttons, plus system notifications with action buttons. Source:
+  [github.com/ThinkOffApp/CodeWatch](https://github.com/ThinkOffApp/CodeWatch).
+- **GroupMind chat buttons**: confirmation messages render inline
+  Approve/Deny buttons in the GroupMind web UI (antfarm PR #13 merged).
+- **Auto-wake suite**: `claudemb-poll.sh` (room poller) +
+  `claudemb-wake.sh` (osascript injector, focus-preserving) +
+  `claudecode-stop-resume.sh` (Stop hook, no Accessibility required) +
+  `check-rooms-hook.sh` (UserPromptSubmit hook). Full setup docs in
+  `docs/auto-wake.md` with ASCII diagram and troubleshooting.
+- **76 / 76 tests passing** on Node 18, 20, 22.
+
+[Release notes →](https://github.com/ThinkOffApp/ide-agent-kit/releases/tag/v0.7.0)
 
 ## Table of Contents
 
