@@ -4,7 +4,7 @@
 
 set -euo pipefail
 
-CONFIG_JSON="${IAK_CONFIG_JSON:-/Users/petrus/AndroidStudioProjects/ThinkOff/ide-agent-kit-codex.json}"
+CONFIG_JSON="${IAK_CONFIG_JSON:-/Users/petrus/ide-agent-kit/config/macbook.json}"
 read_json_value() {
     local path="$1"
     python3 - "$CONFIG_JSON" "$path" <<'PY'
@@ -34,8 +34,9 @@ FETCH_LIMIT="${FETCH_LIMIT:-20}"
 HTTP_CONNECT_TIMEOUT_SEC="${HTTP_CONNECT_TIMEOUT_SEC:-5}"
 HTTP_TIMEOUT_SEC="${HTTP_TIMEOUT_SEC:-20}"
 SEEN_IDS_FILE="${SEEN_IDS_FILE:-/tmp/claudemb_seen_ids.txt}"
+DM_SEEN_IDS_FILE="${DM_SEEN_IDS_FILE:-/tmp/claudemb_dm_seen_ids.txt}"
 SESSION="${SESSION:-claudemb-poll}"
-WAKE_SCRIPT="$(dirname "$0")/claudemb_wake.sh"
+WAKE_SCRIPT="$(dirname "$0")/claudemb-wake.sh"
 WAKE_SESSION="${CLAUDEMB_SESSION:-claude}"
 NUDGE_TEXT="${IAK_NUDGE_TEXT:-${CONFIG_NUDGE_TEXT:-check rooms}}"
 WAKE_COOLDOWN_SEC="${WAKE_COOLDOWN_SEC:-45}"
@@ -108,7 +109,7 @@ can_wake_now() {
 }
 
 # --- polling loop ---
-touch "$SEEN_IDS_FILE" "$NEW_FILE" "$NEW_FILE_COMPAT" "$LAST_WAKE_FILE"
+touch "$SEEN_IDS_FILE" "$DM_SEEN_IDS_FILE" "$NEW_FILE" "$NEW_FILE_COMPAT" "$LAST_WAKE_FILE"
 if [[ ! -s "$LAST_WAKE_FILE" ]]; then
   echo 0 > "$LAST_WAKE_FILE"
 fi
@@ -131,7 +132,7 @@ while true; do
     new_count=0
     while IFS=$'\t' read -r msg_id msg_from msg_body; do
         [[ -z "$msg_id" ]] && continue
-        if ! grep -qF "$msg_id" "$SEEN_IDS_FILE"; then
+        if ! grep -qF -- "$msg_id" "$SEEN_IDS_FILE"; then
             echo "$msg_id" >> "$SEEN_IDS_FILE"
             new_count=$((new_count + 1))
             body_preview="${msg_body:0:120}"
@@ -154,6 +155,47 @@ try:
 except Exception:
     pass
 " 2>/dev/null)
+
+    # --- DM polling ---
+    dm_response=$(curl -sS --connect-timeout "$HTTP_CONNECT_TIMEOUT_SEC" --max-time "$HTTP_TIMEOUT_SEC" -H "X-API-Key: $API_KEY" \
+        "$BASE_URL/messages?to=@claudeMB&limit=10" 2>&1) || {
+        echo "[$(date +%H:%M:%S)] DM fetch error: $dm_response"
+    }
+
+    if [[ -n "$dm_response" ]]; then
+        while IFS=$'\t' read -r msg_id msg_from msg_body; do
+            # Skip rows with no id, no sender, or empty body. The antfarm DM
+            # endpoint occasionally returns blank rows that produce
+            # "[DM from ] :" notification lines and (when $msg_id starts with
+            # a dash) crash grep with "invalid option" errors that loop forever.
+            [[ -z "$msg_id" ]] && continue
+            [[ -z "$msg_from" ]] && continue
+            [[ -z "$msg_body" ]] && continue
+            # `--` terminates grep options; required for ids that begin with `-`.
+            if ! grep -qF -- "$msg_id" "$DM_SEEN_IDS_FILE"; then
+                echo "$msg_id" >> "$DM_SEEN_IDS_FILE"
+                new_count=$((new_count + 1))
+                body_preview="${msg_body:0:120}"
+                echo "[$(date +%H:%M:%S)] DM   ${msg_from}: ${body_preview}"
+
+                ts="$(date -u +%FT%TZ)"
+                line="[${ts}] [DM from ${msg_from}] ${msg_from}: ${msg_body:0:600}"
+                printf '%s\n---\n' "$line" >> "$NEW_FILE"
+                printf '%s\n---\n' "$line" >> "$NEW_FILE_COMPAT"
+            fi
+        done < <(echo "$dm_response" | python3 -c "
+import sys, json
+try:
+    data = json.load(sys.stdin)
+    for m in data.get('messages', []):
+        mid = m.get('id', '')
+        mfrom = m.get('from', '?')
+        mbody = m.get('body', '').replace('\\\\n', ' ').replace('\\\\t', ' ')
+        print(f'{mid}\\t{mfrom}\\t{mbody}')
+except Exception:
+    pass
+" 2>/dev/null)
+    fi
 
     if [[ $new_count -gt 0 ]]; then
         echo "[$(date +%H:%M:%S)] $new_count new message(s)"
