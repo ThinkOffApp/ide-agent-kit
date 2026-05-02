@@ -37,19 +37,36 @@ if (!cc.room && !cc.codewatch_gate_url) {
   process.exit(2);
 }
 
+// Build the announcer map up-front so the HTTP server can use it for
+// externally-created intents (POST /intent).
+const apiKey = config?.poller?.api_key;
+const room = cc.room;
+
+const serverAnnouncerMap = {};
+if (cc.room && apiKey) {
+  serverAnnouncerMap.groupmind = makeGroupmindAnnouncer({
+    apiKey, room: cc.room, callbackBase: cc.callback_base || `http://127.0.0.1:${cc.port || 8788}`,
+  });
+}
+if (cc.codewatch_gate_url) {
+  serverAnnouncerMap.codewatch = makeCodewatchAnnouncer({
+    gateUrl: cc.codewatch_gate_url, gateToken: cc.codewatch_gate_token,
+  });
+}
+const serverAnnounce = composeAnnouncers(serverAnnouncerMap);
+
 // Start the HTTP listener first so any decisions can settle.
 startConfirmationsServer({
   port: cc.port || 8788,
   host: cc.host || '127.0.0.1',
   authToken: cc.auth_token || '',
   receiptsPath: config?.receipts?.path,
+  announce: serverAnnounce,
 });
-console.log(`[iak-mcp-daemon] HTTP listener on http://${cc.host || '127.0.0.1'}:${cc.port || 8788}`);
+console.log(`[iak-mcp-daemon] HTTP listener on http://${cc.host || '127.0.0.1'}:${cc.port || 8788} (POST /intent enabled: ${Object.keys(serverAnnouncerMap).join(',') || 'no announcers'})`);
 
 // Chat-reply poller: watch the configured GroupMind room for "/approve <id>"
 // and "/deny <id>" messages and route them to the local intent endpoint.
-const apiKey = config?.poller?.api_key;
-const room = cc.room;
 if (!apiKey) {
   console.warn('[iak-mcp-daemon] poller.api_key missing — chat-reply poller disabled');
 } else if (!room) {

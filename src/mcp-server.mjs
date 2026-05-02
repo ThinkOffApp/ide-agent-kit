@@ -180,16 +180,36 @@ export async function runMcpServer({ configPath } = {}) {
   }
   const announce = composeAnnouncers(announcerMap);
   const confirmEnabled = Object.keys(announcerMap).length > 0;
+
+  // Try to detect a separately-running iak-mcp-daemon on the configured port.
+  // When present, the MCP server forwards intent creation + decision polling
+  // to the daemon's HTTP endpoints — this lets multiple MCP clients share a
+  // single intent registry (one daemon, many agents). When absent, the MCP
+  // server starts its own confirmations server in-process.
+  const daemonHost = confirmCfg.host || '127.0.0.1';
+  const daemonPort = confirmCfg.port || 8788;
+  const daemonBase = `http://${daemonHost === '0.0.0.0' ? '127.0.0.1' : daemonHost}:${daemonPort}`;
+  let daemonAvailable = false;
+  try {
+    const probe = await fetch(`${daemonBase}/intents`, { method: 'GET', signal: AbortSignal.timeout(500) });
+    daemonAvailable = probe.ok;
+  } catch { /* not running */ }
+
   let confirmServer = null;
-  if (confirmEnabled) {
+  if (daemonAvailable) {
+    process.stderr.write(
+      `[iak-mcp] confirmations: forwarding to live daemon at ${daemonBase}\n`
+    );
+  } else if (confirmEnabled) {
     confirmServer = startConfirmationsServer({
-      port: confirmCfg.port || 8788,
+      port: daemonPort,
       host: confirmCfg.host || '127.0.0.1',
       authToken: confirmCfg.auth_token || '',
       receiptsPath: config?.receipts?.path,
+      announce,
     });
     process.stderr.write(
-      `[iak-mcp] confirmations: enabled on http://${confirmCfg.host || '127.0.0.1'}:${confirmCfg.port || 8788} — channels: ${Object.keys(announcerMap).join(', ')}\n`
+      `[iak-mcp] confirmations: enabled on ${daemonBase} (in-process) — channels: ${Object.keys(announcerMap).join(', ')}\n`
     );
   } else {
     process.stderr.write(
@@ -350,12 +370,45 @@ export async function runMcpServer({ configPath } = {}) {
           }
         }
         case 'request_confirmation': {
-          if (!confirmEnabled) return err('request_confirmation: confirmations not configured. Set mcp.confirmations.room (+ poller.api_key) and/or codewatch_gate_url.');
+          if (!confirmEnabled && !daemonAvailable) return err('request_confirmation: confirmations not configured. Set mcp.confirmations.room (+ poller.api_key) and/or codewatch_gate_url.');
           if (!args.prompt) return err('request_confirmation: prompt is required');
+          const timeoutSec = Math.max(1, Math.min(86400, args.timeoutSec || 600));
+
+          // Daemon mode: forward to the running iak-mcp-daemon so the intent
+          // is in the SHARED registry that CodeWatch and the chat-reply
+          // poller see. This is the production path when a daemon is up.
+          if (daemonAvailable) {
+            const createRes = await fetch(`${daemonBase}/intent`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                prompt: args.prompt,
+                session: args.session,
+                channels: Array.isArray(args.channels) ? args.channels : undefined,
+              }),
+            });
+            const created = await createRes.json();
+            if (!created.ok) return err(`daemon createIntent: ${created.error}`);
+            const id = created.id;
+            // Poll for decision.
+            const deadline = Date.now() + timeoutSec * 1000;
+            while (Date.now() < deadline) {
+              await new Promise(r => setTimeout(r, 1000));
+              try {
+                const list = await (await fetch(`${daemonBase}/intents`)).json();
+                const found = list.find((i) => i.id === id);
+                if (found && found.status === 'decided') {
+                  return ok(JSON.stringify({ id, decision: found.decision }, null, 2));
+                }
+              } catch { /* retry */ }
+            }
+            return ok(JSON.stringify({ id, status: 'timeout', timeoutSec }, null, 2));
+          }
+
+          // In-process fallback (no daemon).
           const channels = Array.isArray(args.channels) && args.channels.length > 0
             ? args.channels.filter((c) => announcerMap[c])
             : Object.keys(announcerMap);
-          const timeoutSec = Math.max(1, Math.min(86400, args.timeoutSec || 600));
           const id = await createIntent({
             prompt: args.prompt,
             session: args.session,

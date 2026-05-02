@@ -161,6 +161,7 @@ export function startConfirmationsServer({
   host = '127.0.0.1',
   authToken = '',
   receiptsPath,
+  announce, // optional: enables POST /intent to create new intents externally
 } = {}) {
   const server = createServer((req, res) => {
     const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
@@ -197,6 +198,42 @@ export function startConfirmationsServer({
     if (req.method === 'GET' && url.pathname === '/intents') {
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify(listIntents()));
+      return;
+    }
+    // POST /intent — create a new pending intent. Body: {prompt, session, channels}.
+    // Used by external callers (test scripts, MCP wrappers, etc.) to add intents
+    // to the live registry without going through stdio MCP. Fires announcements
+    // via whatever announcer was passed to startConfirmationsServer.
+    if (req.method === 'POST' && url.pathname === '/intent') {
+      let body = '';
+      req.on('data', (c) => { body += c; });
+      req.on('end', async () => {
+        let payload;
+        try { payload = JSON.parse(body); } catch {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: false, error: 'invalid json' }));
+          return;
+        }
+        if (!payload.prompt || typeof payload.prompt !== 'string') {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: false, error: 'missing prompt' }));
+          return;
+        }
+        try {
+          const id = await createIntent({
+            prompt: payload.prompt,
+            session: payload.session || 'external',
+            channels: Array.isArray(payload.channels) ? payload.channels : (announce ? ['groupmind'] : []),
+            announce: announce || (async () => {}),
+            receiptsPath,
+          });
+          res.writeHead(201, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: true, id }));
+        } catch (e) {
+          res.writeHead(500, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: false, error: e.message || String(e) }));
+        }
+      });
       return;
     }
     // Tiny mobile-first HTML UI: pending intents with Approve / Deny buttons.
