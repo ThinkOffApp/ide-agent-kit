@@ -33,6 +33,16 @@ import {
 import { nudgeTmux } from './common/notify.mjs';
 import { tmuxRun } from './ide/tmux-runner.mjs';
 import { loadConfig } from './config.mjs';
+import {
+  createIntent,
+  decideIntent,
+  waitForDecision,
+  listIntents,
+  startConfirmationsServer,
+  makeGroupmindAnnouncer,
+  makeCodewatchAnnouncer,
+  composeAnnouncers,
+} from './confirmations.mjs';
 
 // Read package.json once at module load so the advertised server version
 // tracks future package bumps without code edits.
@@ -150,6 +160,43 @@ export async function runMcpServer({ configPath } = {}) {
   const tmuxRunMode = decideTmuxRunMode(config);
   process.stderr.write(`[iak-mcp] tmux_run: ${tmuxRunMode.enabled ? 'enabled' : 'disabled'} — ${tmuxRunMode.reason}\n`);
 
+  // Confirmation server — starts only when at least one channel is configured.
+  // GroupMind needs (poller.api_key, mcp.confirmations.room); Codewatch needs
+  // mcp.confirmations.codewatch_gate_url. Both optional.
+  const confirmCfg = config?.mcp?.confirmations || {};
+  const announcerMap = {};
+  if (confirmCfg.room && config?.poller?.api_key) {
+    announcerMap.groupmind = makeGroupmindAnnouncer({
+      apiKey: config.poller.api_key,
+      room: confirmCfg.room,
+      callbackBase: confirmCfg.callback_base || `http://127.0.0.1:${confirmCfg.port || 8788}`,
+    });
+  }
+  if (confirmCfg.codewatch_gate_url) {
+    announcerMap.codewatch = makeCodewatchAnnouncer({
+      gateUrl: confirmCfg.codewatch_gate_url,
+      gateToken: confirmCfg.codewatch_gate_token,
+    });
+  }
+  const announce = composeAnnouncers(announcerMap);
+  const confirmEnabled = Object.keys(announcerMap).length > 0;
+  let confirmServer = null;
+  if (confirmEnabled) {
+    confirmServer = startConfirmationsServer({
+      port: confirmCfg.port || 8788,
+      host: confirmCfg.host || '127.0.0.1',
+      authToken: confirmCfg.auth_token || '',
+      receiptsPath: config?.receipts?.path,
+    });
+    process.stderr.write(
+      `[iak-mcp] confirmations: enabled on http://${confirmCfg.host || '127.0.0.1'}:${confirmCfg.port || 8788} — channels: ${Object.keys(announcerMap).join(', ')}\n`
+    );
+  } else {
+    process.stderr.write(
+      '[iak-mcp] confirmations: disabled — set mcp.confirmations.room (+ poller.api_key) and/or mcp.confirmations.codewatch_gate_url\n'
+    );
+  }
+
   const tools = [
     {
       name: 'wake_ide',
@@ -198,6 +245,47 @@ export async function runMcpServer({ configPath } = {}) {
       },
     },
   ];
+  if (confirmEnabled) {
+    tools.push(
+      {
+        name: 'request_confirmation',
+        description:
+          'Ask the user for an Approve / Deny decision. Posts the prompt to the configured ' +
+          'channels (GroupMind room, Codewatch notification) and BLOCKS until the user decides ' +
+          'or the timeout expires. Returns {decision: "approve"|"deny"} on decide, ' +
+          '{status: "timeout", id} on timeout. Use the id to follow up via approve_intent / deny_intent.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            prompt: { type: 'string', description: 'Human-readable question to show the user. Keep it short — fits in a watch notification.' },
+            session: { type: 'string', description: 'tmux session that triggered the request, for context. Optional.' },
+            channels: {
+              type: 'array',
+              items: { type: 'string', enum: ['groupmind', 'codewatch'] },
+              description: 'Which channels to post to. Default: all configured channels.',
+            },
+            timeoutSec: { type: 'number', description: 'How long to wait for a decision before returning timeout. Default 600 (10 min).', default: 600 },
+          },
+          required: ['prompt'],
+        },
+      },
+      {
+        name: 'list_intents',
+        description: 'List every confirmation intent the server knows about (pending, decided, recent).',
+        inputSchema: { type: 'object', properties: {} },
+      },
+      {
+        name: 'approve_intent',
+        description: 'Manually approve a pending intent by id (e.g. for an MCP-driven override).',
+        inputSchema: { type: 'object', properties: { id: { type: 'string' } }, required: ['id'] },
+      },
+      {
+        name: 'deny_intent',
+        description: 'Manually deny a pending intent by id.',
+        inputSchema: { type: 'object', properties: { id: { type: 'string' } }, required: ['id'] },
+      }
+    );
+  }
   if (tmuxRunMode.enabled) {
     tools.push({
       name: 'tmux_run',
@@ -260,6 +348,43 @@ export async function runMcpServer({ configPath } = {}) {
           } catch (e) {
             return err(e.message);
           }
+        }
+        case 'request_confirmation': {
+          if (!confirmEnabled) return err('request_confirmation: confirmations not configured. Set mcp.confirmations.room (+ poller.api_key) and/or codewatch_gate_url.');
+          if (!args.prompt) return err('request_confirmation: prompt is required');
+          const channels = Array.isArray(args.channels) && args.channels.length > 0
+            ? args.channels.filter((c) => announcerMap[c])
+            : Object.keys(announcerMap);
+          const timeoutSec = Math.max(1, Math.min(86400, args.timeoutSec || 600));
+          const id = await createIntent({
+            prompt: args.prompt,
+            session: args.session,
+            channels,
+            timeoutSec,
+            announce,
+            receiptsPath: config?.receipts?.path,
+          });
+          const result = await waitForDecision(id, { timeoutMs: timeoutSec * 1000 });
+          if (result.status === 'decided') {
+            return ok(JSON.stringify({ id, decision: result.decision }, null, 2));
+          }
+          return ok(JSON.stringify({ id, status: 'timeout', timeoutSec }, null, 2));
+        }
+        case 'list_intents': {
+          if (!confirmEnabled) return err('list_intents: confirmations not configured.');
+          return ok(JSON.stringify(listIntents(), null, 2));
+        }
+        case 'approve_intent': {
+          if (!confirmEnabled) return err('approve_intent: confirmations not configured.');
+          if (!args.id) return err('approve_intent: id is required');
+          const r = decideIntent(args.id, 'approve', { receiptsPath: config?.receipts?.path });
+          return r.ok ? ok(`Approved ${args.id}`) : err(r.error);
+        }
+        case 'deny_intent': {
+          if (!confirmEnabled) return err('deny_intent: confirmations not configured.');
+          if (!args.id) return err('deny_intent: id is required');
+          const r = decideIntent(args.id, 'deny', { receiptsPath: config?.receipts?.path });
+          return r.ok ? ok(`Denied ${args.id}`) : err(r.error);
         }
         case 'tmux_run': {
           if (!tmuxRunMode.enabled) {

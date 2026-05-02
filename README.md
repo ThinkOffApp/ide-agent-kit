@@ -442,10 +442,41 @@ Added to `ide-agent-kit.json` (or your own config path passed via `--config`):
 
     // Set true to expose tmux_run with NO allowlist filter — any command runs.
     // Default: false. Use only on a trusted host with a trusted MCP client.
-    "allow_unrestricted": false
+    "allow_unrestricted": false,
+
+    // User-confirmation flow (request_confirmation, list_intents,
+    // approve_intent, deny_intent tools). Tools are only registered if at
+    // least one channel below is configured.
+    "confirmations": {
+      "port": 8788,                    // HTTP port for /intent/:id/decision
+      "host": "127.0.0.1",             // bind host (keep local unless tunneled)
+      "auth_token": "",                // optional bearer for the HTTP endpoint
+      "callback_base": "http://...",   // URL the watch / chat reach back on; defaults to http://host:port
+      "room": "thinkoff-development",  // GroupMind room to post the prompt in (uses poller.api_key)
+      "codewatch_gate_url": "http://family@localhost:18791/intent",
+      "codewatch_gate_token": ""       // bearer for CLAWWATCH_GATE
+    }
   }
 }
 ```
+
+### Confirmation flow (request_confirmation tool)
+
+When `mcp.confirmations` is configured, four extra tools appear:
+
+| Tool                  | Args                                              | Notes |
+|-----------------------|---------------------------------------------------|-------|
+| `request_confirmation`| `prompt`, `session?`, `channels?`, `timeoutSec?`  | Posts an Approve / Deny prompt to GroupMind and/or Codewatch and BLOCKS until user decides or timeout. Returns `{decision: "approve"\|"deny"}` or `{status: "timeout", id}`. |
+| `list_intents`        | (none)                                            | All intents — pending and recently decided. |
+| `approve_intent`      | `id`                                              | Manually settle a pending intent (e.g. MCP override). |
+| `deny_intent`         | `id`                                              |  |
+
+End-to-end:
+1. MCP-aware agent calls `request_confirmation({prompt: "Drop production DB?"})`.
+2. The IAK MCP server posts to GroupMind room (`/approve <id>` / `/deny <id>` quick replies) and to the CLAWWATCH_GATE (Android interactive notification with Approve / Deny buttons that vibrate the watch).
+3. User taps Approve / Deny on the watch — Codewatch's notification action POSTs to `http://<callback_base>/intent/<id>/decision` with `{decision: "approve"}`.
+4. The MCP tool's blocking `request_confirmation` call resolves with the decision.
+5. The agent proceeds (or doesn't) based on the decision.
 
 Run standalone:
 
