@@ -4,7 +4,11 @@ Built for [OpenClaw](https://openclaw.dev) workflows. Local-first. No external s
 
 Multi-agent coordination toolkit for IDE AIs (Claude Code, Codex, Cursor, VS Code agents, local LLM assistants). Room-triggered automation, comment polling, and connectors for [Moltbook](https://www.moltbook.com), GitHub, and [GroupMind](https://groupmind.one) chat rooms.
 
-**Install:** `npm install -g ide-agent-kit`
+**One-shot install (macOS):**
+```
+curl -fsSL https://raw.githubusercontent.com/ThinkOffApp/ide-agent-kit/main/scripts/install.sh | bash
+```
+**npm:** `npm install -g ide-agent-kit`
 **ClawHub:** https://clawhub.ai/ThinkOffApp/ide-agent-kit
 
 ## Table of Contents
@@ -72,8 +76,11 @@ Run allowlisted commands in a named tmux session, capture output + exit code.
 11. **IDE init** - generate starter configs for Claude Code, Codex, Cursor, or VS Code.
 12. **ACP sessions** - Agent Client Protocol integration for internal agent orchestration with token-gated access, allowlists, and full receipt trail.
 13. **Background consolidation** - optional `light / REM / deep` pass over recent queue items, with append-only sidecars and no effect on the foreground room loop by default.
+14. **MCP server** (`bin/iak-mcp.mjs`) - exposes `wake_ide`, `wake_all`, `wake_remote`, `list_sessions`, `read_session`, `tmux_run`, `request_confirmation`, `list_intents`, `approve_intent`, `deny_intent` over stdio. Any MCP-aware client (Claude Code, Cursor, Codex) can drive the tmux fleet, trigger user confirmation prompts, and nudge a peer agent on another machine.
+15. **Confirmation daemon** (`bin/iak-mcp-daemon.mjs`) - long-running flavor with HTTP listener (`POST /intent`, `POST /intent/<id>/decision`, `POST /wake`, `GET /intents`), chat-reply poller (`/approve <id>` / `/deny <id>`), and a mobile-first web UI for tap-to-decide. Drives the CodeWatch app's Confirmations channel + GroupMind inline Approve/Deny buttons.
+16. **Auto-wake hooks** (`scripts/claudemb-poll.sh`, `scripts/claudemb-wake.sh`, `scripts/claudecode-stop-resume.sh`) - macOS bootstrap that polls a room, writes new messages to `/tmp/iak-new-messages.txt`, and either AppleScript-types `check rooms` into the Claude Code desktop app (when Accessibility permission is granted) or surfaces messages via a Stop hook on the next turn end. See `docs/auto-wake.md`.
 
-No dependencies. Node.js ≥ 18 only.
+Dependencies: Node.js ≥ 18, `@modelcontextprotocol/sdk` (auto-installed).
 
 ## IDE-Specific Setup
 
