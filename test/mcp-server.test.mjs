@@ -138,7 +138,7 @@ test('iak-mcp.mjs with empty tmux.allow OMITS tmux_run from the tool list (fail-
   writeFileSync(cfgPath, JSON.stringify({ tmux: { allow: [], default_session: 't' } }));
   try {
     const { tools } = await bootAndListTools(cfgPath);
-    assert.deepEqual(tools, ['list_sessions', 'read_session', 'wake_all', 'wake_ide']);
+    assert.deepEqual(tools, ['list_sessions', 'read_session', 'wake_all', 'wake_ide', 'wake_remote']);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
