@@ -20,6 +20,7 @@
 import { createServer } from 'node:http';
 import { randomUUID, createHmac, timingSafeEqual } from 'node:crypto';
 import { appendFileSync } from 'node:fs';
+import { spawn } from 'node:child_process';
 
 // --- registry ---------------------------------------------------------------
 
@@ -162,6 +163,7 @@ export function startConfirmationsServer({
   authToken = '',
   receiptsPath,
   announce, // optional: enables POST /intent to create new intents externally
+  wakeScript, // optional: shell script path; enables POST /wake to nudge the local IDE
 } = {}) {
   const server = createServer((req, res) => {
     const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
@@ -243,6 +245,37 @@ export function startConfirmationsServer({
     if (req.method === 'GET' && (url.pathname === '/' || url.pathname === '/intents.html')) {
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
       res.end(renderIntentsHtml());
+      return;
+    }
+    // POST /wake — nudge the local IDE / desktop app. Body: {text?}.
+    // Runs the configured wakeScript with the text as the only arg
+    // (defaults to "check rooms"). Used by other agents to keep this
+    // agent responsive without going through the room-poll roundtrip.
+    if (req.method === 'POST' && url.pathname === '/wake') {
+      if (!wakeScript) {
+        res.writeHead(503, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: false, error: 'wake disabled — no wakeScript configured' }));
+        return;
+      }
+      let body = '';
+      req.on('data', (c) => { body += c; });
+      req.on('end', () => {
+        let text = 'check rooms';
+        try {
+          const payload = JSON.parse(body || '{}');
+          if (typeof payload.text === 'string' && payload.text.trim().length > 0) text = payload.text.trim();
+        } catch { /* allow empty body */ }
+        try {
+          // Spawn detached; don't block the response. Wake script handles its own logging.
+          const child = spawn(wakeScript, [text], { detached: true, stdio: 'ignore' });
+          child.unref();
+          res.writeHead(202, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: true, text }));
+        } catch (e) {
+          res.writeHead(500, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: false, error: e.message || String(e) }));
+        }
+      });
       return;
     }
     res.writeHead(404, { 'Content-Type': 'application/json' });

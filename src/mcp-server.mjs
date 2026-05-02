@@ -251,6 +251,23 @@ export async function runMcpServer({ configPath } = {}) {
       },
     },
     {
+      name: 'wake_remote',
+      description:
+        'Wake a remote agent by POSTing to its IAK daemon /wake endpoint. The remote daemon ' +
+        'runs its configured wake script (typically scripts/claudemb-wake.sh, an osascript ' +
+        'injector for the Claude desktop app) so the remote agent gets a "check rooms" prompt ' +
+        'within ~500ms regardless of room-poll cadence. Use this for direct cross-machine ' +
+        'agent-to-agent coordination (e.g. claudemm has a question that needs claudemb).',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          gateUrl: { type: 'string', description: 'Base URL of the remote IAK daemon, e.g. http://192.168.50.240:8788.' },
+          text: { type: 'string', description: 'Nudge text. Default: "check rooms".', default: 'check rooms' },
+        },
+        required: ['gateUrl'],
+      },
+    },
+    {
       name: 'read_session',
       description:
         'Capture the current visible content of a tmux session pane. Use this after wake_ide ' +
@@ -359,6 +376,25 @@ export async function runMcpServer({ configPath } = {}) {
             r.success ? `  ✓ ${r.session}` : `  ✗ ${r.session}${r.reason ? ` (${r.reason})` : ''}`
           );
           return ok(`Woke with ${JSON.stringify(text)}:\n${lines.join('\n')}`);
+        }
+        case 'wake_remote': {
+          if (!args.gateUrl) return err('wake_remote: gateUrl is required');
+          const text = typeof args.text === 'string' ? args.text : 'check rooms';
+          try {
+            const res = await fetch(`${args.gateUrl}/wake`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ text }),
+              signal: AbortSignal.timeout(5000),
+            });
+            const body = await res.text();
+            if (res.status >= 200 && res.status < 300) {
+              return ok(`wake_remote ${args.gateUrl}: ${res.status} — ${body}`);
+            }
+            return err(`wake_remote ${args.gateUrl}: HTTP ${res.status} — ${body}`);
+          } catch (e) {
+            return err(`wake_remote ${args.gateUrl}: ${e.message || String(e)}`);
+          }
         }
         case 'read_session': {
           if (!args.session) return err('read_session: session is required');

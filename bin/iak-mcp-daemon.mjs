@@ -56,12 +56,18 @@ if (cc.codewatch_gate_url) {
 const serverAnnounce = composeAnnouncers(serverAnnouncerMap);
 
 // Start the HTTP listener first so any decisions can settle.
+// Wake script: defaults to scripts/claudemb-wake.sh in this repo.
+// Override via mcp.confirmations.wake_script in config.
+const wakeScript = cc.wake_script ||
+  new URL('../scripts/claudemb-wake.sh', import.meta.url).pathname;
+
 startConfirmationsServer({
   port: cc.port || 8788,
   host: cc.host || '127.0.0.1',
   authToken: cc.auth_token || '',
   receiptsPath: config?.receipts?.path,
   announce: serverAnnounce,
+  wakeScript,
 });
 console.log(`[iak-mcp-daemon] HTTP listener on http://${cc.host || '127.0.0.1'}:${cc.port || 8788} (POST /intent enabled: ${Object.keys(serverAnnouncerMap).join(',') || 'no announcers'})`);
 
