@@ -10,7 +10,7 @@ curl -fsSL https://raw.githubusercontent.com/ThinkOffApp/ide-agent-kit/main/scri
 ```
 Idempotent. Installs prereqs via brew, clones the repo, writes a starter
 config, wires UserPromptSubmit + Stop hooks, starts the daemon, prints the
-LAN URL to paste into [CodeWatch](https://github.com/ThinkOffApp/CodeWatch).
+LAN URL to paste into the CodeWatch companion app.
 
 **Manual install:** `npm install -g ide-agent-kit`
 **ClawHub:** https://clawhub.ai/ThinkOffApp/ide-agent-kit
@@ -29,10 +29,9 @@ LAN URL to paste into [CodeWatch](https://github.com/ThinkOffApp/CodeWatch).
   MacBook calls `wake_remote(gateUrl="http://<mini>:8788")`; mini's
   daemon spawns the wake script and the mini's Claude desktop app
   receives a prompt within ~500ms.
-- **CodeWatch integration**: Android phone + Wear OS app surfaces
-  confirmation requests inline in the IDE chat with Approve/Deny
-  buttons, plus system notifications with action buttons. Source:
-  [github.com/ThinkOffApp/CodeWatch](https://github.com/ThinkOffApp/CodeWatch).
+- **CodeWatch integration**: Android phone + Wear OS companion app
+  surfaces confirmation requests inline in the IDE chat with
+  Approve/Deny buttons, plus system notifications with action buttons.
 - **GroupMind chat buttons**: confirmation messages render inline
   Approve/Deny buttons in the GroupMind web UI (antfarm PR #13 merged).
 - **Auto-wake suite**: `claudemb-poll.sh` (room poller) +
