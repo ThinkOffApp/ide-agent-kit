@@ -323,7 +323,18 @@ export function makeGroupmindAnnouncer({ apiKey, room, callbackBase }) {
       `Target session: \`${session || '(none)'}\`\n` +
       (uiLink ? `Tap to decide: ${uiLink}\n` : '') +
       `Or reply: \`/approve ${id}\` · \`/deny ${id}\``;
-    const data = JSON.stringify({ room, body });
+    // Attach metadata so the GroupMind chat UI can render inline Approve/Deny
+    // buttons. Frontend reads `metadata.actions` + `metadata.intent_id` and
+    // POSTs `/approve <id>` (or `/deny <id>`) chat replies on tap, which the
+    // chat-reply poller in iak-mcp-daemon catches and routes to the local
+    // /intent/:id/decision endpoint. No new backend route needed.
+    const metadata = {
+      actions: ['Approve', 'Deny'],
+      intent_id: id,
+      intent_prompt: prompt,
+      intent_session: session || null,
+    };
+    const data = JSON.stringify({ room, body, metadata });
     const req = await import('node:https');
     return new Promise((resolve, reject) => {
       const r = req.request(
