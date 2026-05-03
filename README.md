@@ -808,8 +808,27 @@ See `config/team-relay.example.json` for the full config shape. Key sections:
 - `receipts.path` - where action receipts are appended (JSONL)
 - `tmux.allow` - command allowlist (prefix match)
 - `tmux.default_session` - tmux session name
+- `tmux.nudge_text` - what the wake script types into the IDE (default `check rooms`)
+- `tmux.ide_session` - tmux session name of your Claude Code (or other IDE) instance — `wake_ide` MCP tool targets this
 - `github.webhook_secret` - HMAC secret for signature verification
 - `github.event_kinds` - which GitHub events to accept
+- `poller.api_key` - GroupMind API key used by the room poller + chat-reply poller in `iak-mcp-daemon`
+- `mcp.sessions` - list of tmux sessions `wake_all` MCP tool targets
+- `mcp.confirmations` - confirmation registry settings (used by `iak-mcp-daemon`):
+  - `port` - HTTP listener port (default `8788`); also serves the browser Approve/Deny UI at `/`
+  - `host` - bind address (default `127.0.0.1`; use `0.0.0.0` for LAN-reachable so phones / watches / other Macs on the same wifi can hit `/intent`, `/wake`, `/intents`)
+  - `room` - GroupMind room slug to post confirmation requests to (also where the chat-reply poller watches for `/approve <id>` and `/deny <id>`)
+  - `callback_base` - public URL of this daemon (e.g. `http://192.168.50.240:8788`) — used in the chat post and as the link from the browser UI
+  - `auth_token` - optional bearer token gating `POST /intent/:id/decision` and `POST /intent`
+  - `wake_script` - path to the wake script; defaults to `scripts/claudemb-wake.sh` in the repo. Used by `POST /wake` and the `wake_remote` MCP tool
+  - `peers` - map of `@handle` → daemon URL on a peer machine; the room poller's `wake-on-mention.sh` POSTs `/wake` to the matching peer when it sees `@handle` in a new room message. Example:
+    ```json
+    "peers": {
+      "@claudemm": "http://192.168.50.241:8788",
+      "@CodexMB":  "http://192.168.50.241:8788"
+    }
+    ```
+  - `codewatch_gate_url` / `codewatch_gate_token` - legacy CodeWatch relay path (separate from the Wear OS bridge that ships in the CodeWatch Android app)
 
 ### Low-friction profile
 
