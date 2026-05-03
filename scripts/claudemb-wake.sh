@@ -18,10 +18,15 @@ fi
 trap "rmdir \"$LOCK\"" EXIT
 
 # Check if the app is running.
-# v0.8.5 — macOS comm field is the full executable path, not the basename,
-# so `pgrep -xq Claude` was failing every time even when Claude was alive.
-# pgrep -f also misbehaves on long paths on macOS, so use ps + grep.
-if ! ps -A -o command 2>/dev/null | grep -q "/${APP_NAME}.app/Contents/MacOS/${APP_NAME}$"; then
+# v0.8.6 — macOS comm field is truncated to 16 chars, so `pgrep -xq Claude`
+# matches "claude" (the CLI) but NOT the main Electron app whose comm is
+# "/Applications/Cl" (truncated). And the v0.8.5 attempt at
+# `ps | grep -q` collided with `set -o pipefail` + SIGPIPE: grep -q exits
+# early, ps catches SIGPIPE (exit 141), pipefail propagates that as
+# pipeline failure even though the match was found. Fix: count matches
+# with `grep -c` (consumes all input, no SIGPIPE) and tolerate `|| true`.
+running_count=$(ps -A -o command 2>/dev/null | grep -c "/${APP_NAME}.app/Contents/MacOS/${APP_NAME}$" || true)
+if [ "${running_count:-0}" -eq 0 ]; then
   printf "[%s] wake failed: '%s' app not running\n" "$(date -u +%FT%TZ)" "$APP_NAME" >> "$LOG_FILE"
   exit 1
 fi
