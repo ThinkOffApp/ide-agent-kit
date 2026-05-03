@@ -526,6 +526,25 @@ When `mcp.confirmations` is configured, four extra tools appear:
 | `approve_intent`      | `id`                                              | Manually settle a pending intent (e.g. MCP override). |
 | `deny_intent`         | `id`                                              |  |
 
+Non-MCP agents can use the same shared confirmation daemon through the CLI:
+
+```bash
+node bin/cli.mjs confirm request \
+  --config /path/to/ide-agent-kit.json \
+  --prompt "Approve destructive command?" \
+  --session codex \
+  --channels groupmind \
+  --from @CodexMB \
+  --wait
+
+node bin/cli.mjs confirm list --config /path/to/ide-agent-kit.json
+```
+
+The request command POSTs to the live daemon's `/intent` endpoint, so CodeWatch
+polling `/intents` shows the confirmation in the matching IDE channel (for
+example `session=codex...` maps to `@CodexMB`) and phone/watch Approve/Deny
+buttons settle the same intent. `--wait` blocks until a decision or timeout.
+
 End-to-end:
 1. MCP-aware agent calls `request_confirmation({prompt: "Drop production DB?"})`.
 2. The IAK MCP server posts to GroupMind room (`/approve <id>` / `/deny <id>` quick replies) and to the CLAWWATCH_GATE (Android interactive notification with Approve / Deny buttons that vibrate the watch).

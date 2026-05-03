@@ -73,6 +73,11 @@ Usage:
     Long-running room poller. Writes new messages to a notification file and
     optional tmux nudge. Uses rooms/apiKey/handle from config.poller section.
 
+  ide-agent-kit confirm <request|list> [--config <path>]
+    Create or inspect app-visible confirmation intents on the live IAK daemon.
+    request: --prompt <text> [--session <name>] [--channels groupmind,codewatch] [--wait] [--timeout-sec <sec>] [--daemon <url>] [--from <@handle>]
+    list:    [--daemon <url>]
+
   ide-agent-kit background <run|status> [--config <path>]
     Run or inspect the background consolidation job.
     run:    executes light -> REM -> deep sequentially and writes sidecars
@@ -194,6 +199,34 @@ function gwOpts(opts) {
   };
 }
 
+function confirmationDaemonBase(config, opts = {}) {
+  const cc = config?.mcp?.confirmations || {};
+  const host = cc.host || '127.0.0.1';
+  const port = cc.port || 8788;
+  return String(opts.daemon || opts.gate || `http://${host}:${port}`).replace(/\/+$/, '');
+}
+
+function parseChannels(value) {
+  if (!value || value === true) return undefined;
+  return String(value).split(',').map((s) => s.trim()).filter(Boolean);
+}
+
+async function fetchJson(url, options = {}) {
+  const response = await fetch(url, options);
+  const text = await response.text();
+  let body;
+  try {
+    body = text ? JSON.parse(text) : {};
+  } catch {
+    body = { raw: text };
+  }
+  if (!response.ok) {
+    const msg = body?.error || body?.raw || response.statusText;
+    throw new Error(`HTTP ${response.status}: ${msg}`);
+  }
+  return body;
+}
+
 async function main() {
   if (command === 'check') {
     const opts = parseKV(args, 'check');
@@ -230,6 +263,63 @@ async function main() {
       console.log(`Event queued: ${event.kind} (${event.trace_id})`);
     });
     return;
+  }
+
+  if (command === 'confirm') {
+    const opts = parseKV(args, subcommand || 'confirm');
+    const config = loadConfig(opts.config);
+    const daemon = confirmationDaemonBase(config, opts);
+
+    if (subcommand === 'list') {
+      const intents = await fetchJson(`${daemon}/intents`);
+      console.log(JSON.stringify(intents, null, 2));
+      return;
+    }
+
+    if (subcommand === 'request') {
+      if (!opts.prompt) {
+        console.error('Error: --prompt is required');
+        process.exit(1);
+      }
+      const payload = {
+        prompt: String(opts.prompt),
+        session: String(opts.session || config?.tmux?.ide_session || 'codex'),
+        channels: parseChannels(opts.channels),
+        from_handle: opts.from || config?.poller?.handle,
+      };
+      const created = await fetchJson(`${daemon}/intent`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+      if (!created.ok) {
+        console.error(`Error: ${created.error || 'intent creation failed'}`);
+        process.exit(1);
+      }
+      const id = created.id;
+      if (!opts.wait) {
+        console.log(JSON.stringify({ ok: true, id, daemon }, null, 2));
+        return;
+      }
+
+      const requestedTimeout = Number.parseInt(opts['timeout-sec'] || opts.timeout || '600', 10);
+      const timeoutSec = Math.max(1, Math.min(86400, Number.isFinite(requestedTimeout) ? requestedTimeout : 600));
+      const deadline = Date.now() + timeoutSec * 1000;
+      while (Date.now() < deadline) {
+        await new Promise((resolve) => setTimeout(resolve, 1000));
+        const intents = await fetchJson(`${daemon}/intents`);
+        const found = Array.isArray(intents) ? intents.find((i) => i.id === id) : null;
+        if (found?.status === 'decided') {
+          console.log(JSON.stringify({ ok: true, id, decision: found.decision, daemon }, null, 2));
+          return;
+        }
+      }
+      console.log(JSON.stringify({ ok: true, id, status: 'timeout', timeoutSec, daemon }, null, 2));
+      return;
+    }
+
+    console.error('Usage: ide-agent-kit confirm <request|list> [--config <path>]');
+    process.exit(1);
   }
 
   if (command === 'tmux' && subcommand === 'run') {
