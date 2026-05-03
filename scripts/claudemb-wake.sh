@@ -178,7 +178,51 @@ on run argv
         set midFront to name of first application process whose frontmost is true
       end tell
       if midFront is not appName then
-        log "wake: WARN — focus left " & appName & " mid-keystroke (now " & midFront & "); skipping Enter to avoid wrong-app trigger"
+        log "wake: focus left " & appName & " mid-keystroke (now " & midFront & "); re-activating before Enter"
+        -- v0.8.7 — petrus 2026-05-04: simultaneous wakes from claudemb +
+        -- codex pollers race for focus. Codex.app grabs focus between
+        -- my keystroke and Enter, so v0.8.5 SKIPPED Enter — text
+        -- landed in Claude's input box but the turn never started.
+        -- Petrus saw "all pollers down" because no agent responded.
+        --
+        -- Fix: re-activate Claude (up to 5 attempts), then send Enter.
+        -- If we can't reclaim focus, log + skip (prevents wrong-app
+        -- Enter trigger). Net: most cases now succeed, edge cases
+        -- still safely drop one wake.
+        set reEnterOk to false
+        set reEnterAttempts to 0
+        repeat while reEnterAttempts < 5
+          try
+            tell application appName to activate
+            tell application "System Events"
+              tell process appName
+                set frontmost to true
+              end tell
+            end tell
+          end try
+          delay 0.3
+          try
+            tell application "System Events"
+              set checkFront to name of first application process whose frontmost is true
+            end tell
+            if checkFront is appName then
+              set reEnterOk to true
+              exit repeat
+            end if
+          end try
+          set reEnterAttempts to reEnterAttempts + 1
+        end repeat
+        if reEnterOk then
+          tell application "System Events"
+            tell process appName
+              key code 36
+            end tell
+          end tell
+          set sendOk to true
+          log "wake: Enter sent after focus reclaim (" & reEnterAttempts & " retries)"
+        else
+          log "wake: ABORT Enter — could not reclaim " & appName & " focus after 5 retries (text typed but no Enter; user can press it manually)"
+        end if
       else
         tell application "System Events"
           tell process appName
