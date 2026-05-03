@@ -54,12 +54,23 @@ on run argv
 
   -- Process-targeted keystroke — bound to Claude's process specifically.
   -- Safe even if focus contention briefly puts another app on top.
+  --
+  -- v0.7.4: split typing and Enter into separate tell-blocks with a
+  -- 250ms delay between. Without the delay the Claude desktop app's
+  -- prompt input sometimes received the Enter BEFORE the typed text
+  -- had been processed — petrus reported the "tmux check rooms with
+  -- no Enter" symptom (text appeared in input but turn never started).
   set sendOk to false
   try
     tell application "System Events"
       tell process appName
         set frontmost to true
         keystroke promptText
+      end tell
+    end tell
+    delay 0.25
+    tell application "System Events"
+      tell process appName
         key code 36
       end tell
     end tell

@@ -29,6 +29,11 @@ on run argv
       tell process appName
         set frontmost to true
         keystroke promptText
+      end tell
+    end tell
+    delay 0.25
+    tell application "System Events"
+      tell process appName
         key code 36
       end tell
     end tell
