@@ -101,6 +101,8 @@ export async function createIntent({
   timeoutSec = 600,
   announce = async () => {},
   receiptsPath,
+  fromHandle,  // optional originator handle (e.g. "@CodexMB") for per-agent
+               // chat-author attribution; passed through to announcers.
 }) {
   const id = randomUUID().slice(0, 8);
   const intent = {
@@ -120,7 +122,7 @@ export async function createIntent({
   });
   // Side effects — never let an announce failure block the intent itself.
   try {
-    await announce({ id, prompt, session, channels });
+    await announce({ id, prompt, session, channels, fromHandle });
   } catch (e) {
     postReceipt(receiptsPath, {
       kind: 'intent.announce_failed', id, error: e.message,
@@ -228,6 +230,10 @@ export function startConfirmationsServer({
             channels: Array.isArray(payload.channels) ? payload.channels : (announce ? ['groupmind'] : []),
             announce: announce || (async () => {}),
             receiptsPath,
+            // Forwarding daemons (claudemm mini, Codex mini) include
+            // `from_handle` so the GroupMind announcer authors the chat
+            // post as the originating agent rather than the daemon owner.
+            fromHandle: typeof payload.from_handle === 'string' ? payload.from_handle : undefined,
           });
           res.writeHead(201, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ ok: true, id }));
@@ -384,9 +390,16 @@ function renderIntentsHtml() {
 // Post the intent prompt to a GroupMind room with quick-reply text the user
 // can copy / type, and a curl example for the watch-gate. Idempotent (same
 // id is harmless).
-export function makeGroupmindAnnouncer({ apiKey, room, callbackBase }) {
-  return async ({ id, prompt, session }) => {
+export function makeGroupmindAnnouncer({ apiKey, room, callbackBase, apiKeys }) {
+  // apiKeys: optional map of agent handle (e.g. "@claudemm") → API key.
+  // When the intent payload includes `fromHandle`, the announcer uses
+  // the matching key from this map so the chat post is authored by the
+  // ORIGINATING agent rather than always by the daemon owner.
+  // Falls back to the default `apiKey` when no match is found.
+  return async ({ id, prompt, session, fromHandle }) => {
     if (!apiKey || !room) return;
+    // Per-agent key override.
+    const effectiveKey = (fromHandle && apiKeys && apiKeys[fromHandle]) || apiKey;
     const uiLink = callbackBase ? `${callbackBase}/` : null;
     const body =
       `[Confirmation needed] **${prompt}**\n` +
@@ -409,7 +422,7 @@ export function makeGroupmindAnnouncer({ apiKey, room, callbackBase }) {
     return new Promise((resolve, reject) => {
       const r = req.request(
         'https://groupmind.one/api/v1/messages',
-        { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-API-Key': apiKey } },
+        { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-API-Key': effectiveKey } },
         (res) => {
           // drain + resolve regardless; the message-id isn't useful here.
           res.resume();

@@ -46,6 +46,11 @@ const serverAnnouncerMap = {};
 if (cc.room && apiKey) {
   serverAnnouncerMap.groupmind = makeGroupmindAnnouncer({
     apiKey, room: cc.room, callbackBase: cc.callback_base || `http://127.0.0.1:${cc.port || 8788}`,
+    // Per-agent author attribution: configure
+    // `mcp.confirmations.api_keys` as { "@CodexMB": "xfb_...", ... }
+    // and forwarding daemons that include `from_handle` in POST /intent
+    // bodies will have their announcement authored by that agent.
+    apiKeys: cc.api_keys || {},
   });
 }
 if (cc.codewatch_gate_url) {
