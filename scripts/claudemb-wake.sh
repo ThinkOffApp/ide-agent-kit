@@ -17,8 +17,11 @@ if ! mkdir "$LOCK" 2>/dev/null; then
 fi
 trap "rmdir \"$LOCK\"" EXIT
 
-# Check if the app is running
-if ! pgrep -xq "$APP_NAME"; then
+# Check if the app is running.
+# v0.8.5 — macOS comm field is the full executable path, not the basename,
+# so `pgrep -xq Claude` was failing every time even when Claude was alive.
+# pgrep -f also misbehaves on long paths on macOS, so use ps + grep.
+if ! ps -A -o command 2>/dev/null | grep -q "/${APP_NAME}.app/Contents/MacOS/${APP_NAME}$"; then
   printf "[%s] wake failed: '%s' app not running\n" "$(date -u +%FT%TZ)" "$APP_NAME" >> "$LOG_FILE"
   exit 1
 fi
@@ -107,12 +110,22 @@ on run argv
   -- keystroke. Retry up to 5 times. If we can't make Claude frontmost,
   -- BAIL (don't type into the wrong app). The next poll cycle will
   -- retry naturally; better to drop one wake than to spam Codex.
+  -- v0.8.5 — petrus 2026-05-03 saw 100% wake aborts after v0.8.4
+  -- ("nobody wakes from the wake function. Not great."). The earlier
+  -- single `tell application activate` before the loop wasn't enough
+  -- when the app was minimized / on another Space / inactive.
+  -- Re-call activate INSIDE the loop, longer delays (0.4s instead of
+  -- 0.2s), 8 attempts instead of 5. Total budget ~3.5s before bail.
   tell application appName to activate
-  delay 0.3
+  delay 0.4
 
   set focusOk to false
   set focusAttempts to 0
-  repeat while focusAttempts < 5
+  repeat while focusAttempts < 8
+    try
+      -- Re-activate every iteration; some macOS states need it again.
+      tell application appName to activate
+    end try
     try
       tell application "System Events"
         tell process appName
@@ -120,7 +133,7 @@ on run argv
         end tell
       end tell
     end try
-    delay 0.2
+    delay 0.4
     try
       tell application "System Events"
         set checkFront to name of first application process whose frontmost is true
@@ -134,12 +147,11 @@ on run argv
   end repeat
 
   if not focusOk then
-    log "wake: ABORT — could not bring " & appName & " to front after 5 attempts (refusing to type into wrong app)"
-    -- Restore focus and bail before keystroking.
-    try
-      tell application frontApp to activate
-    end try
-    return
+    log "wake: focus loop exhausted after 8 attempts; sending keystroke anyway (better to risk wrong-app than drop wake)"
+    -- v0.8.5 fallback: blast the keystroke. If it lands in the wrong
+    -- app, the WARN below logs it; if it lands in Claude (frontmost
+    -- check is racy and can lie), we get the wake. Either way is
+    -- better than the silent 100%-drop we had under v0.8.4.
   end if
 
   -- Now we're sure Claude is frontmost. Keystroke.
