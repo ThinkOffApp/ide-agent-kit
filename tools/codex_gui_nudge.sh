@@ -18,6 +18,14 @@ on run argv
   -- and tools/gemini_gui_nudge.sh). The old System Events.keystroke routes
   -- to whichever process is frontmost at execution time and silently lands
   -- in the wrong app if focus contention beats the activation delay.
+  -- v0.7.5: skip wake if the target app is already frontmost (user typing).
+  tell application "System Events"
+    set frontApp to name of first application process whose frontmost is true
+  end tell
+  if frontApp is appName then
+    log "gui_nudge: skipped — " & appName & " already frontmost (user typing)"
+    return
+  end if
   tell application appName to activate
   delay 0.3
   try
