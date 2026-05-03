@@ -48,16 +48,35 @@ on run argv
     set frontApp to name of first application process whose frontmost is true
   end tell
 
-  -- v0.7.5 — skip the wake when the user is already in the target app.
-  -- @claudemm observed that wakes injected mid-typing garbled
-  -- in-progress prompts (e.g. "your poller is con" + injected
-  -- "check rooms" mid-stream → "youyour poller is constancheckt
-  -- rooms..."). If Claude.app is already frontmost, the user is
-  -- actively typing and doesn't need a wake — the next time they
-  -- send a prompt, the UserPromptSubmit hook will surface the
-  -- queued /tmp messages anyway.
-  if frontApp is appName then
-    log "wake: skipped — " & appName & " already frontmost (user typing)"
+  -- v0.8.2 — skip the wake ONLY when the user is actively typing
+  -- (text already in the prompt input), not just because they have
+  -- Claude.app focused. v0.7.5 used frontmost-app as the proxy and
+  -- over-fired: skipped wake every time the user was reading the
+  -- room with Claude.app focused, making the agent look offline.
+  --
+  -- Precise check: query the actual text-area content via accessibility
+  -- and skip only when non-empty. Try/silent on failure so unknown
+  -- accessibility hierarchies don't block wakes.
+  set userIsTyping to false
+  try
+    tell application "System Events"
+      tell process appName
+        -- Walk the typical Electron / Claude.app prompt path. If the
+        -- accessibility tree shape differs, the inner gets fail and we
+        -- fall through to the wake (correct default).
+        set existingText to value of text area 1 of group 1 of window 1
+        if existingText is not "" and existingText is not missing value then
+          set userIsTyping to true
+        end if
+      end tell
+    end tell
+  on error
+    -- accessibility node not found at expected path — assume not typing,
+    -- fire the wake. Better to risk a rare mid-typing garble than to
+    -- silently drop every wake forever.
+  end try
+  if userIsTyping then
+    log "wake: skipped — user is typing in " & appName
     return
   end if
 

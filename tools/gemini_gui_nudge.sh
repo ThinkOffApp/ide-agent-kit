@@ -22,12 +22,22 @@ on run argv
   -- landed in the user's actual foreground app with NO error logged.
   --
   -- Fix: bind the target via `tell process appName / set frontmost true`.
-  -- v0.7.5: skip wake if the target app is already frontmost (user typing).
-  tell application "System Events"
-    set frontApp to name of first application process whose frontmost is true
-  end tell
-  if frontApp is appName then
-    log "gui_nudge: skipped — " & appName & " already frontmost (user typing)"
+  -- v0.8.2 — skip wake only when user is actively typing (text in input),
+  -- not just because target app is frontmost. v0.7.5 over-fired the skip.
+  set userIsTyping to false
+  try
+    tell application "System Events"
+      tell process appName
+        set existingText to value of text area 1 of group 1 of window 1
+        if existingText is not "" and existingText is not missing value then
+          set userIsTyping to true
+        end if
+      end tell
+    end tell
+  on error
+  end try
+  if userIsTyping then
+    log "gui_nudge: skipped — user typing in " & appName
     return
   end if
   tell application appName to activate

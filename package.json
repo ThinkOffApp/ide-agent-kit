@@ -1,6 +1,6 @@
 {
   "name": "ide-agent-kit",
-  "version": "0.8.1",
+  "version": "0.8.2",
   "description": "Built for OpenClaw workflows \u2014 ACP session orchestration, room-triggered automation, comment polling, Discord + Moltbook + GitHub connectors, receipts, exec approvals",
   "type": "module",
   "bin": {
