@@ -95,45 +95,88 @@ on run argv
     return
   end if
 
-  -- Activate Claude.app first so it can receive the keystroke routing.
+  -- v0.8.3 — verify-BEFORE-keystroke loop. The previous version did
+  -- `tell process to set frontmost + keystroke` in one block, then
+  -- LOGGED a warning when post-hoc frontmost check disagreed. But the
+  -- keystroke had already gone to the wrong app (13/239 = 5.4% routed
+  -- to Codex over the last day, silently lost). petrus called this
+  -- out: "i can see the latest check room prompts came more than 1 hr
+  -- ago for all of you ... fixing this is now top priority".
+  --
+  -- New approach: ACTIVATE → SET FRONTMOST → VERIFY → only then
+  -- keystroke. Retry up to 5 times. If we can't make Claude frontmost,
+  -- BAIL (don't type into the wrong app). The next poll cycle will
+  -- retry naturally; better to drop one wake than to spam Codex.
   tell application appName to activate
   delay 0.3
 
-  -- Process-targeted keystroke — bound to Claude's process specifically.
-  -- Safe even if focus contention briefly puts another app on top.
-  --
-  -- v0.7.4: split typing and Enter into separate tell-blocks with a
-  -- 250ms delay between. Without the delay the Claude desktop app's
-  -- prompt input sometimes received the Enter BEFORE the typed text
-  -- had been processed — petrus reported the "tmux check rooms with
-  -- no Enter" symptom (text appeared in input but turn never started).
+  set focusOk to false
+  set focusAttempts to 0
+  repeat while focusAttempts < 5
+    try
+      tell application "System Events"
+        tell process appName
+          set frontmost to true
+        end tell
+      end tell
+    end try
+    delay 0.2
+    try
+      tell application "System Events"
+        set checkFront to name of first application process whose frontmost is true
+      end tell
+      if checkFront is appName then
+        set focusOk to true
+        exit repeat
+      end if
+    end try
+    set focusAttempts to focusAttempts + 1
+  end repeat
+
+  if not focusOk then
+    log "wake: ABORT — could not bring " & appName & " to front after 5 attempts (refusing to type into wrong app)"
+    -- Restore focus and bail before keystroking.
+    try
+      tell application frontApp to activate
+    end try
+    return
+  end if
+
+  -- Now we're sure Claude is frontmost. Keystroke.
+  -- v0.7.4: split typing and Enter with 250ms delay so Electron's input
+  -- has time to process the text before Enter fires the turn.
   set sendOk to false
   try
     tell application "System Events"
       tell process appName
-        set frontmost to true
         keystroke promptText
       end tell
     end tell
     delay 0.25
-    tell application "System Events"
-      tell process appName
-        key code 36
+    -- Re-verify focus before pressing Enter. Some apps grab focus
+    -- mid-typing (Slack notifications, etc.) and Enter can fire in the
+    -- wrong app even when typing landed correctly.
+    try
+      tell application "System Events"
+        set midFront to name of first application process whose frontmost is true
       end tell
-    end tell
-    set sendOk to true
+      if midFront is not appName then
+        log "wake: WARN — focus left " & appName & " mid-keystroke (now " & midFront & "); skipping Enter to avoid wrong-app trigger"
+      else
+        tell application "System Events"
+          tell process appName
+            key code 36
+          end tell
+        end tell
+        set sendOk to true
+      end if
+    end try
   on error errMsg number errNum
     log "wake: keystroke failed — " & errNum & " " & errMsg
+    if errNum is 1002 then
+      log "wake: HINT — accessibility permission revoked. System Settings → Privacy & Security → Accessibility → toggle osascript / Terminal off+on."
+    end if
   end try
-
-  -- Verify the target app actually had focus at the end. Logged for
-  -- diagnostics — we don't retry here to avoid double-typing.
-  tell application "System Events"
-    set finalFront to name of first application process whose frontmost is true
-  end tell
-  if sendOk and finalFront is not appName then
-    log "wake: WARN — keystroke sent but final frontmost is " & finalFront & " (expected " & appName & ")"
-  end if
 
   delay 0.2
   -- Restore focus to whatever the user was actually in.

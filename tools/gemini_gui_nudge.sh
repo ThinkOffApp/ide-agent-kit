@@ -55,23 +55,70 @@ on run argv
     log "gui_nudge: skipped — user typing in " & appName
     return
   end if
+  -- v0.8.3 — verify-BEFORE-keystroke loop. Previous version did
+  -- set-frontmost+keystroke in one block, then logged a warning if
+  -- frontmost disagreed AFTER. But by then the keystroke had already
+  -- gone to the wrong app. petrus saw silent wake drops because of
+  -- this. New: ACTIVATE → SET FRONTMOST → VERIFY → keystroke. Bail
+  -- without typing if we can't make target frontmost in 5 tries.
   tell application appName to activate
   delay 0.3
+
+  set focusOk to false
+  set focusAttempts to 0
+  repeat while focusAttempts < 5
+    try
+      tell application "System Events"
+        tell process appName
+          set frontmost to true
+        end tell
+      end tell
+    end try
+    delay 0.2
+    try
+      tell application "System Events"
+        set checkFront to name of first application process whose frontmost is true
+      end tell
+      if checkFront is appName then
+        set focusOk to true
+        exit repeat
+      end if
+    end try
+    set focusAttempts to focusAttempts + 1
+  end repeat
+
+  if not focusOk then
+    log "gui_nudge: ABORT — could not bring " & appName & " to front after 5 attempts"
+    return
+  end if
+
   try
     tell application "System Events"
       tell process appName
-        set frontmost to true
         keystroke promptText
       end tell
     end tell
     delay 0.25
-    tell application "System Events"
-      tell process appName
-        key code 36
+    -- Re-verify focus before pressing Enter to avoid wrong-app trigger.
+    try
+      tell application "System Events"
+        set midFront to name of first application process whose frontmost is true
       end tell
-    end tell
+      if midFront is not appName then
+        log "gui_nudge: WARN — focus left " & appName & " mid-keystroke (now " & midFront & "); skipping Enter"
+      else
+        tell application "System Events"
+          tell process appName
+            key code 36
+          end tell
+        end tell
+      end if
+    end try
   on error errMsg number errNum
     log "gui_nudge: keystroke failed — " & errNum & " " & errMsg
+    if errNum is 1002 then
+      log "gui_nudge: HINT — accessibility permission revoked. Re-grant in System Settings → Privacy & Security → Accessibility."
+    end if
   end try
 end run
 APPLESCRIPT
