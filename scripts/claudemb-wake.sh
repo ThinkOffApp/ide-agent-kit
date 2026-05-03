@@ -58,6 +58,7 @@ on run argv
   -- and skip only when non-empty. Try/silent on failure so unknown
   -- accessibility hierarchies don't block wakes.
   set userIsTyping to false
+  set promptAlreadyTyped to false
   try
     tell application "System Events"
       tell process appName
@@ -66,7 +67,11 @@ on run argv
         -- fall through to the wake (correct default).
         set existingText to value of text area 1 of group 1 of window 1
         if existingText is not "" and existingText is not missing value then
-          set userIsTyping to true
+          if existingText is promptText then
+            set promptAlreadyTyped to true
+          else
+            set userIsTyping to true
+          end if
         end if
       end tell
     end tell
@@ -75,6 +80,16 @@ on run argv
     -- fire the wake. Better to risk a rare mid-typing garble than to
     -- silently drop every wake forever.
   end try
+  if promptAlreadyTyped then
+    log "wake: prompt already typed - sending Enter"
+    tell application "System Events"
+      tell process appName
+        set frontmost to true
+        key code 36
+      end tell
+    end tell
+    return
+  end if
   if userIsTyping then
     log "wake: skipped — user is typing in " & appName
     return

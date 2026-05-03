@@ -25,17 +25,32 @@ on run argv
   -- v0.8.2 — skip wake only when user is actively typing (text in input),
   -- not just because target app is frontmost. v0.7.5 over-fired the skip.
   set userIsTyping to false
+  set promptAlreadyTyped to false
   try
     tell application "System Events"
       tell process appName
         set existingText to value of text area 1 of group 1 of window 1
         if existingText is not "" and existingText is not missing value then
-          set userIsTyping to true
+          if existingText is promptText then
+            set promptAlreadyTyped to true
+          else
+            set userIsTyping to true
+          end if
         end if
       end tell
     end tell
   on error
   end try
+  if promptAlreadyTyped then
+    log "gui_nudge: prompt already typed - sending Enter"
+    tell application "System Events"
+      tell process appName
+        set frontmost to true
+        key code 36
+      end tell
+    end tell
+    return
+  end if
   if userIsTyping then
     log "gui_nudge: skipped — user typing in " & appName
     return
