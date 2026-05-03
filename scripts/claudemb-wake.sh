@@ -48,6 +48,19 @@ on run argv
     set frontApp to name of first application process whose frontmost is true
   end tell
 
+  -- v0.7.5 — skip the wake when the user is already in the target app.
+  -- @claudemm observed that wakes injected mid-typing garbled
+  -- in-progress prompts (e.g. "your poller is con" + injected
+  -- "check rooms" mid-stream → "youyour poller is constancheckt
+  -- rooms..."). If Claude.app is already frontmost, the user is
+  -- actively typing and doesn't need a wake — the next time they
+  -- send a prompt, the UserPromptSubmit hook will surface the
+  -- queued /tmp messages anyway.
+  if frontApp is appName then
+    log "wake: skipped — " & appName & " already frontmost (user typing)"
+    return
+  end if
+
   -- Activate Claude.app first so it can receive the keystroke routing.
   tell application appName to activate
   delay 0.3
