@@ -312,18 +312,6 @@ export async function runMcpServer({ configPath } = {}) {
       inputSchema: { type: 'object', properties: {} },
     },
     {
-      name: 'room_post',
-      description: 'Post a message to a GroupMind room. Much faster than shelling python+urllib.',
-      inputSchema: {
-        type: 'object',
-        properties: {
-          room: { type: 'string', description: 'Room slug to post to. Defaults to config.mcp.confirmations.room.' },
-          message: { type: 'string', description: 'The message to post.' },
-        },
-        required: ['message'],
-      },
-    },
-    {
       name: 'wake_ide',
       description:
         'Wake an IDE / agent by sending a text nudge to its tmux session and pressing Enter. ' +
@@ -522,27 +510,6 @@ export async function runMcpServer({ configPath } = {}) {
             return ok('Acknowledged new messages.');
           } catch (e) {
             return err('Failed to ack: ' + e.message);
-          }
-        }
-        case 'room_post': {
-          const room = args.room || config?.mcp?.confirmations?.room;
-          if (!room) return err('room_post: room is required');
-          const apiKey = config?.poller?.api_key || config?.poller?.apiKey || process.env.ANTIGRAVITY_API_KEY;
-          if (!apiKey) return err('room_post: config.poller.api_key is required');
-          try {
-            const res = await fetch(`https://groupmind.one/api/v1/rooms/${room}/messages`, {
-              method: 'POST',
-              headers: {
-                'Content-Type': 'application/json',
-                'Authorization': `Bearer ${apiKey}`
-              },
-              body: JSON.stringify({ body: args.message })
-            });
-            const text = await res.text();
-            if (res.ok) return ok(`Posted to ${room}`);
-            return err(`Failed to post to ${room}: ${res.status} ${text}`);
-          } catch (e) {
-            return err(`Failed to post: ${e.message}`);
           }
         }
         case 'wake_ide': {
