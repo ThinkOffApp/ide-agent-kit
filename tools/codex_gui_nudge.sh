@@ -3,64 +3,47 @@ set -euo pipefail
 
 APP_NAME="${IAK_CODEX_APP_NAME:-Codex}"
 PROMPT_TEXT="${IAK_NUDGE_TEXT:-check room and respond [codex]}"
+LOG_FILE="${IAK_CODEX_NUDGE_LOG:-/tmp/codex_gui_nudge.log}"
 
 if ! command -v osascript >/dev/null 2>&1; then
   echo "osascript not found" >&2
   exit 1
 fi
 
-osascript - "$APP_NAME" "$PROMPT_TEXT" <<'APPLESCRIPT'
+printf '[%s] codex_gui_nudge: start app=%s text=%q\n' "$(date -u +%FT%TZ)" "$APP_NAME" "$PROMPT_TEXT" >>"$LOG_FILE"
+
+osascript - "$APP_NAME" "$PROMPT_TEXT" "$LOG_FILE" <<'APPLESCRIPT'
 on run argv
   set appName to item 1 of argv
   set promptText to item 2 of argv
+  set logFile to item 3 of argv
 
-  -- v0.7.3 — process-targeted keystroke (matches scripts/claudemb-wake.sh
-  -- and tools/gemini_gui_nudge.sh). The old System Events.keystroke routes
-  -- to whichever process is frontmost at execution time and silently lands
-  -- in the wrong app if focus contention beats the activation delay.
-  -- v0.8.2 — skip wake only when user is actively typing (text in input),
-  -- not just because target app is frontmost. v0.7.5 over-fired the skip.
-  set userIsTyping to false
-  set promptAlreadyTyped to false
+  my writeLog(logFile, "applescript start")
+
+  -- Current Codex desktop no longer exposes the prompt as
+  -- `text area 1 of group 1 of window 1`; AX reports zero text areas.
+  -- Use a guarded click near the bottom input and paste the nudge via
+  -- clipboard instead of silently "succeeding" against a stale selector.
   try
-    tell application "System Events"
-      tell process appName
-        set existingText to value of text area 1 of group 1 of window 1
-        if existingText is not "" and existingText is not missing value then
-          if existingText is promptText then
-            set promptAlreadyTyped to true
-          else
-            set userIsTyping to true
-          end if
-        end if
-      end tell
-    end tell
+    set oldClipboard to the clipboard
   on error
+    set oldClipboard to ""
   end try
-  if promptAlreadyTyped then
-    log "gui_nudge: prompt already typed - sending Enter"
-    tell application "System Events"
-      tell process appName
-        set frontmost to true
-        key code 36
-      end tell
-    end tell
-    return
-  end if
-  if userIsTyping then
-    log "gui_nudge: skipped — user typing in " & appName
-    return
-  end if
-  -- v0.8.3 — verify-BEFORE-keystroke loop. See claudemb-wake.sh for
-  -- the rationale. tl;dr: post-hoc warning was useless because the
-  -- wrong-app keystroke had already happened. Now we abort without
-  -- typing if we can't make the target frontmost.
-  tell application appName to activate
+
+  try
+    tell application appName to activate
+  on error errMsg number errNum
+    my writeLog(logFile, "activate failed " & errNum & " " & errMsg)
+    error errMsg number errNum
+  end try
+
   delay 0.3
 
   set focusOk to false
-  set focusAttempts to 0
-  repeat while focusAttempts < 5
+  repeat with attempt from 1 to 8
+    try
+      tell application appName to activate
+    end try
     try
       tell application "System Events"
         tell process appName
@@ -78,40 +61,49 @@ on run argv
         exit repeat
       end if
     end try
-    set focusAttempts to focusAttempts + 1
   end repeat
 
   if not focusOk then
-    log "gui_nudge: ABORT — could not bring " & appName & " to front after 5 attempts"
-    return
+    my writeLog(logFile, "ABORT focus failed")
+    error "could not focus " & appName number 1001
   end if
 
   try
     tell application "System Events"
       tell process appName
-        keystroke promptText
+        set winPos to position of window 1
+        set winSize to size of window 1
+        set clickX to (item 1 of winPos) + ((item 1 of winSize) / 2)
+        set clickY to (item 2 of winPos) + (item 2 of winSize) - 72
+        click at {clickX, clickY}
       end tell
     end tell
-    delay 0.25
-    try
-      tell application "System Events"
-        set midFront to name of first application process whose frontmost is true
+    delay 0.15
+    set the clipboard to promptText
+    delay 0.05
+    tell application "System Events"
+      tell process appName
+        keystroke "v" using command down
+        delay 0.1
+        key code 36
       end tell
-      if midFront is not appName then
-        log "gui_nudge: WARN — focus left " & appName & " mid-keystroke (now " & midFront & "); skipping Enter"
-      else
-        tell application "System Events"
-          tell process appName
-            key code 36
-          end tell
-        end tell
-      end if
-    end try
+    end tell
+    delay 0.1
+    set the clipboard to oldClipboard
+    my writeLog(logFile, "sent")
   on error errMsg number errNum
-    log "gui_nudge: keystroke failed — " & errNum & " " & errMsg
+    try
+      set the clipboard to oldClipboard
+    end try
+    my writeLog(logFile, "failed " & errNum & " " & errMsg)
     if errNum is 1002 then
-      log "gui_nudge: HINT — accessibility permission revoked. Re-grant in System Settings → Privacy & Security → Accessibility."
+      my writeLog(logFile, "HINT accessibility permission revoked")
     end if
+    error errMsg number errNum
   end try
 end run
+
+on writeLog(logFile, msg)
+  do shell script "printf '[%s] %s\\n' \"$(date -u +%FT%TZ)\" " & quoted form of ("codex_gui_nudge: " & msg) & " >> " & quoted form of logFile
+end writeLog
 APPLESCRIPT
