@@ -521,7 +521,7 @@ When `mcp.confirmations` is configured, four extra tools appear:
 
 | Tool                  | Args                                              | Notes |
 |-----------------------|---------------------------------------------------|-------|
-| `request_confirmation`| `prompt`, `session?`, `channels?`, `timeoutSec?`  | Posts an Approve / Deny prompt to GroupMind and/or Codewatch and BLOCKS until user decides or timeout. Returns `{decision: "approve"\|"deny"}` or `{status: "timeout", id}`. |
+| `request_confirmation`| `prompt`, `session?`, `channels?`, `timeoutSec?`, `fromHandle?` | Posts an Approve / Deny prompt to GroupMind and/or Codewatch and BLOCKS until user decides or timeout. Returns `{decision: "approve"\|"deny"}` or `{status: "timeout", id}`. `fromHandle` defaults to `poller.handle` for correct agent attribution. |
 | `list_intents`        | (none)                                            | All intents — pending and recently decided. |
 | `approve_intent`      | `id`                                              | Manually settle a pending intent (e.g. MCP override). |
 | `deny_intent`         | `id`                                              |  |

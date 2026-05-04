@@ -98,6 +98,14 @@ export function configuredAgentSessions(config) {
   return [...sessions];
 }
 
+export function confirmationFromHandle(args = {}, config = {}) {
+  const explicit = args.fromHandle || args.from_handle;
+  if (typeof explicit === 'string' && explicit.trim()) return explicit.trim();
+  const configured = config?.poller?.handle;
+  if (typeof configured === 'string' && configured.trim()) return configured.trim();
+  return undefined;
+}
+
 // Decides whether tmux_run should be exposed and why. Returns
 // {enabled: boolean, reason: string} so the boot log can explain itself.
 export function decideTmuxRunMode(config) {
@@ -302,6 +310,10 @@ export async function runMcpServer({ configPath } = {}) {
               description: 'Which channels to post to. Default: all configured channels.',
             },
             timeoutSec: { type: 'number', description: 'How long to wait for a decision before returning timeout. Default 600 (10 min).', default: 600 },
+            fromHandle: {
+              type: 'string',
+              description: 'Originating agent handle for attribution, e.g. @CodexMB. Defaults to poller.handle from config.',
+            },
           },
           required: ['prompt'],
         },
@@ -421,6 +433,7 @@ export async function runMcpServer({ configPath } = {}) {
                 prompt: args.prompt,
                 session: args.session,
                 channels: Array.isArray(args.channels) ? args.channels : undefined,
+                from_handle: confirmationFromHandle(args, config),
               }),
             });
             const created = await createRes.json();
@@ -452,6 +465,7 @@ export async function runMcpServer({ configPath } = {}) {
             timeoutSec,
             announce,
             receiptsPath: config?.receipts?.path,
+            fromHandle: confirmationFromHandle(args, config),
           });
           const result = await waitForDecision(id, { timeoutMs: timeoutSec * 1000 });
           if (result.status === 'decided') {

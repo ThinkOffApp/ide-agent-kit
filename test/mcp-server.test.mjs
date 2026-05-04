@@ -11,7 +11,7 @@ import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 
-import { decideTmuxRunMode, configuredAgentSessions } from '../src/mcp-server.mjs';
+import { confirmationFromHandle, decideTmuxRunMode, configuredAgentSessions } from '../src/mcp-server.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const BIN = join(__dirname, '..', 'bin', 'iak-mcp.mjs');
@@ -93,6 +93,27 @@ test('configuredAgentSessions: drops empty strings and non-strings from mcp.sess
     mcp: { sessions: ['ok', '', null, 42, 'also-ok'] },
   });
   assert.deepEqual(sessions, ['ok', 'also-ok']);
+});
+
+// --- confirmation attribution -----------------------------------------------
+
+test('confirmationFromHandle: prefers explicit request handle', () => {
+  assert.equal(
+    confirmationFromHandle({ fromHandle: '@explicit' }, { poller: { handle: '@configured' } }),
+    '@explicit'
+  );
+  assert.equal(
+    confirmationFromHandle({ from_handle: '@snake' }, { poller: { handle: '@configured' } }),
+    '@snake'
+  );
+});
+
+test('confirmationFromHandle: falls back to poller.handle', () => {
+  assert.equal(confirmationFromHandle({}, { poller: { handle: '@CodexMB' } }), '@CodexMB');
+});
+
+test('confirmationFromHandle: returns undefined without attribution', () => {
+  assert.equal(confirmationFromHandle({}, {}), undefined);
 });
 
 // --- end-to-end stdio smoke ------------------------------------------------
