@@ -106,6 +106,80 @@ export function confirmationFromHandle(args = {}, config = {}) {
   return undefined;
 }
 
+export function configuredRoomApi(config = {}, args = {}) {
+  const confirmCfg = config?.mcp?.confirmations || {};
+  const fromHandle = confirmationFromHandle(args, config);
+  const apiKeys = confirmCfg.api_keys || {};
+  const apiKey =
+    args.apiKey ||
+    args.api_key ||
+    (fromHandle && apiKeys[fromHandle]) ||
+    config?.poller?.api_key ||
+    config?.poller?.apiKey ||
+    config?.intent?.apiKey ||
+    '';
+  const room =
+    args.room ||
+    confirmCfg.room ||
+    (Array.isArray(config?.poller?.rooms) ? config.poller.rooms[0] : '') ||
+    '';
+  const baseUrl =
+    config?.groupmind?.base_url ||
+    config?.groupmind?.baseUrl ||
+    config?.intent?.baseUrl ||
+    'https://groupmind.one/api/v1';
+  return { apiKey, room, baseUrl: String(baseUrl).replace(/\/$/, ''), fromHandle };
+}
+
+export function roomApiConfigured(config = {}) {
+  const { apiKey, room } = configuredRoomApi(config);
+  return Boolean(apiKey && room);
+}
+
+function roomHeaders(apiKey) {
+  return {
+    'Authorization': `Bearer ${apiKey}`,
+    'X-API-Key': apiKey,
+    'Content-Type': 'application/json',
+  };
+}
+
+async function postRoomMessage({ config, room, body, fromHandle }) {
+  const roomCfg = configuredRoomApi(config, { room, fromHandle });
+  if (!roomCfg.apiKey) throw new Error('room_post: missing poller.api_key or intent.apiKey');
+  if (!roomCfg.room) throw new Error('room_post: room is required');
+  if (!body || typeof body !== 'string') throw new Error('room_post: body is required');
+
+  const res = await fetch(`${roomCfg.baseUrl}/messages`, {
+    method: 'POST',
+    headers: roomHeaders(roomCfg.apiKey),
+    body: JSON.stringify({ room: roomCfg.room, body }),
+    signal: AbortSignal.timeout(5000),
+  });
+  const text = await res.text();
+  if (!res.ok) throw new Error(`room_post: HTTP ${res.status} — ${text}`);
+  try {
+    return JSON.parse(text);
+  } catch {
+    return { ok: true, raw: text };
+  }
+}
+
+async function fetchRoomMessages({ config, room, limit }) {
+  const roomCfg = configuredRoomApi(config, { room });
+  if (!roomCfg.apiKey) throw new Error('room_recent: missing poller.api_key or intent.apiKey');
+  if (!roomCfg.room) throw new Error('room_recent: room is required');
+  const safeLimit = Math.max(1, Math.min(100, parseInt(limit, 10) || 20));
+  const url = `${roomCfg.baseUrl}/rooms/${encodeURIComponent(roomCfg.room)}/messages?limit=${safeLimit}`;
+  const res = await fetch(url, {
+    headers: roomHeaders(roomCfg.apiKey),
+    signal: AbortSignal.timeout(5000),
+  });
+  const text = await res.text();
+  if (!res.ok) throw new Error(`room_recent: HTTP ${res.status} — ${text}`);
+  return JSON.parse(text);
+}
+
 // Decides whether tmux_run should be exposed and why. Returns
 // {enabled: boolean, reason: string} so the boot log can explain itself.
 export function decideTmuxRunMode(config) {
@@ -188,6 +262,7 @@ export async function runMcpServer({ configPath } = {}) {
   }
   const announce = composeAnnouncers(announcerMap);
   const confirmEnabled = Object.keys(announcerMap).length > 0;
+  const roomToolsEnabled = roomApiConfigured(config);
 
   // Try to detect a separately-running iak-mcp-daemon on the configured port.
   // When present, the MCP server forwards intent creation + decision polling
@@ -335,6 +410,52 @@ export async function runMcpServer({ configPath } = {}) {
       }
     );
   }
+  if (roomToolsEnabled) {
+    tools.push(
+      {
+        name: 'room_post',
+        description:
+          'Post a message to a configured GroupMind room directly through the IAK MCP server. ' +
+          'Use this instead of shelling out to curl/python for low-latency room replies.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            body: { type: 'string', description: 'Message body to post.' },
+            room: { type: 'string', description: 'Room slug. Defaults to mcp.confirmations.room or first poller room.' },
+            fromHandle: { type: 'string', description: 'Optional agent handle for per-agent API key attribution.' },
+          },
+          required: ['body'],
+        },
+      },
+      {
+        name: 'room_recent',
+        description: 'Fetch recent messages from a configured GroupMind room without shelling out.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            room: { type: 'string', description: 'Room slug. Defaults to mcp.confirmations.room or first poller room.' },
+            limit: { type: 'integer', description: 'Number of messages to fetch, 1..100. Default 20.', default: 20 },
+          },
+        },
+      },
+      {
+        name: 'alert_recipient',
+        description:
+          'Alert a room recipient by posting an @mention message through GroupMind. ' +
+          'This is the MCP-side recipient alert primitive; wake delivery remains the webhook/poller responsibility.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            handle: { type: 'string', description: 'Recipient handle, with or without leading @.' },
+            body: { type: 'string', description: 'Message body after the mention.' },
+            room: { type: 'string', description: 'Room slug. Defaults to mcp.confirmations.room or first poller room.' },
+            fromHandle: { type: 'string', description: 'Optional sender handle for per-agent API key attribution.' },
+          },
+          required: ['handle', 'body'],
+        },
+      }
+    );
+  }
   if (tmuxRunMode.enabled) {
     tools.push({
       name: 'tmux_run',
@@ -416,6 +537,34 @@ export async function runMcpServer({ configPath } = {}) {
           } catch (e) {
             return err(e.message);
           }
+        }
+        case 'room_post': {
+          if (!roomToolsEnabled) return err('room_post: room API is not configured.');
+          const posted = await postRoomMessage({
+            config,
+            room: args.room,
+            body: args.body,
+            fromHandle: args.fromHandle || args.from_handle,
+          });
+          return ok(JSON.stringify(posted, null, 2));
+        }
+        case 'room_recent': {
+          if (!roomToolsEnabled) return err('room_recent: room API is not configured.');
+          const recent = await fetchRoomMessages({ config, room: args.room, limit: args.limit });
+          return ok(JSON.stringify(recent, null, 2));
+        }
+        case 'alert_recipient': {
+          if (!roomToolsEnabled) return err('alert_recipient: room API is not configured.');
+          if (!args.handle) return err('alert_recipient: handle is required');
+          if (!args.body) return err('alert_recipient: body is required');
+          const handle = String(args.handle).startsWith('@') ? String(args.handle) : `@${args.handle}`;
+          const posted = await postRoomMessage({
+            config,
+            room: args.room,
+            body: `${handle} ${args.body}`,
+            fromHandle: args.fromHandle || args.from_handle,
+          });
+          return ok(JSON.stringify(posted, null, 2));
         }
         case 'request_confirmation': {
           if (!confirmEnabled && !daemonAvailable) return err('request_confirmation: confirmations not configured. Set mcp.confirmations.room (+ poller.api_key) and/or codewatch_gate_url.');

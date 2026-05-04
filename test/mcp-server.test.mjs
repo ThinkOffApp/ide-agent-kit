@@ -11,7 +11,13 @@ import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 
-import { confirmationFromHandle, decideTmuxRunMode, configuredAgentSessions } from '../src/mcp-server.mjs';
+import {
+  confirmationFromHandle,
+  configuredRoomApi,
+  decideTmuxRunMode,
+  configuredAgentSessions,
+  roomApiConfigured,
+} from '../src/mcp-server.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const BIN = join(__dirname, '..', 'bin', 'iak-mcp.mjs');
@@ -116,6 +122,30 @@ test('confirmationFromHandle: returns undefined without attribution', () => {
   assert.equal(confirmationFromHandle({}, {}), undefined);
 });
 
+// --- room MCP helpers --------------------------------------------------------
+
+test('configuredRoomApi: resolves default room and per-agent API key', () => {
+  const cfg = {
+    poller: { api_key: 'default-key', rooms: ['thinkoff-development'], handle: '@CodexMB' },
+    intent: { baseUrl: 'https://groupmind.one/api/v1/' },
+    mcp: { confirmations: { api_keys: { '@Other': 'other-key' } } },
+  };
+  assert.deepEqual(configuredRoomApi(cfg), {
+    apiKey: 'default-key',
+    room: 'thinkoff-development',
+    baseUrl: 'https://groupmind.one/api/v1',
+    fromHandle: '@CodexMB',
+  });
+  assert.equal(configuredRoomApi(cfg, { fromHandle: '@Other' }).apiKey, 'other-key');
+});
+
+test('roomApiConfigured: requires both API key and room', () => {
+  assert.equal(roomApiConfigured({}), false);
+  assert.equal(roomApiConfigured({ poller: { api_key: 'k' } }), false);
+  assert.equal(roomApiConfigured({ poller: { rooms: ['r'] } }), false);
+  assert.equal(roomApiConfigured({ poller: { api_key: 'k', rooms: ['r'] } }), true);
+});
+
 // --- end-to-end stdio smoke ------------------------------------------------
 
 import { writeFileSync, mkdtempSync, rmSync } from 'node:fs';
@@ -175,6 +205,23 @@ test('iak-mcp.mjs with mcp.allow_unrestricted=true INCLUDES tmux_run even when a
   try {
     const { tools } = await bootAndListTools(cfgPath);
     assert.ok(tools.includes('tmux_run'), `expected tmux_run, got ${tools.join(',')}`);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('iak-mcp.mjs with room API config exposes low-latency room tools', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'iak-mcp-test-'));
+  const cfgPath = join(dir, 'config.json');
+  writeFileSync(cfgPath, JSON.stringify({
+    poller: { api_key: 'test-key', rooms: ['thinkoff-development'] },
+    tmux: { allow: [], default_session: 't' },
+  }));
+  try {
+    const { tools } = await bootAndListTools(cfgPath);
+    assert.ok(tools.includes('room_post'), `expected room_post, got ${tools.join(',')}`);
+    assert.ok(tools.includes('room_recent'), `expected room_recent, got ${tools.join(',')}`);
+    assert.ok(tools.includes('alert_recipient'), `expected alert_recipient, got ${tools.join(',')}`);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
