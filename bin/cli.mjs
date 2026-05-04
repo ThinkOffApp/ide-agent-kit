@@ -451,7 +451,8 @@ async function main() {
         apiKey: pollerApiKey,
         handle: pollerHandle,
         interval: opts.interval ? parseInt(opts.interval) : undefined,
-        config
+        config,
+        sessionOpt: opts.session
       });
       return;
     }
@@ -474,7 +475,8 @@ async function main() {
       apiKey: opts['api-key'],
       handle: opts.handle,
       interval: opts.interval ? parseInt(opts.interval) : undefined,
-      config
+      config,
+      sessionOpt: opts.session
     });
     return;
   }

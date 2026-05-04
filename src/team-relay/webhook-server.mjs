@@ -323,6 +323,42 @@ export function startWebhookServer(config, onEvent) {
       return;
     }
 
+    // Wake endpoint for MCP remote waking
+    if (req.method === 'POST' && req.url === '/wake') {
+      const chunks = [];
+      for await (const chunk of req) chunks.push(chunk);
+      let body = {};
+      if (chunks.length > 0) {
+        try { body = JSON.parse(Buffer.concat(chunks).toString()); } catch {}
+      }
+      
+      const expectedToken = process.env.IAK_WAKE_TOKEN || config.wake_token;
+      const providedToken = body.token || req.headers['x-wake-token'];
+      
+      if (expectedToken && providedToken !== expectedToken) {
+        res.writeHead(401, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'Unauthorized: Invalid or missing wake token' }));
+        return;
+      }
+
+      const wakeCmd = config.poller?.nudge_command || config.poller?.wake_script;
+      if (wakeCmd) {
+        try {
+          execSync(wakeCmd);
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ status: 'woken', method: 'command' }));
+        } catch (e) {
+          res.writeHead(500, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: e.message }));
+        }
+      } else {
+        nudgeTmux(config.tmux?.ide_session || config.tmux?.default_session || 'claude');
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ status: 'woken', method: 'tmux' }));
+      }
+      return;
+    }
+
     if (req.method !== 'POST' || req.url !== '/webhook') {
       res.writeHead(404);
       res.end('Not found');
@@ -381,6 +417,7 @@ export function startWebhookServer(config, onEvent) {
 
   server.listen(port, host, () => {
     console.log(`IDE Agent Kit webhook server listening on ${host}:${port}`);
+    console.log(`  POST /wake       — Remote wake endpoint`);
     console.log(`  POST /webhook  — GitHub webhook endpoint`);
     console.log(`  POST /groupmind  — GroupMind webhook endpoint`);
     console.log(`  POST /discord  — Discord message webhook endpoint`);

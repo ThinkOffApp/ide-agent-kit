@@ -60,11 +60,11 @@ export function checkRoomMessages(config) {
   }
 }
 
-export async function startRoomPoller({ rooms, apiKey, handle, interval, config }) {
+export async function startRoomPoller({ rooms, apiKey, handle, interval, config, sessionOpt }) {
   const seenFile = config?.poller?.seen_file || SEEN_FILE_DEFAULT;
   const notifyFile = config?.poller?.notification_file || NOTIFY_FILE_DEFAULT;
   const queuePath = config?.queue?.path || './ide-agent-queue.jsonl';
-  const session = config?.tmux?.ide_session || config?.tmux?.default_session || 'claude';
+  const session = sessionOpt || config?.tmux?.ide_session || config?.tmux?.default_session || 'claude';
   const nudgeText = config?.tmux?.nudge_text || 'check rooms';
   const nudgeMode = config?.poller?.nudge_mode || 'tmux';
   const nudgeCommandText = config?.poller?.nudge_command || '';

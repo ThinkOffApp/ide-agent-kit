@@ -61,12 +61,12 @@ on run argv
   -- gone to the wrong app. petrus saw silent wake drops because of
   -- this. New: ACTIVATE → SET FRONTMOST → VERIFY → keystroke. Bail
   -- without typing if we can't make target frontmost in 5 tries.
-  tell application appName to activate
+  do shell script "open -a " & quoted form of appName
   delay 0.3
 
   set focusOk to false
   set focusAttempts to 0
-  repeat while focusAttempts < 5
+  repeat while focusAttempts < 15
     try
       tell application "System Events"
         tell process appName
@@ -74,7 +74,7 @@ on run argv
         end tell
       end tell
     end try
-    delay 0.2
+    delay 0.5
     try
       tell application "System Events"
         set checkFront to name of first application process whose frontmost is true
@@ -88,7 +88,7 @@ on run argv
   end repeat
 
   if not focusOk then
-    log "gui_nudge: ABORT — could not bring " & appName & " to front after 5 attempts"
+    log "gui_nudge: ABORT — could not bring " & appName & " to front after 15 attempts"
     return
   end if
 
