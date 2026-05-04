@@ -64,7 +64,7 @@ from dataclasses import dataclass
 DAEMON_URL = os.environ.get("IAK_DAEMON_URL", "http://localhost:8788")
 POLL_SEC = float(os.environ.get("IAK_MIRROR_POLL_SEC", "2.0"))
 LOG_PATH = os.environ.get("IAK_MIRROR_LOG", "/tmp/iak-screen-mirror.log")
-DEDUP_WINDOW_SEC = 60.0  # don't re-fire same prompt within this window
+DEDUP_WINDOW_SEC = 300.0  # 5 min — don't re-fire same prompt within this window
 
 # Per-IDE config: how to identify the app, what keywords mean a popup,
 # and where Approve/Deny buttons are roughly located within the popup.
@@ -391,6 +391,12 @@ def main() -> int:
             fp = fingerprint(prompt)
             last = seen_fingerprints.get(fp, 0)
             if now - last < DEDUP_WINDOW_SEC:
+                continue
+            # Also suppress if there's already an undecided intent for
+            # this IDE — don't spam the user with multiple captures of
+            # the same persistent popup before they've decided one.
+            if any(p[0].process_name == ide.process_name
+                   for p in pending_intents.values()):
                 continue
             seen_fingerprints[fp] = now
             log(f"popup detected in {ide.process_name}: {prompt[:80]}")
