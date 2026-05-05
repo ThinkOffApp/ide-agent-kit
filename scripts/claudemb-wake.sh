@@ -31,6 +31,27 @@ if [ "${running_count:-0}" -eq 0 ]; then
   exit 1
 fi
 
+# Skip the keystroke nudge when the agent is in-turn — the Stop hook
+# will deliver new room messages on the next turn end without typing
+# anything. Detect via the Stop hook's heartbeat:
+# claudecode-stop-resume.sh touches /tmp/iak-stop-hook-heartbeat at
+# every turn end. If that file was updated in the last 60s, the agent
+# is actively conversing (turns are firing) and the next Stop hook
+# fire will pick up the queued message. Otherwise (no heartbeat or
+# stale heartbeat = idle), wake by keystroke.
+#
+# Note: pgrep-based "claude CLI proc alive" was insufficient — claude
+# CLI processes are short-lived (one per turn), so absence != idle.
+# Heartbeat freshness is a more reliable in-turn signal.
+HEARTBEAT="/tmp/iak-stop-hook-heartbeat"
+if [ -f "$HEARTBEAT" ]; then
+  hb_age=$(( $(date +%s) - $(stat -f %m "$HEARTBEAT" 2>/dev/null || echo 0) ))
+  if [ "$hb_age" -lt 60 ]; then
+    printf "[%s] wake: SKIP — in-turn (heartbeat %ss ago), Stop hook will deliver\n" "$(date -u +%FT%TZ)" "$hb_age" >> "$LOG_FILE"
+    exit 0
+  fi
+fi
+
 {
   printf "[%s] wake: sending nudge to '%s' app (no focus steal): %s\n" "$(date -u +%FT%TZ)" "$APP_NAME" "$MSG"
   # v0.7.1 — process-targeted keystroke + verify-then-log fallback.
