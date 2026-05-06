@@ -64,7 +64,7 @@ function triggerNudge({ nudgeMode, nudgeCommandText, nudgeText, session }) {
     return nudgeCommand(nudgeCommandText, { text: nudgeText, session });
   }
   if (nudgeMode === 'none') {
-    return true;
+    return false;
   }
   return nudgeTmux(session, nudgeText);
 }
