@@ -1,6 +1,6 @@
 {
   "listen": {
-    "host": "127.0.0.1",
+    "host": "100.99.150.81",
     "port": 8787
   },
   "queue": {
@@ -81,7 +81,8 @@
     "interval_sec": 10,
     "owner_handle": "petrus",
     "ack_enabled": false,
-    "seen_file": "/tmp/iak-mb-seen-ids.txt"
+    "seen_file": "/tmp/iak-mb-seen-ids.txt",
+  "wake_script": "/Users/petrus/ide-agent-kit/scripts/claudemb-wake.sh"
   },
   "dm_poller": {
     "api_key": "xfb_63eddebae1e4b50345a9ca246264654df7dbf8620d150a76e21dd790ab201c5c",
@@ -191,5 +192,16 @@
   "memory_api": {
     "baseUrl": "http://127.0.0.1:37777/api",
     "token": "0b5504e8bec4fb0eda198e4f45a2d10d8b21a70765bcd3737040c5570090dfbb"
+  },
+  "mcp": {
+    "remote_agents": {
+      "@claudemm": { "gateUrl": "http://100.97.140.13:8788" }
+    },
+    "confirmations": {
+      "peers": {
+        "@claudemm": "http://100.97.140.13:8788"
+      },
+      "wake_script": "/Users/petrus/ide-agent-kit/scripts/claudemb-wake.sh"
+    }
   }
 }
