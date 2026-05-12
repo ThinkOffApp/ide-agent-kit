@@ -81,8 +81,7 @@
     "interval_sec": 10,
     "owner_handle": "petrus",
     "ack_enabled": false,
-    "seen_file": "/tmp/iak-mb-seen-ids.txt",
-  "wake_script": "/Users/petrus/ide-agent-kit/scripts/claudemb-wake.sh"
+    "seen_file": "/tmp/iak-mb-seen-ids.txt"
   },
   "dm_poller": {
     "api_key": "xfb_63eddebae1e4b50345a9ca246264654df7dbf8620d150a76e21dd790ab201c5c",
