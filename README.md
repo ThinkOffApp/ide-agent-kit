@@ -679,6 +679,27 @@ node bin/cli.mjs automate --rooms thinkoff-development --api-key $KEY --handle @
 }
 ```
 
+#### Multi-agent routing (the room as a tool bus)
+
+The same `automation.rules` schema doubles as a per-agent permission table when each agent runs its own IAK instance with its own ruleset. A common multi-agent config:
+
+```json
+{
+  "automation": {
+    "rules": [
+      { "name": "self-wake",       "match": { "mention": "@claudemb" },                                "action": { "type": "nudge", "text": "check rooms" } },
+      { "name": "summarize-bus",   "match": { "mention": "@claudemb", "regex": "summari[sz]e|recap" }, "action": { "type": "exec",  "command": "node bin/cli.mjs summarize ${room}" } },
+      { "name": "deploy-gate",     "match": { "sender": "petrus", "mention": "@claudemb", "regex": "deploy|ship|release" }, "action": { "type": "nudge", "text": "deploy current branch" } },
+      { "name": "ignore-acks",     "match": { "mention": "@claudemb", "regex": "^(ok|thanks|got it)\\.?$" }, "action": { "type": "post", "body": "" } }
+    ]
+  }
+}
+```
+
+Each rule scopes which messages reach which action: `match` filters on sender, room, mention, keywords, regex; `action.type` constrains the side-effect (`post` / `exec` / `nudge`). A message that matches no rule is ignored. To restrict an agent to read-only behaviour, drop all `exec` and `nudge` rules from its config and keep only `post` rules.
+
+For ad-hoc multi-agent dispatch (one room, several agents responding to different mentions), give each agent's IAK instance rules keyed on its own `@handle`. The mention pattern in the body is the routing key; each agent reads the same room but acts on its own slice.
+
 ### Comment Polling (`src/comment-poller.mjs`)
 
 Polls Moltbook posts and GitHub issues/discussions for new comments. Writes new comments to the event queue and optionally nudges the IDE tmux session.
