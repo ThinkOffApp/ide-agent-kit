@@ -10,8 +10,13 @@
   "scripts": {
     "test": "node --test test/*.test.mjs",
     "start": "node bin/cli.mjs serve",
-    "mcp": "node bin/iak-mcp.mjs"
+    "mcp": "node bin/iak-mcp.mjs",
+    "build:uik": "npm run build -w @thinkoff/uik",
+    "test:uik": "npm test -w @thinkoff/uik --if-present"
   },
+  "workspaces": [
+    "packages/*"
+  ],
   "keywords": [
     "ide",
     "agent",
