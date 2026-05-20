@@ -49,6 +49,7 @@ LAN URL to paste into CodeWatch — the upcoming mobile + watch companion app.
 - [Key Integrations](#key-integrations)
 - [How It Works](#how-it-works)
 - [Features](#features)
+- [User Intent Kit](#user-intent-kit)
 - [Quick Start](#quick-start)
 - [IDE-Specific Setup](#ide-specific-setup)
   - [Claude Code CLI](#claude-code-cli)
@@ -111,6 +112,12 @@ Run allowlisted commands in a named tmux session, capture output + exit code.
 13. **Background consolidation** - optional `light / REM / deep` pass over recent queue items, with append-only sidecars and no effect on the foreground room loop by default.
 
 No dependencies. Node.js ≥ 18 only.
+
+## User Intent Kit
+
+IAK now includes **User Intent Kit (UIK)** - the human-intent contract layer that sits above the existing tool primitives. Where IAK gives agents safe access to rooms, sessions, and tools, UIK gives humans a structured way to express goals, constraints, approval gates, ownership, receipts, escalation, and done criteria. A free-form chat request becomes a reviewable, replayable `Intent` the moment those seven slots are filled.
+
+UIK ships as `@thinkoff/uik` inside this repo (`packages/uik/`) with TypeScript types and a `validateIntent()` helper. It composes with the existing MCP tools (`room_post`, `room_recent`, `room_ack`, `tmux_run`, the confirmation registry) rather than replacing them. See [`docs/UIK.md`](docs/UIK.md) for the design and a worked example.
 
 ## IDE-Specific Setup
 
