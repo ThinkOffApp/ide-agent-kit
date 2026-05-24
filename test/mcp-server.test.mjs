@@ -222,6 +222,7 @@ test('iak-mcp.mjs with room API config exposes low-latency room tools', async ()
     assert.ok(tools.includes('room_post'), `expected room_post, got ${tools.join(',')}`);
     assert.ok(tools.includes('room_recent'), `expected room_recent, got ${tools.join(',')}`);
     assert.ok(tools.includes('alert_recipient'), `expected alert_recipient, got ${tools.join(',')}`);
+    assert.ok(tools.includes('room_react'), `expected room_react, got ${tools.join(',')}`);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

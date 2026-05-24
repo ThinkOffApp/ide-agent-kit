@@ -180,6 +180,41 @@ async function fetchRoomMessages({ config, room, limit }) {
   return JSON.parse(text);
 }
 
+// React to a message with an emoji. Backend lives at
+// POST /api/v1/rooms/{room}/messages/{messageId}/react with body
+// { emoji, remove?: true }. Idempotent on add (handle dedup is
+// server-side), removable via remove=true. Returns the updated
+// {reactions: {emoji: [handle, ...]}} map.
+async function reactToMessage({ config, room, messageId, emoji, remove, fromHandle }) {
+  const roomCfg = configuredRoomApi(config, { room, fromHandle });
+  if (!roomCfg.apiKey) throw new Error('room_react: missing poller.api_key or intent.apiKey');
+  if (!roomCfg.room) throw new Error('room_react: room is required');
+  if (!messageId || typeof messageId !== 'string') {
+    throw new Error('room_react: messageId is required');
+  }
+  if (!emoji || typeof emoji !== 'string') {
+    throw new Error('room_react: emoji is required');
+  }
+
+  const url = `${roomCfg.baseUrl}/rooms/${encodeURIComponent(roomCfg.room)}/messages/${encodeURIComponent(messageId)}/react`;
+  const body = { emoji };
+  if (remove) body.remove = true;
+
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: roomHeaders(roomCfg.apiKey),
+    body: JSON.stringify(body),
+    signal: AbortSignal.timeout(5000),
+  });
+  const text = await res.text();
+  if (!res.ok) throw new Error(`room_react: HTTP ${res.status} — ${text}`);
+  try {
+    return JSON.parse(text);
+  } catch {
+    return { ok: true, raw: text };
+  }
+}
+
 // Decides whether tmux_run should be exposed and why. Returns
 // {enabled: boolean, reason: string} so the boot log can explain itself.
 export function decideTmuxRunMode(config) {
@@ -464,6 +499,27 @@ export async function runMcpServer({ configPath } = {}) {
           },
           required: ['handle', 'body'],
         },
+      },
+      {
+        name: 'room_react',
+        description:
+          'React to a room message with an emoji. Use the operational protocol ' +
+          'agreed in thinkoff-development: 👍 taking, 👀 investigating, ✅ done, ' +
+          '⚠️ blocked (with a short reply), ❌ cannot take. Idempotent on add ' +
+          '(server dedups per handle). Pass remove=true to undo your own reaction. ' +
+          'Prefer this over a noisy text reply when acknowledging a task. ' +
+          'Actor identity is derived server-side from the configured API key; ' +
+          'agents cannot spoof reactions as another handle.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            messageId: { type: 'string', description: 'UUID of the room message to react to (from room_recent / room_list_new payload `id` field).' },
+            emoji: { type: 'string', description: 'Emoji to add (or remove if `remove`). Examples: "👍", "👀", "✅", "⚠️", "❌".' },
+            remove: { type: 'boolean', description: 'If true, remove your reaction with this emoji. Default false.', default: false },
+            room: { type: 'string', description: 'Room slug. Defaults to mcp.confirmations.room or first poller room.' },
+          },
+          required: ['messageId', 'emoji'],
+        },
       }
     );
   }
@@ -596,6 +652,27 @@ export async function runMcpServer({ configPath } = {}) {
             fromHandle: args.fromHandle || args.from_handle,
           });
           return ok(JSON.stringify(posted, null, 2));
+        }
+        case 'room_react': {
+          if (!roomToolsEnabled) return err('room_react: room API is not configured.');
+          if (!args.messageId) return err('room_react: messageId is required');
+          if (!args.emoji) return err('room_react: emoji is required');
+          try {
+            // Actor identity is derived server-side from the configured API key
+            // (configuredRoomApi -> roomCfg.apiKey). The tool deliberately does
+            // NOT accept a `fromHandle` argument to prevent agents from spoofing
+            // reactions as another handle (security per @ether / @CodexMB).
+            const reacted = await reactToMessage({
+              config,
+              room: args.room,
+              messageId: args.messageId,
+              emoji: args.emoji,
+              remove: args.remove === true,
+            });
+            return ok(JSON.stringify(reacted, null, 2));
+          } catch (e) {
+            return err(e.message);
+          }
         }
         case 'request_confirmation': {
           if (!confirmEnabled && !daemonAvailable) return err('request_confirmation: confirmations not configured. Set mcp.confirmations.room (+ poller.api_key) and/or codewatch_gate_url.');
