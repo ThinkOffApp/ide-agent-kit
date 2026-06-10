@@ -107,8 +107,12 @@ export function loadConfig(configPath) {
       }
     },
     openclaw: raw.openclaw || {},
-    // Pass-through for MCP server-specific config (sessions, allow_unrestricted).
-    // See src/mcp-server.mjs.
+    // Pass-throughs for blocks consumed as-is elsewhere: src/intent.mjs +
+    // enrichment (intent, memory_api), src/moltbook.mjs (moltbook),
+    // src/mcp-server.mjs (mcp: sessions, allow_unrestricted).
+    intent: raw.intent || {},
+    memory_api: raw.memory_api || {},
+    moltbook: raw.moltbook || {},
     mcp: raw.mcp || {}
   };
 }

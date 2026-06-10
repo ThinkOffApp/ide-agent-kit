@@ -87,4 +87,22 @@ describe('config', () => {
     assert.equal(cfg.background.timeouts.light_sec, 60);
     assert.equal(cfg.background.timeouts.rem_sec, 90);
   });
+
+  it('preserves intent, memory_api, and moltbook pass-through blocks', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'iak-config-'));
+    tempPaths.push(dir);
+    const configPath = join(dir, 'config.json');
+    writeFileSync(configPath, JSON.stringify({
+      intent: { baseUrl: 'https://example.test/api/v1', apiKey: 'k', userId: 'u' },
+      memory_api: { baseUrl: 'https://mem.test', token: 't' },
+      moltbook: { accounts: [{ name: 'claudemm', api_key: 'mk' }] }
+    }));
+
+    const cfg = loadConfig(configPath);
+
+    assert.equal(cfg.intent.baseUrl, 'https://example.test/api/v1');
+    assert.equal(cfg.intent.userId, 'u');
+    assert.equal(cfg.memory_api.token, 't');
+    assert.equal(cfg.moltbook.accounts[0].name, 'claudemm');
+  });
 });

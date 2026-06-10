@@ -10,6 +10,7 @@
 
 ### Fixed
 - **Intent enrichment never worked**: `enrichment.mjs` authenticated with `Authorization: Bearer` but the intent API expects `X-API-Key`, so every event carried the placeholder intent and an enrichment error. Now uses the embedded IntentClient (correct auth) plus the shared cache, so message bursts no longer trigger one intent fetch per event.
+- **`loadConfig` dropped the `intent`, `memory_api`, and `moltbook` blocks**: it rebuilds the config from an allowlist of known sections, and these three were missing — so intent gating, intent/memory enrichment, and moltbook config silently never received their settings through any CLI entry point. All three now pass through (with a regression test).
 
 ### Changed
 - `fetchIntentGate` in `background.mjs` is built on the embedded IntentClient instead of a hand-rolled fetch. Same gate rules, same return shape, same fail-open behavior, same 5s timeout.
