@@ -1,0 +1,10 @@
+{
+  "name": "@user-intent-kit/openclaw-plugin",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "OpenClaw plugin for user-intent-kit. Intent-aware agent responses.",
+  "openclaw": {
+    "extensions": ["./index.js"]
+  },
+  "license": "AGPL-3.0"
+}

@@ -5,6 +5,8 @@
  * Populates 'intent' and 'memory_context' slots.
  */
 
+import { intentConfig, getIntentCached } from '../intent.mjs';
+
 export async function enrichEvent(event, config = {}) {
   const body = event.payload?.body || '';
   if (!body) return event;
@@ -54,33 +56,17 @@ export async function enrichEvent(event, config = {}) {
     }
   }
 
-  // 2. Enrich with Intent (via user-intent-kit / GroupMind API)
-  const intentCfg = config.intent || {};
-  if (intentCfg.baseUrl && intentCfg.apiKey && intentCfg.userId) {
-    try {
-      const url = `${intentCfg.baseUrl}/intent/${intentCfg.userId}`;
-      const resp = await fetch(url, {
-        headers: { 'Authorization': `Bearer ${intentCfg.apiKey}` }
-      });
-
-      if (!resp.ok) {
-        throw new Error(`HTTP ${resp.status} ${resp.statusText}`);
-      }
-
-      const contentType = resp.headers.get('content-type') || '';
-      if (!contentType.includes('application/json')) {
-        throw new Error(`Expected JSON but got ${contentType}`);
-      }
-
-      const data = await resp.json();
-      if (data) {
-        enriched.intent = {
-          ...data,
-          provider: 'groupmind'
-        };
-      }
-    } catch (e) {
-      addError(`Intent enrichment failed: ${e.message}`);
+  // 2. Enrich with Intent (embedded user-intent-kit client, 30s cache so
+  // message bursts don't fan out into one API call per event)
+  if (intentConfig(config)) {
+    const data = await getIntentCached(config);
+    if (data) {
+      enriched.intent = {
+        ...data,
+        provider: 'groupmind'
+      };
+    } else {
+      addError('Intent enrichment failed: intent API unreachable');
     }
   }
 

@@ -346,9 +346,31 @@ This integrates with [user-intent-kit](https://github.com/ThinkOffApp/user-inten
 | `MAX_REPLY_AGE_SEC` | `900` | Skip stale messages older than this age |
 | `SKIP_PRESTART_BACKLOG` | `1` | Skip messages older than process start |
 
-### User Intent Kit
+### User Intent Kit (embedded)
 
-The User Intent Kit (UIK) gives agents awareness of the user's current state and availability. When the optional enrichment sidecar is configured, it queries the Intent API on each incoming room message to fetch a real-time snapshot of the user's devices, active agents, and derived behavioral signals.
+The User Intent Kit (UIK) gives agents awareness of the user's current state and availability. As of v0.9.0 UIK lives inside this repo at `packages/user-intent-kit` (still published separately as `user-intent-kit` on npm, including the Python/Swift/Kotlin ports). IAK consumes it directly through `src/intent.mjs`, which builds clients from the `intent` config block:
+
+```json
+{
+  "intent": {
+    "baseUrl": "https://groupmind.one/api/v1",
+    "apiKey": "<X-API-Key for the intent API>",
+    "userId": "petrus",
+    "deviceId": "mac-mini",
+    "agentHandle": "@claudemm",
+    "suppress_nudges": true
+  }
+}
+```
+
+Everything below activates automatically when this block is present (and stays inert when it is absent):
+
+- **Background gating** — `background run` checks the live gate before each consolidation run (see UIK gating above).
+- **Event enrichment** — incoming room/DM events get the full intent snapshot under the `intent` key, with a 30s cache so message bursts cost one API call, not one per event.
+- **Nudge suppression** — `rooms watch` still writes every message to the notification file, but skips the tmux/command nudge while `derived.urgency_mode` is `emergency-only`. Set `"suppress_nudges": false` to opt out. All checks fail open: if the intent API is down, nudges behave as before.
+- **`intent` CLI** — `ide-agent-kit intent <get|profile|derived|state|patch|heartbeat|daemon>` for inspecting and publishing state without a separate checkout.
+
+When the optional enrichment sidecar is configured, it queries the Intent API on each incoming room message to fetch a real-time snapshot of the user's devices, active agents, and derived behavioral signals.
 
 The intent payload includes:
 
@@ -365,10 +387,11 @@ The intent data is fetched from the GroupMind API at `GET /intent/{userId}` and 
 
 #### Publishing state (the other side)
 
-Reading the intent API is only half the loop. To keep your own device and agent slots alive on the dashboard, run the [`uik-daemon`](https://github.com/ThinkOffApp/user-intent-kit) from `user-intent-kit` as a long-running background process:
+Reading the intent API is only half the loop. To keep your own device and agent slots alive on the dashboard, run the built-in publisher as a long-running background process:
 
 ```bash
-npx uik-daemon   # INTENT_API_KEY / INTENT_USER_ID / INTENT_AGENT_HANDLE / INTENT_DEVICE_ID in env
+ide-agent-kit intent daemon --config ide-agent-kit.json   # uses config.intent.*
+npx uik-daemon   # standalone equivalent, INTENT_* env vars
 ```
 
 The IDE Agent Kit and User Intent Kit are designed to be deployed together: IAK consumes the intent state for gating, UIK publishes your own heartbeats. Without the daemon your slot goes stale and other agents will treat you as offline.

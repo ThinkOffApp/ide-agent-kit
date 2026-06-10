@@ -6,6 +6,7 @@ import { execSync } from 'node:child_process';
 import { readFileSync, writeFileSync, appendFileSync, existsSync, unlinkSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { nudgeCommand } from '../utils.mjs';
+import { shouldSuppressNudge } from '../intent.mjs';
 
 /**
  * Room Poller — polls GroupMind rooms and notifies IDE agent of new messages.
@@ -270,8 +271,12 @@ export async function startRoomPoller({ rooms, apiKey, handle, interval, config,
     if (newCount > 0) {
       // Primary: write to notification file (always works)
       appendNotifications(notifyFile, newMessages);
-      const nudged = triggerNudge({ nudgeMode, nudgeCommandText, nudgeText, session });
-      console.log(`  ${newCount} new message(s) → notified${nudged ? ' + nudge' : ''}`);
+      if (await shouldSuppressNudge(config)) {
+        console.log(`  ${newCount} new message(s) → notified (nudge suppressed: user emergency-only)`);
+      } else {
+        const nudged = triggerNudge({ nudgeMode, nudgeCommandText, nudgeText, session });
+        console.log(`  ${newCount} new message(s) → notified${nudged ? ' + nudge' : ''}`);
+      }
     }
     } finally {
       roomPollInFlight = false;
@@ -323,8 +328,12 @@ export async function startRoomPoller({ rooms, apiKey, handle, interval, config,
 
       if (newCount > 0) {
         appendNotifications(dmNotifyFile, newMessages);
-        const nudged = triggerNudge({ nudgeMode, nudgeCommandText, nudgeText, session });
-        console.log(`  ${newCount} new direct message(s) → notified${nudged ? ' + nudge' : ''}`);
+        if (await shouldSuppressNudge(config)) {
+          console.log(`  ${newCount} new direct message(s) → notified (nudge suppressed: user emergency-only)`);
+        } else {
+          const nudged = triggerNudge({ nudgeMode, nudgeCommandText, nudgeText, session });
+          console.log(`  ${newCount} new direct message(s) → notified${nudged ? ' + nudge' : ''}`);
+        }
       }
     } finally {
       dmPollInFlight = false;

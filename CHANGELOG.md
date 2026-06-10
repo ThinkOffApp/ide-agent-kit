@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.9.0 (2026-06-10)
+
+### Added
+- **user-intent-kit embedded**: the UIK repo now lives at `packages/user-intent-kit` (JS client + adapters + Python/Swift/Kotlin ports) and is wired in as a `file:` dependency. It remains independently publishable to npm.
+- **`src/intent.mjs`**: single construction point for intent clients/adapters from the `intent` config block (camelCase and snake_case keys both accepted). Includes a 30s intent cache shared by enrichment and nudge gating.
+- **`intent` CLI command**: `ide-agent-kit intent <get|profile|derived|state|patch|heartbeat|daemon>`. `state` shows the two-level state plus the background gate verdict; `daemon` is the embedded equivalent of `uik-daemon` driven by `config.intent.*` instead of env vars.
+- **Nudge suppression in `rooms watch`**: when `config.intent` is set and the user's `urgency_mode` is `emergency-only`, the poller still writes notification files but skips the tmux/command nudge. Opt out with `intent.suppress_nudges: false`. Fails open on API errors.
+
+### Fixed
+- **Intent enrichment never worked**: `enrichment.mjs` authenticated with `Authorization: Bearer` but the intent API expects `X-API-Key`, so every event carried the placeholder intent and an enrichment error. Now uses the embedded IntentClient (correct auth) plus the shared cache, so message bursts no longer trigger one intent fetch per event.
+
+### Changed
+- `fetchIntentGate` in `background.mjs` is built on the embedded IntentClient instead of a hand-rolled fetch. Same gate rules, same return shape, same fail-open behavior, same 5s timeout.
+- `npm test` now also runs the embedded user-intent-kit test suite.
+
 ## 0.6.1 (2026-04-07)
 
 ### Docs

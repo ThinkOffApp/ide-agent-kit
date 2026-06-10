@@ -15,6 +15,7 @@ import {
 import { resolve, join, dirname } from 'node:path';
 import { homedir } from 'node:os';
 import { randomUUID } from 'node:crypto';
+import { intentClientFromConfig } from './intent.mjs';
 
 function expandHome(path) {
   if (!path) return path;
@@ -243,22 +244,11 @@ export function backgroundStatus(config) {
  * Returns { allowed, lightOnly, state, reason } or null on failure.
  */
 export async function fetchIntentGate(config) {
-  const intent = config.intent || {};
-  if (!intent.baseUrl || !intent.apiKey || !intent.userId) return null;
-
-  const url = `${intent.baseUrl.replace(/\/+$/, '')}/intent/${intent.userId}`;
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 5000);
+  const client = intentClientFromConfig(config, { timeoutMs: 5000 });
+  if (!client) return null;
 
   try {
-    const res = await fetch(url, {
-      headers: { 'X-API-Key': intent.apiKey },
-      signal: controller.signal
-    });
-    clearTimeout(timer);
-    if (!res.ok) return null;
-    const data = await res.json();
-    const derived = data.derived || {};
+    const derived = await client.getDerived();
 
     const state = derived.overall_state || 'unknown';
     const urgency = derived.urgency_mode || 'normal';
@@ -282,7 +272,6 @@ export async function fetchIntentGate(config) {
     // Sleeping, resting, unknown, transitioning: full dreaming
     return { allowed: true, lightOnly: false, state, reason: `${state}, full dreaming allowed` };
   } catch {
-    clearTimeout(timer);
     return null; // On failure, don't block (allow run)
   }
 }

@@ -1,6 +1,6 @@
 {
   "name": "ide-agent-kit",
-  "version": "0.8.9",
+  "version": "0.9.0",
   "description": "Built for OpenClaw workflows \u2014 ACP session orchestration, room-triggered automation, comment polling, Discord + Moltbook + GitHub connectors, receipts, exec approvals",
   "type": "module",
   "bin": {
@@ -8,7 +8,7 @@
     "ide-agent-kit-mcp": "./bin/iak-mcp.mjs"
   },
   "scripts": {
-    "test": "node --test test/*.test.mjs",
+    "test": "node --test test/*.test.mjs packages/user-intent-kit/test/*.test.js",
     "start": "node bin/cli.mjs serve",
     "mcp": "node bin/iak-mcp.mjs"
   },
@@ -46,6 +46,7 @@
     "url": "https://github.com/ThinkOffApp/ide-agent-kit/issues"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.29.0"
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "user-intent-kit": "file:packages/user-intent-kit"
   }
 }

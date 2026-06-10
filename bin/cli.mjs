@@ -7,6 +7,7 @@ import { readFileSync } from 'node:fs';
 import { loadConfig } from '../src/config.mjs';
 import { runSanityCheck } from '../src/common/check.mjs';
 import { runBackground, backgroundStatus, fetchIntentGate } from '../src/background.mjs';
+import { intentConfig, intentClientFromConfig, iakAdapterFromConfig } from '../src/intent.mjs';
 
 // --- team-relay (generic room/comms) ---
 import { tailReceipts } from '../src/team-relay/receipt.mjs';
@@ -82,6 +83,13 @@ Usage:
     Run or inspect the background consolidation job.
     run:    executes light -> REM -> deep sequentially and writes sidecars
     status: shows whether background mode is enabled and the latest sidecar path
+
+  ide-agent-kit intent <get|profile|derived|state|patch|heartbeat|daemon> [--config <path>]
+    User intent state via the embedded user-intent-kit (config.intent.* or INTENT_* env).
+    get:       full intent document (devices, agents, derived)
+    state:     overall_state + reachability + background gate summary
+    patch:     update this device's slot: intent patch key=value [key=value ...]
+    daemon:    long-running publisher (desktop state + agent heartbeat) [--interval <sec>]
 
   ide-agent-kit poll --rooms <room1,room2> --api-key <key> --handle <@handle> [--interval <sec>] [--config <path>]
     (Legacy) Poll GroupMind rooms with explicit CLI args. Prefer "rooms watch".
@@ -416,6 +424,107 @@ async function main() {
     }
 
     console.error('Usage: ide-agent-kit background <run|status> [--config <path>]');
+    process.exit(1);
+  }
+
+  // ── User Intent (embedded user-intent-kit) ────────────
+  if (command === 'intent') {
+    const opts = parseKV(args, subcommand || 'intent');
+    const config = loadConfig(opts.config);
+    // Env fallback so this behaves like upstream user-intent-kit's `intent` CLI
+    if (!intentConfig(config) && process.env.INTENT_API_KEY && process.env.INTENT_USER_ID) {
+      config.intent = {
+        baseUrl: process.env.INTENT_API_BASE || 'https://groupmind.one/api/v1',
+        apiKey: process.env.INTENT_API_KEY,
+        userId: process.env.INTENT_USER_ID,
+        deviceId: process.env.INTENT_DEVICE_ID,
+        agentHandle: process.env.INTENT_AGENT_HANDLE
+      };
+    }
+    const client = intentClientFromConfig(config, { timeoutMs: 10000 });
+    if (!client) {
+      console.error('Error: set config.intent.{baseUrl,apiKey,userId} or INTENT_API_KEY/INTENT_USER_ID env vars');
+      process.exit(1);
+    }
+
+    try {
+      if (!subcommand || subcommand === 'get') {
+        console.log(JSON.stringify(await client.getIntent(), null, 2));
+        return;
+      }
+      if (subcommand === 'profile') {
+        console.log(JSON.stringify(await client.getProfile(), null, 2));
+        return;
+      }
+      if (subcommand === 'derived') {
+        console.log(JSON.stringify(await client.getDerived(), null, 2));
+        return;
+      }
+      if (subcommand === 'state') {
+        const derived = await client.getDerived();
+        const gate = await fetchIntentGate(config);
+        console.log(JSON.stringify({
+          overall_state: derived.overall_state || 'unknown',
+          reachability_mode: derived.reachability_mode || 'unknown',
+          urgency_mode: derived.urgency_mode || 'normal',
+          background_gate: gate
+        }, null, 2));
+        return;
+      }
+      if (subcommand === 'patch') {
+        const fields = {};
+        for (const arg of args.slice(2)) {
+          if (arg.startsWith('--')) break;
+          const [key, ...rest] = arg.split('=');
+          if (!rest.length) continue;
+          const value = rest.join('=');
+          try { fields[key] = JSON.parse(value); } catch { fields[key] = value; }
+        }
+        if (Object.keys(fields).length === 0) {
+          console.error('Usage: ide-agent-kit intent patch key=value [key=value ...]');
+          process.exit(1);
+        }
+        console.log(JSON.stringify(await client.patchDevice(fields), null, 2));
+        return;
+      }
+      if (subcommand === 'heartbeat') {
+        await client.heartbeat();
+        console.log('OK');
+        return;
+      }
+      if (subcommand === 'daemon') {
+        const { DesktopAdapter } = await import('user-intent-kit');
+        const adapter = iakAdapterFromConfig(config);
+        const pollIntervalMs = opts.interval ? parseInt(opts.interval) * 1000 : 30000;
+        const desktop = new DesktopAdapter(client, { pollIntervalMs });
+        desktop.start();
+        if (adapter) await adapter.publishStatus({ status: 'active', currentTask: null });
+        // Agent slot has the same TTL as the device slot; republish on the
+        // same cadence or it expires while the device stays fresh.
+        const agentTimer = adapter
+          ? setInterval(() => { adapter.publishStatus({ status: 'active', currentTask: null }).catch(() => {}); }, pollIntervalMs)
+          : null;
+        console.log(`intent daemon: user=${client.userId} device=${client.deviceId || '(read-only)'} interval=${pollIntervalMs}ms`);
+        const shutdown = async (sig) => {
+          console.log(`intent daemon: ${sig}, shutting down`);
+          if (agentTimer) clearInterval(agentTimer);
+          desktop.stop();
+          if (adapter) await adapter.publishStatus({ status: 'offline', currentTask: null }).catch(() => {});
+          process.exit(0);
+        };
+        process.on('SIGINT', () => shutdown('SIGINT'));
+        process.on('SIGTERM', () => shutdown('SIGTERM'));
+        setInterval(() => {}, 1 << 30); // keep event loop alive
+        return;
+      }
+    } catch (err) {
+      console.error(`Error: ${err.message}`);
+      if (err.status) console.error(`Status: ${err.status}`);
+      if (err.body) console.error(`Body: ${err.body}`);
+      process.exit(1);
+    }
+
+    console.error('Usage: ide-agent-kit intent <get|profile|derived|state|patch|heartbeat|daemon> [--config <path>]');
     process.exit(1);
   }
 

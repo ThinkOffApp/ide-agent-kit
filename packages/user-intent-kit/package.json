@@ -1,0 +1,39 @@
+{
+  "name": "user-intent-kit",
+  "version": "0.2.2",
+  "description": "Cross-device user intent state for AI agents. Profile + live signals + derived state.",
+  "type": "module",
+  "main": "src/index.js",
+  "bin": {
+    "intent": "./bin/intent.js",
+    "uik-daemon": "./bin/uik-daemon.js"
+  },
+  "exports": {
+    ".": "./src/index.js",
+    "./adapters/desktop": "./src/adapters/desktop.js",
+    "./adapters/openclaw": "./src/adapters/openclaw.js",
+    "./adapters/iak": "./src/adapters/iak.js",
+    "./adapters/browser": "./src/adapters/browser.js"
+  },
+  "scripts": {
+    "test": "node --test test/client.test.js",
+    "daemon": "node bin/uik-daemon.js"
+  },
+  "keywords": [
+    "agent",
+    "intent",
+    "cross-device",
+    "ai",
+    "openclaw",
+    "antfarm"
+  ],
+  "author": "ThinkOffApp",
+  "license": "AGPL-3.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/ThinkOffApp/user-intent-kit.git"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

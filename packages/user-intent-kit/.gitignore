@@ -1,0 +1,4 @@
+node_modules/
+swift/.build/
+.DS_Store
+*.log

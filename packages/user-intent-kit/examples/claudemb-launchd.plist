@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.claudemb.uik</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>-c</string>
+        <string>/opt/homebrew/bin/tmux new-session -d -s claudemb-uik "/Users/petrus/.openclaw/claudemb_uik.sh" 2>/dev/null || true</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <false/>
+    <key>StandardOutPath</key>
+    <string>/tmp/claudemb-uik-launch.log</string>
+    <key>StandardErrorPath</key>
+    <string>/tmp/claudemb-uik-launch.err</string>
+</dict>
+</plist>

@@ -1,0 +1,28 @@
+{
+  "id": "user-intent",
+  "name": "User Intent",
+  "description": "Intent-aware responses. Reads user profile and live device state before each response to adapt output (length, modality, verbosity).",
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "apiBaseUrl": {
+        "type": "string",
+        "description": "Ant Farm API base URL"
+      },
+      "apiKey": {
+        "type": "string",
+        "description": "Ant Farm API key for reading intent state"
+      },
+      "userId": {
+        "type": "string",
+        "description": "User ID to read intent for"
+      },
+      "timeoutMs": {
+        "type": "number",
+        "description": "Request timeout in ms (default 5000)"
+      }
+    },
+    "required": ["apiBaseUrl", "apiKey", "userId"]
+  }
+}
