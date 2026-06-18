@@ -1631,6 +1631,18 @@ async function initIdeConfig(ide, profile = 'balanced') {
   writeFileSync(outPath, JSON.stringify(preset.config, null, 2) + '\n');
   console.log(`Created ${outPath} for ${targetIde}`);
   console.log(preset.notes);
+
+  // Default room-agent instruction: room-originated tasks must report back to the room,
+  // not just narrate in the IDE/CLI. Emitted as AGENTS.md so room agents inherit it.
+  const agentsMdPath = resolve('AGENTS.md');
+  if (!existsSync(agentsMdPath)) {
+    writeFileSync(agentsMdPath, `# Agent instructions
+
+## Room communication (default)
+If a task or message originates from a GroupMind / Ant Farm room, treat that room as the source of truth. Report task ownership, progress, blockers, handoffs, and final results back to the SAME room. Do not leave important status only in the IDE/CLI/workspace. Before starting shared work, claim the task in the room; if another agent already has it, yield instead of duplicating.
+`);
+    console.log(`Created ${agentsMdPath} (default room-agent instruction)`);
+  }
   if (!hasClaudeMem) {
     console.warn('\nâš  WARNING: claude-mem is not installed. Hooks will be generated but will fail until you run: npm install -g claude-mem');
   }
