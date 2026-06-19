@@ -26,6 +26,17 @@ import { spawn } from 'node:child_process';
 
 // id -> {prompt, session, channels, status, createdAt, decidedAt, decision, resolvers}
 const intents = new Map();
+// nonce -> typed action request. Actions reuse the intent approval UI but run
+// through a strict registry instead of arbitrary shell.
+const actions = new Map();
+
+const ACTION_REPOS = new Set([
+  'ThinkOffApp/antfarm',
+  'ThinkOffApp/xfor',
+  'ThinkOffApp/codewatch-site',
+]);
+
+const TERMINAL_ACTION_STATUSES = new Set(['merged', 'failed', 'denied', 'expired']);
 
 function postReceipt(receiptsPath, entry) {
   if (!receiptsPath) return;
@@ -88,6 +99,33 @@ export function decideIntent(id, decision, { receiptsPath } = {}) {
     try { r({ decision, id }); } catch {}
   }
   i.resolvers = [];
+  const action = [...actions.values()].find((a) => a.intentId === id);
+  if (action) {
+    if (decision === 'deny') {
+      settleAction(action, {
+        status: 'denied',
+        actor: 'petrus',
+        decided_at: new Date(i.decidedAt).toISOString(),
+        ran_at: null,
+        command: null,
+        exit_code: null,
+        output_summary: 'User denied the action.',
+      }, { receiptsPath });
+    } else {
+      action.decided_at = new Date(i.decidedAt).toISOString();
+      runApprovedAction(action, { receiptsPath }).catch((e) => {
+        settleAction(action, {
+          status: 'failed',
+          actor: 'petrus',
+          decided_at: action.decided_at,
+          ran_at: new Date().toISOString(),
+          command: action.command || null,
+          exit_code: null,
+          output_summary: e.message || String(e),
+        }, { receiptsPath });
+      });
+    }
+  }
   return { ok: true };
 }
 
@@ -154,6 +192,305 @@ export function waitForDecision(id, { timeoutMs }) {
   });
 }
 
+// --- typed action requests -------------------------------------------------
+
+export async function createActionRequest({
+  payload,
+  announce = async () => {},
+  receiptsPath,
+}) {
+  const normalized = validateActionPayload(payload);
+  const nonce = normalized.nonce;
+  if (actions.has(nonce)) {
+    throw new Error(`action nonce already exists: ${nonce}`);
+  }
+  const prompt = actionPrompt(normalized);
+  const intentId = await createIntent({
+    prompt,
+    session: normalized.type,
+    channels: ['groupmind'],
+    announce,
+    receiptsPath,
+    fromHandle: normalized.requested_by,
+  });
+  const action = {
+    ...normalized,
+    intentId,
+    status: 'pending',
+    created_at: new Date().toISOString(),
+    decided_at: null,
+    ran_at: null,
+    command: null,
+    exit_code: null,
+    output_summary: null,
+  };
+  actions.set(nonce, action);
+  postReceipt(receiptsPath, {
+    kind: 'action.created',
+    nonce,
+    intentId,
+    type: action.type,
+    target: action.target,
+    requested_by: action.requested_by,
+    created_at: action.created_at,
+  });
+  const expiresAtMs = Date.parse(action.expires_at);
+  if (Number.isFinite(expiresAtMs)) {
+    const timer = setTimeout(() => expireAction(nonce, { receiptsPath }), Math.max(0, expiresAtMs - Date.now()));
+    if (typeof timer.unref === 'function') timer.unref();
+  }
+  return { ok: true, id: intentId, nonce, status: action.status };
+}
+
+export function getAction(nonce, { receiptsPath } = {}) {
+  expireAction(nonce, { receiptsPath });
+  const action = actions.get(nonce);
+  if (!action) return null;
+  return actionReceipt(action);
+}
+
+function validateActionPayload(payload = {}) {
+  if (!payload || typeof payload !== 'object') throw new Error('action payload must be an object');
+  const type = payload.type;
+  if (!['merge_pr', 'deploy_site', 'upload_play_internal', 'install_debug_apk'].includes(type)) {
+    throw new Error(`unsupported action type: ${type}`);
+  }
+  const target = payload.target;
+  if (!target || typeof target !== 'object' || Array.isArray(target)) {
+    throw new Error('target must be an object');
+  }
+  const requestedBy = requireString(payload.requested_by, 'requested_by');
+  const decisionRoom = requireString(payload.decision_room, 'decision_room');
+  const receiptRoom = requireString(payload.receipt_room, 'receipt_room');
+  const nonce = requireString(payload.nonce, 'nonce');
+  const expiresAt = requireString(payload.expires_at, 'expires_at');
+  const risk = requireString(payload.risk, 'risk');
+  if (!['low', 'medium', 'high'].includes(risk)) throw new Error('risk must be low, medium, or high');
+  if (!Number.isFinite(Date.parse(expiresAt))) throw new Error('expires_at must be a valid ISO timestamp');
+  if (Date.parse(expiresAt) <= Date.now()) throw new Error('expires_at is already expired');
+
+  let cleanTarget;
+  switch (type) {
+    case 'merge_pr': {
+      const repo = requireString(target.repo, 'target.repo');
+      const base = requireString(target.base, 'target.base');
+      const pr = Number(target.pr);
+      if (!ACTION_REPOS.has(repo)) throw new Error(`repo not allowed: ${repo}`);
+      if (base !== 'main') throw new Error('merge_pr base must be main');
+      if (!Number.isInteger(pr) || pr <= 0) throw new Error('target.pr must be a positive integer');
+      cleanTarget = { repo, pr, base };
+      break;
+    }
+    case 'deploy_site': {
+      const project = requireString(target.project, 'target.project');
+      const ref = requireString(target.ref, 'target.ref');
+      if (!['codewatch-web', 'groupmind'].includes(project)) throw new Error(`project not allowed: ${project}`);
+      if (ref !== 'main') throw new Error('deploy_site ref must be main');
+      cleanTarget = { project, ref };
+      break;
+    }
+    case 'upload_play_internal': {
+      const appId = requireString(target.app_id, 'target.app_id');
+      const track = requireString(target.track, 'target.track');
+      const versionCode = Number(target.version_code);
+      if (appId !== '4975875542898959486') throw new Error('app_id not allowed');
+      if (track !== 'internal') throw new Error('track must be internal');
+      if (!Number.isInteger(versionCode) || versionCode <= 0) throw new Error('version_code must be a positive integer');
+      cleanTarget = { app_id: appId, track, version_code: versionCode };
+      break;
+    }
+    case 'install_debug_apk': {
+      const pkg = requireString(target.package, 'target.package');
+      const device = requireString(target.device, 'target.device');
+      const versionCode = Number(target.version_code);
+      if (!/^com\.thinkoff\.[a-z0-9_.]+$/.test(pkg)) throw new Error('package must be a ThinkOff package');
+      if (!Number.isInteger(versionCode) || versionCode <= 0) throw new Error('version_code must be a positive integer');
+      cleanTarget = { package: pkg, version_code: versionCode, device };
+      break;
+    }
+    default:
+      throw new Error(`unsupported action type: ${type}`);
+  }
+
+  return {
+    type,
+    target: cleanTarget,
+    requested_by: requestedBy,
+    decision_room: decisionRoom,
+    receipt_room: receiptRoom,
+    nonce,
+    expires_at: expiresAt,
+    risk,
+  };
+}
+
+function requireString(value, name) {
+  if (typeof value !== 'string' || value.trim() === '') throw new Error(`${name} is required`);
+  return value.trim();
+}
+
+function actionPrompt(action) {
+  switch (action.type) {
+    case 'merge_pr':
+      return `Merge ${action.target.repo}#${action.target.pr} into ${action.target.base}?`;
+    case 'deploy_site':
+      return `Deploy ${action.target.project} from ${action.target.ref}?`;
+    case 'upload_play_internal':
+      return `Upload CodeWatch build ${action.target.version_code} to Play Internal testing?`;
+    case 'install_debug_apk':
+      return `Install ${action.target.package} build ${action.target.version_code} on ${action.target.device}?`;
+    default:
+      return `Approve ${action.type}?`;
+  }
+}
+
+function expireAction(nonce, { receiptsPath } = {}) {
+  const action = actions.get(nonce);
+  if (!action || TERMINAL_ACTION_STATUSES.has(action.status)) return;
+  if (Date.parse(action.expires_at) > Date.now()) return;
+  settleAction(action, {
+    status: 'expired',
+    actor: null,
+    decided_at: null,
+    ran_at: null,
+    command: null,
+    exit_code: null,
+    output_summary: 'Approval expired before a decision.',
+  }, { receiptsPath });
+}
+
+function settleAction(action, patch, { receiptsPath } = {}) {
+  Object.assign(action, patch);
+  postReceipt(receiptsPath, { kind: 'action.receipt', ...actionReceipt(action) });
+}
+
+function actionReceipt(action) {
+  return {
+    nonce: action.nonce,
+    id: action.intentId,
+    type: action.type,
+    target: action.target,
+    status: action.status,
+    command: action.command,
+    exit_code: action.exit_code,
+    output_summary: action.output_summary,
+    actor: action.actor || null,
+    decided_at: action.decided_at,
+    ran_at: action.ran_at,
+    requested_by: action.requested_by,
+    created_at: action.created_at,
+    expires_at: action.expires_at,
+  };
+}
+
+async function runApprovedAction(action, { receiptsPath } = {}) {
+  if (action.status !== 'pending') return;
+  action.status = 'running';
+  action.actor = 'petrus';
+  action.ran_at = new Date().toISOString();
+  switch (action.type) {
+    case 'merge_pr':
+      await executeMergePr(action, { receiptsPath });
+      break;
+    default:
+      settleAction(action, {
+        status: 'failed',
+        actor: 'petrus',
+        decided_at: action.decided_at,
+        ran_at: action.ran_at,
+        command: null,
+        exit_code: null,
+        output_summary: `${action.type} executor is not implemented yet.`,
+      }, { receiptsPath });
+  }
+}
+
+async function executeMergePr(action, { receiptsPath } = {}) {
+  const { repo, pr, base } = action.target;
+  const viewCmd = [
+    'gh', 'pr', 'view', String(pr),
+    '--repo', repo,
+    '--json', 'number,state,isDraft,baseRefName,mergeStateStatus,title,url',
+  ];
+  action.command = shellSummary(viewCmd);
+  const view = await spawnCollect(viewCmd[0], viewCmd.slice(1));
+  if (view.code !== 0) {
+    settleAction(action, failure(action, view, 'PR validation failed'), { receiptsPath });
+    return;
+  }
+  let info;
+  try { info = JSON.parse(view.stdout); } catch {
+    settleAction(action, failure(action, view, 'Could not parse gh pr view output'), { receiptsPath });
+    return;
+  }
+  if (info.state !== 'OPEN') {
+    settleAction(action, failure(action, view, `PR is not open: ${info.state}`), { receiptsPath });
+    return;
+  }
+  if (info.isDraft) {
+    settleAction(action, failure(action, view, 'PR is draft'), { receiptsPath });
+    return;
+  }
+  if (info.baseRefName !== base) {
+    settleAction(action, failure(action, view, `PR base is ${info.baseRefName}, expected ${base}`), { receiptsPath });
+    return;
+  }
+  if (info.mergeStateStatus && ['BLOCKED', 'DIRTY'].includes(info.mergeStateStatus)) {
+    settleAction(action, failure(action, view, `PR merge state is ${info.mergeStateStatus}`), { receiptsPath });
+    return;
+  }
+
+  const mergeCmd = ['gh', 'pr', 'merge', String(pr), '--repo', repo, '--merge'];
+  action.command = shellSummary(mergeCmd);
+  const merged = await spawnCollect(mergeCmd[0], mergeCmd.slice(1));
+  if (merged.code !== 0) {
+    settleAction(action, failure(action, merged, 'gh pr merge failed'), { receiptsPath });
+    return;
+  }
+  settleAction(action, {
+    status: 'merged',
+    actor: 'petrus',
+    decided_at: action.decided_at,
+    ran_at: action.ran_at,
+    command: action.command,
+    exit_code: merged.code,
+    output_summary: summarizeOutput(merged.stdout || merged.stderr || `${repo}#${pr} merged`),
+  }, { receiptsPath });
+}
+
+function failure(action, result, prefix) {
+  return {
+    status: 'failed',
+    actor: 'petrus',
+    decided_at: action.decided_at,
+    ran_at: action.ran_at,
+    command: action.command,
+    exit_code: result.code,
+    output_summary: `${prefix}: ${summarizeOutput(result.stderr || result.stdout)}`,
+  };
+}
+
+function shellSummary(parts) {
+  return parts.map((p) => /\s/.test(p) ? JSON.stringify(p) : p).join(' ');
+}
+
+function summarizeOutput(value) {
+  const text = String(value || '').replace(/\s+/g, ' ').trim();
+  return text.length > 500 ? `${text.slice(0, 497)}...` : text;
+}
+
+function spawnCollect(cmd, args) {
+  return new Promise((resolve) => {
+    const child = spawn(cmd, args, { stdio: ['ignore', 'pipe', 'pipe'] });
+    let stdout = '';
+    let stderr = '';
+    child.stdout.on('data', (d) => { stdout += d; });
+    child.stderr.on('data', (d) => { stderr += d; });
+    child.on('error', (e) => resolve({ code: -1, stdout, stderr: e.message }));
+    child.on('close', (code) => resolve({ code, stdout, stderr }));
+  });
+}
+
 // --- HTTP listener ---------------------------------------------------------
 
 // Tiny built-in HTTP server. POST /intent/:id/decision accepts the decision
@@ -202,6 +539,43 @@ export function startConfirmationsServer({
     if (req.method === 'GET' && url.pathname === '/intents') {
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify(listIntents()));
+      return;
+    }
+    if (req.method === 'POST' && url.pathname === '/actions/request') {
+      let body = '';
+      req.on('data', (c) => { body += c; });
+      req.on('end', async () => {
+        let payload;
+        try { payload = JSON.parse(body); } catch {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: false, error: 'invalid json' }));
+          return;
+        }
+        try {
+          const result = await createActionRequest({
+            payload,
+            announce: announce || (async () => {}),
+            receiptsPath,
+          });
+          res.writeHead(201, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify(result));
+        } catch (e) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: false, error: e.message || String(e) }));
+        }
+      });
+      return;
+    }
+    const actionMatch = url.pathname.match(/^\/actions\/([^/]+)$/);
+    if (req.method === 'GET' && actionMatch) {
+      const receipt = getAction(decodeURIComponent(actionMatch[1]), { receiptsPath });
+      if (!receipt) {
+        res.writeHead(404, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: false, error: 'unknown action' }));
+        return;
+      }
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ ok: true, ...receipt }));
       return;
     }
     // POST /intent — create a new pending intent. Body: {prompt, session, channels}.
