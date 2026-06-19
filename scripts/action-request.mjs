@@ -97,10 +97,12 @@ const REGISTRY = {
         throw new Error('--store <handle.myshopify.com> required');
       }
       if (!source) throw new Error('--source <dataset id> required');
-      const status = o.status === 'active' ? 'active' : 'draft'; // never default to active
-      return { store: String(store), source: String(source), status };
+      // Import is ALWAYS draft by design (ether, PR #16): publishing is a
+      // separate action (a future publish_products) so an import can never
+      // accidentally go live.
+      return { store: String(store), source: String(source), status: 'draft' };
     },
-    summary: (t) => `import products "${t.source}" into ${t.store} as ${t.status}`,
+    summary: (t) => `import products "${t.source}" into ${t.store} as draft`,
   },
 };
 
@@ -127,7 +129,7 @@ async function jsonFetch(url, init) {
   return { status: res.status, body };
 }
 
-const TERMINAL = new Set(['merged', 'deployed', 'uploaded', 'installed', 'done', 'failed', 'denied', 'expired', 'error']);
+const TERMINAL = new Set(['merged', 'deployed', 'uploaded', 'installed', 'imported', 'done', 'failed', 'denied', 'expired', 'error']);
 
 async function main() {
   const { type, opts } = parseArgs(process.argv.slice(2));
