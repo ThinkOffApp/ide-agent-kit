@@ -7,7 +7,7 @@ import { IntentClient } from '../src/client.js';
 describe('IntentClient', () => {
   it('constructs with required options', () => {
     const client = new IntentClient({
-      baseUrl: 'https://antfarm.world/api/v1',
+      baseUrl: 'https://groupmind.one/api/v1',
       apiKey: 'test-key',
       userId: 'petrus',
     });
@@ -17,7 +17,7 @@ describe('IntentClient', () => {
 
   it('constructs with deviceId', () => {
     const client = new IntentClient({
-      baseUrl: 'https://antfarm.world/api/v1',
+      baseUrl: 'https://groupmind.one/api/v1',
       apiKey: 'test-key',
       userId: 'petrus',
       deviceId: 'macbook',
@@ -27,7 +27,7 @@ describe('IntentClient', () => {
 
   it('throws on patchDevice without deviceId', async () => {
     const client = new IntentClient({
-      baseUrl: 'https://antfarm.world/api/v1',
+      baseUrl: 'https://groupmind.one/api/v1',
       apiKey: 'test-key',
       userId: 'petrus',
     });
@@ -39,7 +39,7 @@ describe('IntentClient', () => {
 
   it('throws on heartbeat without deviceId', async () => {
     const client = new IntentClient({
-      baseUrl: 'https://antfarm.world/api/v1',
+      baseUrl: 'https://groupmind.one/api/v1',
       apiKey: 'test-key',
       userId: 'petrus',
     });
@@ -52,7 +52,7 @@ describe('IntentClient', () => {
   it('enforces minimum heartbeat interval of 10s', () => {
     // Just ensure construction doesn't throw
     const client = new IntentClient({
-      baseUrl: 'https://antfarm.world/api/v1',
+      baseUrl: 'https://groupmind.one/api/v1',
       apiKey: 'test-key',
       userId: 'petrus',
       deviceId: 'watch',
@@ -63,7 +63,7 @@ describe('IntentClient', () => {
 
   it('strips trailing slashes from baseUrl', () => {
     const client = new IntentClient({
-      baseUrl: 'https://antfarm.world/api/v1///',
+      baseUrl: 'https://groupmind.one/api/v1///',
       apiKey: 'test-key',
       userId: 'petrus',
     });

@@ -5,7 +5,7 @@
 set -euo pipefail
 
 export PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"
-export INTENT_API_BASE="https://antfarm.world/api/v1"
+export INTENT_API_BASE="https://groupmind.one/api/v1"
 export INTENT_API_KEY="${INTENT_API_KEY:-xfb_63eddebae1e4b50345a9ca246264654df7dbf8620d150a76e21dd790ab201c5c}"
 export INTENT_USER_ID="${INTENT_USER_ID:-petrus}"
 export INTENT_AGENT_HANDLE="${INTENT_AGENT_HANDLE:-@claudemb}"

@@ -5,8 +5,8 @@
   "type": "module",
   "main": "src/index.js",
   "bin": {
-    "intent": "./bin/intent.js",
-    "uik-daemon": "./bin/uik-daemon.js"
+    "intent": "bin/intent.js",
+    "uik-daemon": "bin/uik-daemon.js"
   },
   "exports": {
     ".": "./src/index.js",
@@ -25,13 +25,13 @@
     "cross-device",
     "ai",
     "openclaw",
-    "antfarm"
+    "groupmind"
   ],
   "author": "ThinkOffApp",
   "license": "AGPL-3.0",
   "repository": {
     "type": "git",
-    "url": "https://github.com/ThinkOffApp/user-intent-kit.git"
+    "url": "git+https://github.com/ThinkOffApp/user-intent-kit.git"
   },
   "engines": {
     "node": ">=18"

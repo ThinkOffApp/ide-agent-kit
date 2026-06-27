@@ -9,7 +9,7 @@
  * background daemon.
  *
  * Environment:
- *   INTENT_API_BASE    (default: https://antfarm.world/api/v1)
+ *   INTENT_API_BASE    (default: https://groupmind.one/api/v1)
  *   INTENT_API_KEY     required
  *   INTENT_USER_ID     required
  *   INTENT_AGENT_HANDLE  default: @agent
@@ -20,7 +20,7 @@
 import { hostname } from 'node:os';
 import { IntentClient, IAKAdapter, DesktopAdapter } from '../src/index.js';
 
-const baseUrl = process.env.INTENT_API_BASE || 'https://antfarm.world/api/v1';
+const baseUrl = process.env.INTENT_API_BASE || 'https://groupmind.one/api/v1';
 const apiKey = process.env.INTENT_API_KEY;
 const userId = process.env.INTENT_USER_ID;
 const agentHandle = process.env.INTENT_AGENT_HANDLE || '@agent';

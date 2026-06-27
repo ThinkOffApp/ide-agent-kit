@@ -12,7 +12,7 @@
  *   intent derived                - show derived state only
  *
  * Environment:
- *   INTENT_API_BASE  - API base URL (default: https://antfarm.world/api/v1)
+ *   INTENT_API_BASE  - API base URL (default: https://groupmind.one/api/v1)
  *   INTENT_API_KEY   - Ant Farm API key (required)
  *   INTENT_USER_ID   - User ID (required)
  *   INTENT_DEVICE_ID - Device ID for writes (required for patch/heartbeat)
@@ -20,7 +20,7 @@
 
 import { IntentClient } from '../src/client.js';
 
-const baseUrl = process.env.INTENT_API_BASE || 'https://antfarm.world/api/v1';
+const baseUrl = process.env.INTENT_API_BASE || 'https://groupmind.one/api/v1';
 const apiKey = process.env.INTENT_API_KEY;
 const userId = process.env.INTENT_USER_ID;
 const deviceId = process.env.INTENT_DEVICE_ID;

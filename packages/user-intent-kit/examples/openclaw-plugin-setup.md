@@ -19,7 +19,7 @@ Add to your `openclaw.json`:
       "user-intent": {
         "enabled": true,
         "config": {
-          "apiBaseUrl": "https://antfarm.world/api/v1",
+          "apiBaseUrl": "https://groupmind.one/api/v1",
           "apiKey": "xfb_your_key",
           "userId": "petrus",
           "timeoutMs": 5000

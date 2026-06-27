@@ -26,7 +26,7 @@ Or in `Package.swift`:
 import UserIntentKit
 
 let client = IntentClient(
-    baseUrl: "https://antfarm.world/api/v1",
+    baseUrl: "https://groupmind.one/api/v1",
     apiKey: "xfb_your_key",
     userId: "petrus",
     deviceId: "apple-watch"
