@@ -69,11 +69,20 @@ if [ "$mcp_registered" -eq 1 ]; then
     # MCP tool path. Truncate the file so future hook fires don't
     # re-emit the same hint forever.
     n_lines=$(wc -l < "$MSG_FILE" 2>/dev/null | tr -d ' ' || echo 0)
+    # mcp.room_check in the IAK config selects a cheap fetch model:
+    # the agent spawns a subagent on that model for the fetch+digest and
+    # processes the digest on its own (bigger) model. petrus 2026-07-02.
+    IAK_CONFIG="${HOME}/ide-agent-kit/config/macbook.json"
+    fetch_model=$(python3 -c "import json;print(json.load(open('$IAK_CONFIG')).get('mcp',{}).get('room_check',{}).get('fetch_model',''))" 2>/dev/null)
     {
         echo ""
         echo "=== NEW ROOM MESSAGES (MCP fetch) ==="
         echo "$n_lines line(s) of new room activity available."
-        echo "Call mcp__ide-agent-kit__room_recent with limit=10 to see them, then mcp__ide-agent-kit__room_post to reply."
+        if [ -n "$fetch_model" ]; then
+            echo "Per IAK config (mcp.room_check): spawn an Agent with model \"$fetch_model\" to call mcp__ide-agent-kit__room_recent (limit=10) and return a digest; process the digest and any replies (mcp__ide-agent-kit__room_post) on the main model yourself."
+        else
+            echo "Call mcp__ide-agent-kit__room_recent with limit=10 to see them, then mcp__ide-agent-kit__room_post to reply."
+        fi
         echo "Do NOT shell to curl/python for room I/O — use MCP tools."
         echo "====================================="
     } >&2

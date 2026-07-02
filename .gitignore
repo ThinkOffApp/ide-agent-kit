@@ -6,3 +6,6 @@ ide-agent-kit.json
 *.log
 /tmp/
 data/*.json
+
+# Local machine configs hold live API keys - never commit
+config/*.json
