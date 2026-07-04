@@ -123,17 +123,44 @@ echo ""
 
 while true; do
     response=$(curl -sS --connect-timeout "$HTTP_CONNECT_TIMEOUT_SEC" --max-time "$HTTP_TIMEOUT_SEC" -H "X-API-Key: $API_KEY" \
+        --write-out '\n%{http_code}' \
         "$BASE_URL/rooms/$ROOM/messages?limit=$FETCH_LIMIT" 2>&1) || {
         echo "[$(date +%H:%M:%S)] fetch error: $response"
         sleep "$POLL_INTERVAL"
         continue
     }
+    # Split off the trailing HTTP status appended by --write-out.
+    http_code="${response##*$'\n'}"
+    response="${response%$'\n'*}"
+    # 2026-07-03 fix: a rotated/dead key returns 401 with an error BODY, and
+    # curl (no --fail) exits 0, so the old code parsed it as an empty room and
+    # went silent for 16h. Treat auth failure as a hard, VISIBLE error and
+    # hot-reload the key from config so a rotation self-heals without a manual
+    # restart.
+    if [[ "$http_code" == "401" || "$http_code" == "403" ]]; then
+        echo "[$(date +%H:%M:%S)] AUTH FAIL (HTTP $http_code): ${response:0:120}"
+        reloaded="$(read_json_value 'poller.api_key')"
+        if [[ -n "$reloaded" && "$reloaded" != "$API_KEY" ]]; then
+            API_KEY="$reloaded"
+            echo "[$(date +%H:%M:%S)] reloaded api_key from config; retrying next cycle"
+        else
+            echo "[$(date +%H:%M:%S)] config key unchanged/empty; needs rotation in config"
+        fi
+        sleep "$POLL_INTERVAL"
+        continue
+    fi
 
     new_count=0
     while IFS=$'\t' read -r msg_id msg_from msg_body; do
         [[ -z "$msg_id" ]] && continue
         if ! grep -qF -- "$msg_id" "$SEEN_IDS_FILE"; then
             echo "$msg_id" >> "$SEEN_IDS_FILE"
+            # Skip our OWN posts so they never wake us (the echo loop petrus
+            # asked to kill, 2026-07-02). Marked seen above so we don't
+            # reconsider; just don't notify/wake on self-authored messages.
+            case "$(printf '%s' "$msg_from" | tr '[:upper:]' '[:lower:]')" in
+                @claudemb|claudemb) continue ;;
+            esac
             new_count=$((new_count + 1))
             body_preview="${msg_body:0:120}"
             echo "[$(date +%H:%M:%S)] NEW  ${msg_from}: ${body_preview}"
