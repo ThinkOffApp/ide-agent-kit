@@ -41,7 +41,7 @@ const REGISTRY = {
   merge_pr: {
     risk: 'medium',
     build(o) {
-      const ALLOWED = ['ThinkOffApp/antfarm', 'ThinkOffApp/xfor', 'ThinkOffApp/codewatch-site'];
+      const ALLOWED = ['ThinkOffApp/antfarm', 'ThinkOffApp/xfor', 'ThinkOffApp/codewatch-site', 'ThinkOffApp/CodeWatch'];
       const repo = o.repo;
       const pr = Number(o.pr);
       const base = o.base || 'main';
