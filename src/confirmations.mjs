@@ -34,6 +34,7 @@ const ACTION_REPOS = new Set([
   'ThinkOffApp/antfarm',
   'ThinkOffApp/xfor',
   'ThinkOffApp/codewatch-site',
+  'ThinkOffApp/CodeWatch',
 ]);
 
 const TERMINAL_ACTION_STATUSES = new Set(['merged', 'failed', 'denied', 'expired']);
