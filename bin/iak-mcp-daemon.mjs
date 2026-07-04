@@ -137,6 +137,16 @@ function startChatReplyPoller({ apiKey, room, intervalMs }) {
         const text = (m.body || '').trim();
         const match = text.match(/^\/(approve|deny)\s+([a-f0-9]+)$/i);
         if (!match) continue;
+        // Only the human owner may settle intents. Fleet agents share the room
+        // and can echo "/approve <id>" (one did), which would execute gated
+        // commands without the owner. The owner posts as plain "petrus" —
+        // including CodeWatch button taps, which arrive with isHuman=false —
+        // while agents carry a handle ("@ether", "hermes").
+        const sender = String(m.from || '').replace(/^@/, '').toLowerCase();
+        if (sender !== 'petrus' && m.isHuman !== true) {
+          console.log(`[iak-mcp-daemon] ${text} from ${m.from}: sender is not the owner — ignoring`);
+          continue;
+        }
         const decision = match[1].toLowerCase();
         const id = match[2];
         const intent = getIntent(id);
