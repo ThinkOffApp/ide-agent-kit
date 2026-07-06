@@ -39,6 +39,8 @@ import {
   waitForDecision,
   listIntents,
   startConfirmationsServer,
+  startChatReplyPoller,
+  configureActionStatusPush,
   makeGroupmindAnnouncer,
   makeCodewatchAnnouncer,
   composeAnnouncers,
@@ -284,17 +286,40 @@ export async function runMcpServer({ configPath } = {}) {
       `[iak-mcp] confirmations: forwarding to live daemon at ${daemonBase}\n`
     );
   } else if (confirmEnabled) {
+    const wakeScript = confirmCfg.wake_script || confirmCfg.wakeScript ||
+      config?.poller?.wake_script || config?.poller?.nudge_command || config?.wake?.script_path ||
+      join(__pkgDir, 'scripts', 'claude-gui-wake.sh');
     confirmServer = startConfirmationsServer({
       port: daemonPort,
       host: confirmCfg.host || '127.0.0.1',
       authToken: confirmCfg.auth_token || '',
       receiptsPath: config?.receipts?.path,
       announce,
-      wakeScript: confirmCfg.wake_script || confirmCfg.wakeScript || config?.poller?.wake_script || config?.poller?.nudge_command || config?.wake?.script_path,
+      wakeScript,
     });
     process.stderr.write(
       `[iak-mcp] confirmations: enabled on ${daemonBase} (in-process) — channels: ${Object.keys(announcerMap).join(', ')}\n`
     );
+    // Route room "/approve <id>" / "/deny <id>" taps (the CodeWatch buttons) to
+    // the in-process intent registry. Without this the buttons render but a tap
+    // never settles the intent. Only start when this process holds the intents
+    // (groupmind channel configured + serving in-process, not forwarding).
+    if (announcerMap.groupmind) {
+      startChatReplyPoller({ apiKey: config.poller.api_key, room: confirmCfg.room });
+      process.stderr.write(
+        `[iak-mcp] chat-reply poller: watching room "${confirmCfg.room}" every 5s\n`
+      );
+      // Mirror intent/action transitions to the central action_status store
+      // (antfarm PR #43) so CodeWatch buttons render durable state off-LAN.
+      const { apiKey: pushKey, baseUrl: pushBase } = configuredRoomApi(config);
+      if (configureActionStatusPush({
+        apiKey: pushKey,
+        baseUrl: pushBase,
+        log: (m) => process.stderr.write(m + '\n'),
+      })) {
+        process.stderr.write('[iak-mcp] action-status push: enabled (durable off-LAN button state)\n');
+      }
+    }
   } else {
     process.stderr.write(
       '[iak-mcp] confirmations: disabled — set mcp.confirmations.room (+ poller.api_key) and/or mcp.confirmations.codewatch_gate_url\n'

@@ -48,6 +48,46 @@ function postReceipt(receiptsPath, entry) {
   }
 }
 
+// --- durable action-status mirror (antfarm PR #43) --------------------------
+// Mirrors every intent/action transition to the central GroupMind action_status
+// store (POST /api/v1/actions) so CodeWatch renders durable button state when
+// the phone is off the LAN and can't reach this daemon's localhost /intents.
+// Fire-and-forget: a push must never throw, block, or fail a decision.
+let _actionStatusPush = null;
+// Action vocab -> action_status lifecycle vocab. The DB enforces a monotonic
+// rank (pending<processing<approved<denied<terminal), so we never push a state
+// that would move a row backwards.
+const ACTION_STATUS_MAP = { merged: 'completed', running: 'processing' };
+
+export function configureActionStatusPush({ apiKey, baseUrl = 'https://groupmind.one/api/v1', log = () => {} }) {
+  if (!apiKey) return false;
+  const url = String(baseUrl).replace(/\/$/, '') + '/actions';
+  _actionStatusPush = (intentId, status, fields = {}) => {
+    if (!intentId || !status) return;
+    const clean = {};
+    for (const [k, v] of Object.entries(fields)) if (v != null) clean[k] = v;
+    const body = JSON.stringify({ intent_id: intentId, status, ...clean });
+    fetch(url, {
+      method: 'POST',
+      headers: { 'X-API-Key': apiKey, 'Content-Type': 'application/json' },
+      body,
+    })
+      .then((r) => { if (!r.ok) log(`[action-status] ${intentId}->${status} HTTP ${r.status}`); })
+      .catch((e) => log(`[action-status] ${intentId}->${status} failed: ${e.message}`));
+  };
+  log(`[action-status] push enabled -> ${url}`);
+  return true;
+}
+
+function pushStatus(intentId, rawStatus, fields = {}) {
+  if (!_actionStatusPush) return;
+  try {
+    _actionStatusPush(intentId, ACTION_STATUS_MAP[rawStatus] || rawStatus, fields);
+  } catch {
+    // never let a status mirror disturb the gating path
+  }
+}
+
 export function listIntents() {
   return [...intents.entries()].map(([id, i]) => ({
     id,
@@ -114,6 +154,15 @@ export function decideIntent(id, decision, { receiptsPath } = {}) {
       }, { receiptsPath });
     } else {
       action.decided_at = new Date(i.decidedAt).toISOString();
+      // An explicit human Approve overrides a soft TTL lapse. If the action
+      // expired before the tap (e.g. petrus approved hours later), revive it
+      // and execute anyway — the executor re-validates (gh pr view precheck),
+      // so a stale-but-clean PR merges and a stale-conflicted one fails safely.
+      // Without this, a late tap settles the intent but silently no-ops.
+      if (action.status === 'expired') {
+        action.status = 'pending';
+        process.stderr.write(`[iak-mcp] action ${action.nonce}: approved after TTL lapse — executing on explicit approval\n`);
+      }
       runApprovedAction(action, { receiptsPath }).catch((e) => {
         settleAction(action, {
           status: 'failed',
@@ -126,6 +175,15 @@ export function decideIntent(id, decision, { receiptsPath } = {}) {
         }, { receiptsPath });
       });
     }
+  } else {
+    // Pure confirmation (no typed executor): the decision itself is terminal,
+    // so mirror it directly. Typed actions instead mirror via runApprovedAction
+    // (processing) and settleAction (completed/failed/denied/expired).
+    pushStatus(id, decision === 'approve' ? 'approved' : 'denied', {
+      decision,
+      approver: 'petrus',
+      decided_at: new Date(i.decidedAt).toISOString(),
+    });
   }
   return { ok: true };
 }
@@ -159,6 +217,7 @@ export async function createIntent({
   postReceipt(receiptsPath, {
     kind: 'intent.created', id, prompt, session, channels, createdAt: intent.createdAt,
   });
+  pushStatus(id, 'pending', { target_summary: prompt });
   // Side effects — never let an announce failure block the intent itself.
   try {
     await announce({ id, prompt, session, channels, fromHandle });
@@ -363,6 +422,16 @@ function expireAction(nonce, { receiptsPath } = {}) {
 function settleAction(action, patch, { receiptsPath } = {}) {
   Object.assign(action, patch);
   postReceipt(receiptsPath, { kind: 'action.receipt', ...actionReceipt(action) });
+  // Mirror the terminal/transition state to the durable store. ACTION_STATUS_MAP
+  // translates merged->completed; denied/failed/expired/processing pass through.
+  pushStatus(action.intentId, action.status, {
+    actor: action.actor,
+    decision: action.status === 'denied' ? 'deny' : undefined,
+    receipt: action.output_summary,
+    error: action.status === 'failed' ? action.output_summary : undefined,
+    decided_at: action.decided_at,
+    executed_at: action.ran_at,
+  });
 }
 
 function actionReceipt(action) {
@@ -389,6 +458,7 @@ async function runApprovedAction(action, { receiptsPath } = {}) {
   action.status = 'running';
   action.actor = 'petrus';
   action.ran_at = new Date().toISOString();
+  pushStatus(action.intentId, 'running', { actor: 'petrus', executed_at: action.ran_at });
   switch (action.type) {
     case 'merge_pr':
       await executeMergePr(action, { receiptsPath });
@@ -848,6 +918,69 @@ export function composeAnnouncers(map) {
       }
     }
   };
+}
+
+// --- chat-reply poller -------------------------------------------------------
+
+// Watch a GroupMind room for "/approve <id>" / "/deny <id>" quick-reply
+// messages (the CodeWatch Approve/Deny buttons POST these on tap) and route
+// them to decideIntent() in-process. This is what makes a phone tap actually
+// settle a pending intent. It used to live only in bin/iak-mcp-daemon.mjs, so
+// the in-process MCP confirmations server never routed taps — buttons looked
+// dead (intent stuck "pending" after Approve). Sharing it here lets both the
+// standalone daemon and the in-process server run it from one source.
+//
+// Logs go to stderr only (stdout is the MCP stdio protocol channel — writing
+// there would corrupt it). Returns the interval handle so callers can stop it.
+export function startChatReplyPoller({ apiKey, room, intervalMs = 5000, log }) {
+  if (!apiKey || !room) {
+    process.stderr.write('[iak-mcp] chat-reply poller: missing apiKey or room — disabled\n');
+    return null;
+  }
+  const emit = log || ((msg) => process.stderr.write(`[iak-mcp] ${msg}\n`));
+  const seen = new Set();
+  let primed = false;
+  const poll = async () => {
+    try {
+      const url = `https://groupmind.one/api/v1/rooms/${encodeURIComponent(room)}/messages?limit=30`;
+      const res = await fetch(url, { headers: { 'X-API-Key': apiKey } });
+      if (!res.ok) return;
+      const body = await res.json();
+      const messages = body?.messages || [];
+      for (const m of messages) {
+        if (seen.has(m.id)) continue;
+        seen.add(m.id);
+        if (!primed) continue; // ignore historical messages on first pass
+        const text = (m.body || '').trim();
+        const match = text.match(/^\/(approve|deny)\s+([a-f0-9]+)$/i);
+        if (!match) continue;
+        // Only the human owner may settle intents. Fleet agents share the room
+        // and one (hermes) auto-replied "/approve <id>" to a confirmation card,
+        // which this poller happily executed — any agent could approve any
+        // gated command. Agent senders carry a handle ("@ether", "hermes");
+        // the owner posts as plain "petrus" (CodeWatch button taps included).
+        const sender = String(m.from || '').replace(/^@/, '').toLowerCase();
+        if (sender !== 'petrus' && m.isHuman !== true) {
+          emit(`${text} from ${m.from}: sender is not the owner — ignoring`);
+          continue;
+        }
+        const decision = match[1].toLowerCase();
+        const id = match[2];
+        const intent = getIntent(id);
+        if (!intent) {
+          emit(`/${decision} ${id} from ${m.from}: unknown intent, ignoring`);
+          continue;
+        }
+        const r = decideIntent(id, decision);
+        emit(`/${decision} ${id} from ${m.from}: ${r.ok ? 'settled' : r.error}`);
+      }
+      primed = true;
+    } catch (e) {
+      emit(`chat-reply poll error: ${e.message}`);
+    }
+  };
+  poll();
+  return setInterval(poll, intervalMs);
 }
 
 // --- testing helpers ---------------------------------------------------------

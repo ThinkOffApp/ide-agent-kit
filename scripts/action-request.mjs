@@ -23,7 +23,7 @@
 //   node scripts/action-request.mjs upload_play_internal --version-code 56
 //   node scripts/action-request.mjs install_debug_apk --version-code 56 --device <serial>
 // Options: --daemon <url> (default http://127.0.0.1:8788 or $IAK_DAEMON),
-//          --risk low|medium|high, --ttl <minutes> (default 15),
+//          --risk low|medium|high, --ttl <minutes> (default 1440 = 24h),
 //          --decision-room <room> (default thinkoff-development),
 //          --no-wait (post and exit without polling for the receipt).
 
@@ -146,7 +146,11 @@ async function main() {
 
   const daemon = (opts.daemon || DEFAULT_DAEMON).replace(/\/$/, '');
   const nonce = randomUUID();
-  const ttlMin = Number(opts.ttl) > 0 ? Number(opts.ttl) : 15;
+  // Default TTL is 24h: a phone Approve may land hours after the button is
+  // posted, and a 15-min window meant a late tap silently no-opped (the action
+  // expired before the tap arrived). The daemon now also honors an explicit
+  // approval after a TTL lapse, but a long default keeps the happy path clean.
+  const ttlMin = Number(opts.ttl) > 0 ? Number(opts.ttl) : 1440;
   const expires_at = new Date(Date.now() + ttlMin * 60_000).toISOString();
   const decision_room = opts['decision-room'] || DEFAULT_ROOM;
 
@@ -194,8 +198,12 @@ async function main() {
 
   // Poll the receipt endpoint until the daemon reports a terminal status.
   const statusUrl = `${daemon}/actions/${nonce}`;
-  // Local safety cap a bit past the intent TTL so we never poll forever.
-  const deadline = Date.now() + (ttlMin * 60_000) + 30_000;
+  // Local poll window is decoupled from the action TTL: with a 24h TTL we must
+  // not block the caller for a day. Cap the interactive wait at 15 min; the
+  // button stays live on the daemon for the full TTL and executes whenever
+  // petrus taps, even after this script has exited.
+  const waitMin = Math.min(ttlMin, 15);
+  const deadline = Date.now() + (waitMin * 60_000) + 30_000;
   while (Date.now() < deadline) {
     await new Promise((r) => setTimeout(r, POLL_MS));
     let cur;
@@ -210,8 +218,8 @@ async function main() {
     }
     console.error(`…${status || 'pending'}`);
   }
-  console.error('Local poll deadline reached without a terminal receipt (intent likely expired).');
-  process.exit(1);
+  console.error(`Stopped waiting after ${waitMin}m. The approval button is still LIVE (TTL ${ttlMin}m) and will execute when petrus taps — this script just stopped polling.`);
+  process.exit(0);
 }
 
 main().catch((e) => { console.error(e); process.exit(1); });
