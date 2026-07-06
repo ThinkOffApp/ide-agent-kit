@@ -159,6 +159,21 @@ export async function startRoomPoller({ rooms, apiKey, handle, interval, config,
   // emergency-only mode — a message from the user is itself the priority signal;
   // emergency-only is meant to mute agent/fleet chatter, not the user's own words.
   const ownerHandle = normalizeHandle(config?.poller?.owner_handle || 'petrus');
+  // Nudge throttle: (1) only owner messages or @-mentions of this agent fire a
+  // nudge — other fleet traffic just lands in the notification file and gets
+  // read on the next natural wake; (2) a cooldown collapses rapid-fire messages
+  // into one wake, since the agent reads ALL pending messages once woken.
+  const nudgeCooldownSec = parsePositiveInt(config?.poller?.nudge_cooldown_sec, 90);
+  let lastNudgeAt = 0;
+  function nudgeGate(hasPriority) {
+    if (!hasPriority) return { fire: false, why: 'no owner/mention in batch' };
+    const now = Date.now();
+    if (now - lastNudgeAt < nudgeCooldownSec * 1000) {
+      return { fire: false, why: `cooldown ${nudgeCooldownSec}s` };
+    }
+    lastNudgeAt = now;
+    return { fire: true, why: '' };
+  }
   const dmCfg = config?.dm_poller || {};
   const dmEnabled = dmCfg.enabled === true;
   const dmHandle = normalizeHandle(dmCfg.handle || selfHandle);
@@ -229,6 +244,8 @@ export async function startRoomPoller({ rooms, apiKey, handle, interval, config,
     try {
     let newCount = 0;
     let hasOwnerMessage = false;
+    let hasMention = false;
+    const mentionNeedle = (selfHandle.startsWith('@') ? selfHandle : '@' + selfHandle).toLowerCase();
     const newMessages = [];
     for (const room of rooms) {
       const msgs = await fetchRoomMessages(room, apiKey);
@@ -242,6 +259,7 @@ export async function startRoomPoller({ rooms, apiKey, handle, interval, config,
         // Skip own messages
         if (normalizedSender === selfHandle) continue;
         if (normalizedSender === ownerHandle) hasOwnerMessage = true;
+        if ((m.body || '').toLowerCase().includes(mentionNeedle)) hasMention = true;
 
         const body = (m.body || '').slice(0, 500);
         const ts = m.created_at || new Date().toISOString();
@@ -277,12 +295,16 @@ export async function startRoomPoller({ rooms, apiKey, handle, interval, config,
     if (newCount > 0) {
       // Primary: write to notification file (always works)
       appendNotifications(notifyFile, newMessages);
-      if (!hasOwnerMessage && await shouldSuppressNudge(config)) {
-        console.log(`  ${newCount} new message(s) → notified (nudge suppressed: user emergency-only)`);
-      } else {
+      // Owner messages always qualify; agent @-mentions qualify unless the user
+      // is in emergency-only mode (that mode exists to mute agent chatter).
+      const mentionQualifies = hasMention && !hasOwnerMessage ? !(await shouldSuppressNudge(config)) : hasMention;
+      const gate = nudgeGate(hasOwnerMessage || mentionQualifies);
+      if (gate.fire) {
         const nudged = triggerNudge({ nudgeMode, nudgeCommandText, nudgeText, session });
-        const why = hasOwnerMessage ? ' (owner message — nudge forced)' : '';
+        const why = hasOwnerMessage ? ' (owner message)' : ' (mention)';
         console.log(`  ${newCount} new message(s) → notified${nudged ? ' + nudge' : ''}${why}`);
+      } else {
+        console.log(`  ${newCount} new message(s) → notified, no nudge (${gate.why})`);
       }
     }
     } finally {
@@ -337,12 +359,16 @@ export async function startRoomPoller({ rooms, apiKey, handle, interval, config,
 
       if (newCount > 0) {
         appendNotifications(dmNotifyFile, newMessages);
-        if (!hasOwnerMessage && await shouldSuppressNudge(config)) {
-          console.log(`  ${newCount} new direct message(s) → notified (nudge suppressed: user emergency-only)`);
-        } else {
+        // DMs are addressed to this agent, so they inherently qualify; owner DMs
+        // bypass emergency-only, other senders respect it. Cooldown still applies.
+        const dmQualifies = hasOwnerMessage || !(await shouldSuppressNudge(config));
+        const gate = nudgeGate(dmQualifies);
+        if (gate.fire) {
           const nudged = triggerNudge({ nudgeMode, nudgeCommandText, nudgeText, session });
-          const why = hasOwnerMessage ? ' (owner message — nudge forced)' : '';
+          const why = hasOwnerMessage ? ' (owner dm)' : ' (dm)';
           console.log(`  ${newCount} new direct message(s) → notified${nudged ? ' + nudge' : ''}${why}`);
+        } else {
+          console.log(`  ${newCount} new direct message(s) → notified, no nudge (${gate.why})`);
         }
       }
     } finally {
