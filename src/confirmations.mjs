@@ -729,11 +729,77 @@ export function startConfirmationsServer({
       });
       return;
     }
+    // POST /ide-chat/<handle>  body { role, text, ts, session_id, tool_calls? }
+    // GET  /ide-chat/<handle>?since=<iso>  → { events: [...] }
+    //
+    // Per-handle in-memory ring buffer. Backs the IDE-chat-in-CodeWatch
+    // feature — `bin/iak-claude-tail.mjs` tails ~/.claude/projects/*.jsonl
+    // and POSTs each user/assistant message here; CodeWatch polls GET to
+    // render the conversation as an IDE channel.
+    const ideChatMatch = url.pathname.match(/^\/ide-chat\/([^/]+)$/);
+    if (ideChatMatch) {
+      const handle = decodeURIComponent(ideChatMatch[1]);
+      if (req.method === 'POST') {
+        let body = '';
+        req.on('data', (c) => { body += c; });
+        req.on('end', () => {
+          let payload;
+          try { payload = JSON.parse(body); } catch {
+            res.writeHead(400, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ ok: false, error: 'invalid json' }));
+            return;
+          }
+          const event = appendIdeChatEvent(handle, payload);
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: true, ts: event.ts }));
+        });
+        return;
+      }
+      if (req.method === 'GET') {
+        const since = url.searchParams.get('since');
+        const limit = parseInt(url.searchParams.get('limit') || '200', 10);
+        const events = listIdeChatEvents(handle, since, limit);
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ events }));
+        return;
+      }
+    }
     res.writeHead(404, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ ok: false, error: 'not found' }));
   });
   server.listen(port, host);
   return server;
+}
+
+// In-memory IDE-chat ring buffer per handle. Bounded to keep memory flat
+// even on long-running daemons. Persisted nowhere — restart drops history,
+// CodeWatch will repopulate on next tail run.
+const IDE_CHAT_MAX_PER_HANDLE = 500;
+const ideChat = new Map(); // handle → array of events (oldest first)
+
+export function appendIdeChatEvent(handle, raw) {
+  const event = {
+    role: raw.role || 'unknown',
+    text: typeof raw.text === 'string' ? raw.text : String(raw.text ?? ''),
+    ts: raw.ts || new Date().toISOString(),
+    session_id: raw.session_id || null,
+    tool_calls: Array.isArray(raw.tool_calls) ? raw.tool_calls : undefined,
+  };
+  let buf = ideChat.get(handle);
+  if (!buf) { buf = []; ideChat.set(handle, buf); }
+  buf.push(event);
+  if (buf.length > IDE_CHAT_MAX_PER_HANDLE) buf.splice(0, buf.length - IDE_CHAT_MAX_PER_HANDLE);
+  return event;
+}
+
+export function listIdeChatEvents(handle, since, limit = 200) {
+  const buf = ideChat.get(handle) || [];
+  let filtered = buf;
+  if (since) {
+    filtered = buf.filter((e) => e.ts > since);
+  }
+  if (filtered.length > limit) filtered = filtered.slice(filtered.length - limit);
+  return filtered;
 }
 
 // Tiny self-contained HTML UI for tap-to-approve. Inlined so the
