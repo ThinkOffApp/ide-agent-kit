@@ -61,9 +61,19 @@ on run argv
   -- gone to the wrong app. petrus saw silent wake drops because of
   -- this. New: ACTIVATE → SET FRONTMOST → VERIFY → keystroke. Bail
   -- without typing if we can't make target frontmost in 5 tries.
-  do shell script "open -a " & quoted form of appName
+  -- Use `open -a` first: it forces a launch + focus more reliably than
+  -- AppleScript's `activate` when the app is hidden/minimized or another
+  -- app is holding focus (full-screen, Mission Control, modal).
+  try
+    do shell script "open -a " & quoted form of appName
+  end try
+  tell application appName to activate
   delay 0.3
 
+  -- Bumped 5x0.2s (1s budget) to 15x0.5s (7.5s budget). Stuck-poller
+  -- incidents on 2026-05-04 traced to ABORTs that cleared on the very
+  -- next nudge — the activate path needs more time when the user is
+  -- across spaces or in another full-screen window.
   set focusOk to false
   set focusAttempts to 0
   repeat while focusAttempts < 15
@@ -89,7 +99,12 @@ on run argv
 
   if not focusOk then
     log "gui_nudge: ABORT — could not bring " & appName & " to front after 15 attempts"
-    return
+    -- Throw an AppleScript error so osascript exits non-zero and the
+    -- outer wake.sh can distinguish 'failed silently' from 'nudge sent'.
+    -- Without this the previous code did `return`, osascript exited 0,
+    -- and wake.sh logged 'nudge sent' for what was actually a no-op.
+    -- Confirmed bite on 2026-05-05 (3+ hours of silent ABORTs).
+    error "gui_nudge could not bring " & appName & " to front" number 100
   end if
 
   try
