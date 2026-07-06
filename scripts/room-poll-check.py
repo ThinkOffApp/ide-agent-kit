@@ -13,6 +13,19 @@ from typing import Iterable, List, Set
 
 BASE_URL = os.getenv("IAK_BASE_URL", "https://antfarm.world/api/v1").rstrip("/")
 API_KEY = os.getenv("IAK_API_KEY") or os.getenv("ANTIGRAVITY_API_KEY", "")
+if not API_KEY:
+    # Fall back to the gitignored machine config so a bare restart of the
+    # poller still authenticates. On 2026-07-06 a restart without IAK_API_KEY
+    # printed NONE (exit 0) every poll for 5 hours - a total silent mute.
+    _cfg_path = os.getenv(
+        "IAK_CONFIG",
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "config", "macbook.json"),
+    )
+    try:
+        with open(_cfg_path) as _f:
+            API_KEY = (json.load(_f).get("poller", {}) or {}).get("api_key", "") or ""
+    except Exception:
+        pass
 ROOMS = [r.strip() for r in os.getenv(
     "IAK_ROOMS", "thinkoff-development,feature-admin-planning,lattice-qcd"
 ).split(",") if r.strip()]
@@ -148,9 +161,11 @@ def _fetch_room_messages(room: str) -> List[dict]:
 
 def main() -> int:
     if not API_KEY:
-        print("ERROR: IAK_API_KEY or ANTIGRAVITY_API_KEY is required", file=sys.stderr)
-        print("NONE")
-        return 0
+        # Fail LOUD: printing NONE with exit 0 here mutes the poller silently
+        # (observed 2026-07-06, 5h of missed messages). Nonzero exit makes the
+        # wrapper log a real failure instead of a healthy-looking NONE.
+        print("ERROR: no API key (env IAK_API_KEY/ANTIGRAVITY_API_KEY or config poller.api_key)", file=sys.stderr)
+        return 2
 
     seen = _load_id_set(SEEN_FILE)
     acked = _load_id_set(ACKED_FILE)

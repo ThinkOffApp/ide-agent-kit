@@ -50,53 +50,19 @@ if [ ! -s "$MSG_FILE" ]; then
     exit 0
 fi
 
-# Architecture (per petrus 2026-05-04 / 2026-05-05):
-#   - Poller still fires the keystroke wake from idle (cold start only).
-#   - Once awake, the agent fetches via MCP tools (room_recent etc).
-#   - This hook bridges those: if IAK MCP is registered for Claude
-#     Code, inject a HINT pointing the agent at room_recent. If not
-#     registered yet, fall back to dumping file contents inline so
-#     the agent still sees the messages this turn.
-CLAUDE_CONFIG="${HOME}/.claude.json"
-mcp_registered=0
-if [ -f "$CLAUDE_CONFIG" ] && grep -q '"ide-agent-kit"' "$CLAUDE_CONFIG" 2>/dev/null; then
-    mcp_registered=1
-fi
-
-if [ "$mcp_registered" -eq 1 ]; then
-    # MCP path: hint the agent to use mcp__ide-agent-kit__room_recent.
-    # Don't paste file contents — keeps prompt clean and forces the
-    # MCP tool path. Truncate the file so future hook fires don't
-    # re-emit the same hint forever.
-    n_lines=$(wc -l < "$MSG_FILE" 2>/dev/null | tr -d ' ' || echo 0)
-    # mcp.room_check in the IAK config selects a cheap fetch model:
-    # the agent spawns a subagent on that model for the fetch+digest and
-    # processes the digest on its own (bigger) model. petrus 2026-07-02.
-    IAK_CONFIG="${HOME}/ide-agent-kit/config/macbook.json"
-    fetch_model=$(python3 -c "import json;print(json.load(open('$IAK_CONFIG')).get('mcp',{}).get('room_check',{}).get('fetch_model',''))" 2>/dev/null)
-    {
-        echo ""
-        echo "=== NEW ROOM MESSAGES (MCP fetch) ==="
-        echo "$n_lines line(s) of new room activity available."
-        if [ -n "$fetch_model" ]; then
-            echo "Per IAK config (mcp.room_check): spawn an Agent with model \"$fetch_model\" to call mcp__ide-agent-kit__room_recent (limit=10) and return a digest; process the digest and any replies (mcp__ide-agent-kit__room_post) on the main model yourself."
-        else
-            echo "Call mcp__ide-agent-kit__room_recent with limit=10 to see them, then mcp__ide-agent-kit__room_post to reply."
-        fi
-        echo "Do NOT shell to curl/python for room I/O — use MCP tools."
-        echo "====================================="
-    } >&2
-    : > "$MSG_FILE"
-    exit 2
-fi
-
-# Fallback path: MCP not registered → dump file contents directly so
-# the agent at least sees the messages.
+# Webhook-push delivery (petrus 2026-07-02): the poller writes the actual
+# new-message bodies into $MSG_FILE and excludes our own posts, so we just
+# inject them inline here. No "check rooms" fetch and no subagent — the
+# message content arrives WITH the wake and the agent replies directly via
+# mcp__ide-agent-kit__room_post. This replaces the old MCP-fetch hint that
+# spawned a room_recent digest every single turn (the "check rooms" churn
+# petrus asked to remove).
 {
     echo ""
-    echo "=== NEW ROOM MESSAGES ==="
+    echo "=== NEW ROOM MESSAGE(S) ==="
     cat "$MSG_FILE"
-    echo "========================="
+    echo "==========================="
+    echo "^ Actual new inbound room messages (your own posts are filtered out by the poller). Reply in-room with mcp__ide-agent-kit__room_post only if a response is warranted. Do NOT fetch or poll — the content is right here."
 } >&2
 : > "$MSG_FILE"
 exit 2
