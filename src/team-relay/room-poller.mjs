@@ -155,6 +155,10 @@ export async function startRoomPoller({ rooms, apiKey, handle, interval, config,
   const nudgeCommandText = config?.poller?.nudge_command || '';
   const pollInterval = parsePositiveInt(interval || config?.poller?.interval_sec, 30);
   const selfHandle = normalizeHandle(handle || config?.poller?.handle || '@unknown');
+  // The human owner's handle. Messages from the owner ALWAYS nudge, even in
+  // emergency-only mode — a message from the user is itself the priority signal;
+  // emergency-only is meant to mute agent/fleet chatter, not the user's own words.
+  const ownerHandle = normalizeHandle(config?.poller?.owner_handle || 'petrus');
   const dmCfg = config?.dm_poller || {};
   const dmEnabled = dmCfg.enabled === true;
   const dmHandle = normalizeHandle(dmCfg.handle || selfHandle);
@@ -224,6 +228,7 @@ export async function startRoomPoller({ rooms, apiKey, handle, interval, config,
     roomPollInFlight = true;
     try {
     let newCount = 0;
+    let hasOwnerMessage = false;
     const newMessages = [];
     for (const room of rooms) {
       const msgs = await fetchRoomMessages(room, apiKey);
@@ -236,6 +241,7 @@ export async function startRoomPoller({ rooms, apiKey, handle, interval, config,
         const normalizedSender = normalizeHandle(sender);
         // Skip own messages
         if (normalizedSender === selfHandle) continue;
+        if (normalizedSender === ownerHandle) hasOwnerMessage = true;
 
         const body = (m.body || '').slice(0, 500);
         const ts = m.created_at || new Date().toISOString();
@@ -271,11 +277,12 @@ export async function startRoomPoller({ rooms, apiKey, handle, interval, config,
     if (newCount > 0) {
       // Primary: write to notification file (always works)
       appendNotifications(notifyFile, newMessages);
-      if (await shouldSuppressNudge(config)) {
+      if (!hasOwnerMessage && await shouldSuppressNudge(config)) {
         console.log(`  ${newCount} new message(s) → notified (nudge suppressed: user emergency-only)`);
       } else {
         const nudged = triggerNudge({ nudgeMode, nudgeCommandText, nudgeText, session });
-        console.log(`  ${newCount} new message(s) → notified${nudged ? ' + nudge' : ''}`);
+        const why = hasOwnerMessage ? ' (owner message — nudge forced)' : '';
+        console.log(`  ${newCount} new message(s) → notified${nudged ? ' + nudge' : ''}${why}`);
       }
     }
     } finally {
@@ -288,6 +295,7 @@ export async function startRoomPoller({ rooms, apiKey, handle, interval, config,
     dmPollInFlight = true;
     try {
       let newCount = 0;
+      let hasOwnerMessage = false;
       const newMessages = [];
       const directMessages = await fetchDirectMessages(dmApiKey, dmLimit);
       for (const message of directMessages) {
@@ -297,6 +305,7 @@ export async function startRoomPoller({ rooms, apiKey, handle, interval, config,
         dmSeen.add(mid);
 
         const sender = normalizeHandle(message.from || message.sender) || '?';
+        if (sender === ownerHandle) hasOwnerMessage = true;
         const recipient = normalizeHandle(message.to) || dmHandle;
         const body = (message.body || '').slice(0, 500);
         const ts = message.created_at || new Date().toISOString();
@@ -328,11 +337,12 @@ export async function startRoomPoller({ rooms, apiKey, handle, interval, config,
 
       if (newCount > 0) {
         appendNotifications(dmNotifyFile, newMessages);
-        if (await shouldSuppressNudge(config)) {
+        if (!hasOwnerMessage && await shouldSuppressNudge(config)) {
           console.log(`  ${newCount} new direct message(s) → notified (nudge suppressed: user emergency-only)`);
         } else {
           const nudged = triggerNudge({ nudgeMode, nudgeCommandText, nudgeText, session });
-          console.log(`  ${newCount} new direct message(s) → notified${nudged ? ' + nudge' : ''}`);
+          const why = hasOwnerMessage ? ' (owner message — nudge forced)' : '';
+          console.log(`  ${newCount} new direct message(s) → notified${nudged ? ' + nudge' : ''}${why}`);
         }
       }
     } finally {
