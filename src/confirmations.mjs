@@ -188,6 +188,58 @@ export function decideIntent(id, decision, { receiptsPath } = {}) {
   return { ok: true };
 }
 
+// Post a small threaded annotation on the original confirmation message so
+// stale Approve/Deny buttons stop soliciting taps for commands that already
+// ran (gate timeout defaults to allow). Best-effort.
+function postGroupmindAnnotation(info, body) {
+  if (!info || !info.messageId || !info.room || !info.key) return Promise.resolve();
+  return import('node:https').then((https) => new Promise((resolve) => {
+    const data = JSON.stringify({
+      room: info.room,
+      body,
+      metadata: { reply_to: info.messageId },
+    });
+    const r = https.request(
+      'https://groupmind.one/api/v1/messages',
+      { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-API-Key': info.key } },
+      (res) => { res.resume(); res.on('end', resolve); res.on('error', resolve); }
+    );
+    r.on('error', resolve);
+    r.write(data);
+    r.end();
+  }));
+}
+
+// Mark a pending intent as auto-allowed (the asker gave up waiting and
+// proceeded by its default policy). Terminal like decideIntent, but records
+// the distinct 'auto-allowed' decision and annotates the chat post so late
+// taps are visibly no-ops. Idempotent.
+export function expireIntent(id, { receiptsPath, timeoutSec } = {}) {
+  const i = intents.get(id);
+  if (!i) return { ok: false, error: `unknown intent ${id}` };
+  if (i.status !== 'pending') {
+    return { ok: true, idempotent: true, decision: i.decision };
+  }
+  i.status = 'decided';
+  i.decision = 'auto-allowed';
+  i.decidedAt = Date.now();
+  postReceipt(receiptsPath, {
+    kind: 'intent.auto_allowed', id, decidedAt: i.decidedAt, prompt: i.prompt,
+  });
+  for (const r of i.resolvers) {
+    try { r({ decision: 'auto-allowed', id }); } catch {}
+  }
+  i.resolvers = [];
+  pushStatus(id, 'expired', {
+    decision: 'auto-allowed',
+    decided_at: new Date(i.decidedAt).toISOString(),
+  });
+  const secs = Number.isFinite(Number(timeoutSec)) ? Number(timeoutSec) : null;
+  const note = `⏱ Auto-allowed${secs ? ` after ${secs}s` : ''} — the command already ran; the Approve/Deny buttons above are inactive, no action needed.`;
+  postGroupmindAnnotation(i.announceResults?.groupmind, note).catch(() => {});
+  return { ok: true };
+}
+
 // Create + announce a confirmation intent. Returns intent id immediately.
 // `announce` is an injectable side-effect (groupmindPost / codewatchPush) for
 // testability — production code passes the real posters.
@@ -220,7 +272,7 @@ export async function createIntent({
   pushStatus(id, 'pending', { target_summary: prompt });
   // Side effects — never let an announce failure block the intent itself.
   try {
-    await announce({ id, prompt, session, channels, fromHandle });
+    intent.announceResults = await announce({ id, prompt, session, channels, fromHandle });
   } catch (e) {
     postReceipt(receiptsPath, {
       kind: 'intent.announce_failed', id, error: e.message,
@@ -589,6 +641,22 @@ export function startConfirmationsServer({
         return;
       }
     }
+    const mExpire = url.pathname.match(/^\/intent\/([^/]+)\/expire$/);
+    if (req.method === 'POST' && mExpire) {
+      let body = '';
+      req.on('data', (c) => { body += c; });
+      req.on('end', () => {
+        let payload = {};
+        try { payload = JSON.parse(body || '{}'); } catch {}
+        const result = expireIntent(mExpire[1], {
+          receiptsPath,
+          timeoutSec: payload.timeout_sec,
+        });
+        res.writeHead(result.ok ? 200 : 404, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify(result));
+      });
+      return;
+    }
     const m = url.pathname.match(/^\/intent\/([^/]+)\/decision$/);
     if (req.method === 'POST' && m) {
       const id = m[1];
@@ -935,9 +1003,15 @@ export function makeGroupmindAnnouncer({ apiKey, room, callbackBase, apiKeys }) 
         'https://groupmind.one/api/v1/messages',
         { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-API-Key': effectiveKey } },
         (res) => {
-          // drain + resolve regardless; the message-id isn't useful here.
-          res.resume();
-          res.on('end', () => resolve());
+          // Capture the created message id: expireIntent uses it to post the
+          // auto-allowed annotation as a threaded reply on this exact post.
+          let respBody = '';
+          res.on('data', (c) => { respBody += c; });
+          res.on('end', () => {
+            let messageId = null;
+            try { messageId = JSON.parse(respBody)?.id || null; } catch {}
+            resolve({ messageId, room, key: effectiveKey });
+          });
           res.on('error', reject);
         }
       );
@@ -975,14 +1049,16 @@ export function makeCodewatchAnnouncer({ gateUrl, gateToken }) {
 // Fan-out: build a single announce function from per-channel announcers.
 export function composeAnnouncers(map) {
   return async (intent) => {
+    const results = {};
     for (const ch of intent.channels) {
       const fn = map[ch];
       if (!fn) continue;
-      try { await fn(intent); } catch (e) {
+      try { results[ch] = await fn(intent); } catch (e) {
         // log but continue to other channels
         process.stderr.write(`[iak-mcp] announce ${ch} failed: ${e.message}\n`);
       }
     }
+    return results;
   };
 }
 
