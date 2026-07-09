@@ -1,0 +1,73 @@
+#!/usr/bin/env bash
+# Pre-commit secret scanner for the (public) ide-agent-kit repo.
+# Blocks a commit if a staged change adds a credential or stages a known
+# secret-bearing file. Dependency-free (pure grep) so it works on any clone
+# without installing gitleaks/trufflehog.
+#
+# Activate once per clone:  git config core.hooksPath .githooks
+# (or run: bash scripts/install-git-hooks.sh)
+#
+# Bypass a genuine false positive with:  git commit --no-verify
+# ...but read the finding first — a leaked key in a PUBLIC repo means rotate it.
+set -euo pipefail
+
+fail=0
+red() { printf '\033[31m%s\033[0m\n' "$*"; }
+yellow() { printf '\033[33m%s\033[0m\n' "$*"; }
+
+# 1) Block staging of files that hold live secrets by convention.
+#    (gitignore is the first line of defence; this catches force-adds / new
+#    root-level config files that slip past the ignore patterns — exactly how
+#    gemini-config.json leaked.)
+blocked_files_re='(^|/)(gemini-config\.json|.*-config\.json|\.env(\..*)?$|.*\.bak([._-].*)?$)'
+while IFS= read -r f; do
+  [ -z "$f" ] && continue
+  # allow explicit example/sample templates
+  case "$f" in
+    *example*|*sample*|*.template) continue ;;
+  esac
+  if printf '%s\n' "$f" | grep -qiE "$blocked_files_re"; then
+    red "BLOCKED file (secret-bearing by convention): $f"
+    yellow "  → add it to .gitignore instead of committing it."
+    fail=1
+  fi
+done < <(git diff --cached --name-only --diff-filter=ACM)
+
+# 2) Scan ADDED lines for credential patterns.
+#    Only '+' lines of the staged diff are checked (not context/removed).
+patterns=(
+  'xfb_[A-Za-z0-9]{24,}'                       # GroupMind / xfor.bot key
+  'antfarm_[A-Za-z0-9]{32,}'                   # antfarm agent key
+  'sk-[A-Za-z0-9_-]{20,}'                      # OpenAI / Moonshot style
+  'gh[posru]_[A-Za-z0-9]{30,}'                 # GitHub PAT / token
+  'AIza[0-9A-Za-z_-]{35}'                      # Google API key
+  'xai-[A-Za-z0-9]{20,}'                       # xAI / Grok key
+  'moltbook_sk_[A-Za-z0-9]{20,}'               # Moltbook
+  'am_[a-z]{2}_[a-f0-9]{40,}'                  # AgentMail
+  'eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}'  # JWT
+  '-----BEGIN[ A-Z]*PRIVATE KEY-----'          # PEM private key
+  '(MT[A-Za-z0-9]{22,}\.[A-Za-z0-9_-]{6}\.[A-Za-z0-9_-]{27,})'     # Discord bot token
+  '(api[_-]?key|apikey|secret|token|password|passwd)["'"'"' :=]+[A-Za-z0-9_/+-]{20,}'  # generic assignment
+)
+
+added=$(git diff --cached --diff-filter=ACM -U0 | grep -E '^\+' | grep -vE '^\+\+\+' || true)
+if [ -n "$added" ]; then
+  for pat in "${patterns[@]}"; do
+    hits=$(printf '%s\n' "$added" | grep -inE -e "$pat" || true)
+    if [ -n "$hits" ]; then
+      red "BLOCKED: staged change adds something matching a secret pattern:"
+      # redact the middle of each match so we don't re-print the secret
+      printf '%s\n' "$hits" | sed -E 's/([A-Za-z0-9_+/-]{6})[A-Za-z0-9_+/-]{6,}([A-Za-z0-9_+/-]{4})/\1…REDACTED…\2/g' | head -8
+      fail=1
+    fi
+  done
+fi
+
+if [ "$fail" -ne 0 ]; then
+  echo
+  red "Commit blocked by .githooks/pre-commit (secret scan)."
+  yellow "If this is a real key: DO NOT commit — move it to a gitignored config and rotate it (public repo)."
+  yellow "If it is a genuine false positive: git commit --no-verify"
+  exit 1
+fi
+exit 0
