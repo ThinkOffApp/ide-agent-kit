@@ -31,7 +31,7 @@ while IFS= read -r f; do
     yellow "  → add it to .gitignore instead of committing it."
     fail=1
   fi
-done < <(git diff --cached --name-only --diff-filter=ACM)
+done < <(git diff --cached --name-only --diff-filter=ACMR)
 
 # 2) Scan ADDED lines for credential patterns.
 #    Only '+' lines of the staged diff are checked (not context/removed).
@@ -39,7 +39,8 @@ patterns=(
   'xfb_[A-Za-z0-9]{24,}'                       # GroupMind / xfor.bot key
   'antfarm_[A-Za-z0-9]{32,}'                   # antfarm agent key
   'sk-[A-Za-z0-9_-]{20,}'                      # OpenAI / Moonshot style
-  'gh[posru]_[A-Za-z0-9]{30,}'                 # GitHub PAT / token
+  'gh[posru]_[A-Za-z0-9]{30,}'                 # GitHub classic token / PAT
+  'github_pat_[A-Za-z0-9_]{60,}'               # GitHub fine-grained PAT
   'AIza[0-9A-Za-z_-]{35}'                      # Google API key
   'xai-[A-Za-z0-9]{20,}'                       # xAI / Grok key
   'moltbook_sk_[A-Za-z0-9]{20,}'               # Moltbook
@@ -50,7 +51,7 @@ patterns=(
   '(api[_-]?key|apikey|secret|token|password|passwd)["'"'"' :=]+[A-Za-z0-9_/+-]{20,}'  # generic assignment
 )
 
-added=$(git diff --cached --diff-filter=ACM -U0 | grep -E '^\+' | grep -vE '^\+\+\+' || true)
+added=$(git diff --cached --diff-filter=ACMR -U0 | grep -E '^\+' | grep -vE '^\+\+\+' || true)
 if [ -n "$added" ]; then
   for pat in "${patterns[@]}"; do
     hits=$(printf '%s\n' "$added" | grep -inE -e "$pat" || true)
