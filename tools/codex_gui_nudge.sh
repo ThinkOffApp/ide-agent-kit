@@ -4,6 +4,8 @@ set -euo pipefail
 APP_NAME="${IAK_CODEX_APP_NAME:-Codex}"
 PROMPT_TEXT="${IAK_NUDGE_TEXT:-check room and respond [codex]}"
 LOG_FILE="${IAK_CODEX_NUDGE_LOG:-/tmp/codex_gui_nudge.log}"
+CLICLICK_BIN="${IAK_CLICLICK_BIN:-/opt/homebrew/bin/cliclick}"
+PYTHON_BIN="${IAK_PYTHON_BIN:-/opt/homebrew/bin/python3}"
 
 if ! command -v osascript >/dev/null 2>&1; then
   echo "osascript not found" >&2
@@ -11,6 +13,49 @@ if ! command -v osascript >/dev/null 2>&1; then
 fi
 
 printf '[%s] codex_gui_nudge: start app=%s text=%q\n' "$(date -u +%FT%TZ)" "$APP_NAME" "$PROMPT_TEXT" >>"$LOG_FILE"
+
+# Prefer cliclick for background wakes. launchd's /usr/bin/osascript process is
+# not necessarily granted Accessibility access even when Terminal is, while the
+# already-approved cliclick binary can generate the click and keystrokes. Quartz
+# window metadata gives stable coordinates without Accessibility/UI scripting.
+if [ -x "$CLICLICK_BIN" ] && [ -x "$PYTHON_BIN" ] && "$PYTHON_BIN" -c 'import Quartz' >/dev/null 2>&1; then
+  open -a "$APP_NAME"
+  sleep 0.6
+  WINDOW_BOUNDS=$("$PYTHON_BIN" - "$APP_NAME" <<'PY'
+import sys
+import Quartz
+
+app = sys.argv[1]
+windows = Quartz.CGWindowListCopyWindowInfo(
+    Quartz.kCGWindowListOptionOnScreenOnly | Quartz.kCGWindowListExcludeDesktopElements,
+    Quartz.kCGNullWindowID,
+)
+candidates = []
+for window in windows:
+    if window.get(Quartz.kCGWindowOwnerName) != app:
+        continue
+    if int(window.get(Quartz.kCGWindowLayer, 1)) != 0:
+        continue
+    bounds = window.get(Quartz.kCGWindowBounds, {})
+    width = int(bounds.get('Width', 0))
+    height = int(bounds.get('Height', 0))
+    if width > 300 and height > 300:
+        candidates.append((width * height, int(bounds['X']), int(bounds['Y']), width, height))
+if candidates:
+    _, x, y, width, height = max(candidates)
+    print(x, y, width, height)
+PY
+)
+  if read -r WIN_X WIN_Y WIN_W WIN_H <<<"$WINDOW_BOUNDS" && [ -n "${WIN_H:-}" ]; then
+    CLICK_X=$((WIN_X + WIN_W / 2))
+    CLICK_Y=$((WIN_Y + WIN_H - 72))
+    if "$CLICLICK_BIN" -r -w 20 "c:${CLICK_X},${CLICK_Y}" "t:${PROMPT_TEXT}" kp:return; then
+      printf '[%s] codex_gui_nudge: sent via cliclick x=%s y=%s\n' "$(date -u +%FT%TZ)" "$CLICK_X" "$CLICK_Y" >>"$LOG_FILE"
+      exit 0
+    fi
+  fi
+  printf '[%s] codex_gui_nudge: cliclick path unavailable; falling back to AppleScript\n' "$(date -u +%FT%TZ)" >>"$LOG_FILE"
+fi
 
 osascript - "$APP_NAME" "$PROMPT_TEXT" "$LOG_FILE" <<'APPLESCRIPT'
 on run argv

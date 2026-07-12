@@ -14,3 +14,4 @@ config/*.bak*
 # Per-agent poller configs hold live API keys - never commit (leaked 2026-07-09)
 gemini-config.json
 gemini-config.json.bak*
+scripts/__pycache__/
