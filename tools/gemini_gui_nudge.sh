@@ -1,4 +1,16 @@
 #!/usr/bin/env bash
+
+# Never type over the human (petrus 2026-07-13: "tmux should not write if i
+# am writing!"). Skip this nudge cycle unless the machine is human-idle.
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# WAIT for an idle window rather than skipping: by the time this script runs
+# the poller has marked the message seen, so skipping would consume it
+# undelivered. Exit 1 on timeout so the caller's failure path applies.
+if ! "$REPO_ROOT/tools/human-idle-guard.sh" --wait 300; then
+    echo "nudge aborted: human continuously active" >&2
+    exit 1
+fi
+
 set -euo pipefail
 
 APP_NAME="${IAK_GEMINI_APP_NAME:-Claude}"
