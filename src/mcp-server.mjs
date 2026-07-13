@@ -20,7 +20,7 @@
 // Transport: stdio. Compatible with Claude Desktop / Code MCP client config.
 
 import { execSync } from 'node:child_process';
-import { readFileSync } from 'node:fs';
+import { readFileSync, writeFileSync, renameSync, statSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
@@ -214,6 +214,95 @@ export function captureTmuxPane(session, lines = 50) {
   }
 }
 
+// --- notification ack (consumed-only) ---------------------------------------
+//
+// room_ack used to blank the whole notification file. Anything the poller
+// appended between the agent's last room_list_new read and the ack was wiped
+// unread (real incident 2026-07-08: an owner instruction sat 5 hours unseen).
+// The fix: room_list_new remembers the exact bytes it returned; room_ack
+// removes ONLY those bytes and preserves anything appended since.
+
+function countNotificationLines(raw) {
+  if (!raw) return 0;
+  return raw.split('\n').filter((l) => l.trim().length > 0).length;
+}
+
+export function removeConsumedNotifications(currentRaw, consumedRaw) {
+  // Compute what should remain in the notification file after acking exactly
+  // the content a prior room_list_new returned.
+  //
+  // Fast path: the pollers only ever append, so the consumed content is
+  // normally still a byte-prefix of the current file — drop that prefix.
+  // Fallback: if the file was rewritten in between (manual edit, rotation),
+  // drop consumed lines by exact match (multiset semantics) and keep the rest.
+  const current = currentRaw || '';
+  const consumed = consumedRaw || '';
+  if (!consumed.trim()) {
+    // Last read saw an empty file — nothing was consumed, nothing to remove.
+    return { remainder: current, consumedLines: 0, mode: 'noop' };
+  }
+  if (current.startsWith(consumed)) {
+    return {
+      remainder: current.slice(consumed.length),
+      consumedLines: countNotificationLines(consumed),
+      mode: 'prefix',
+    };
+  }
+  const pending = new Map();
+  for (const line of consumed.split('\n')) {
+    if (!line.trim()) continue;
+    pending.set(line, (pending.get(line) || 0) + 1);
+  }
+  const kept = [];
+  let removed = 0;
+  for (const line of current.split('\n')) {
+    if (line.trim() && (pending.get(line) || 0) > 0) {
+      pending.set(line, pending.get(line) - 1);
+      removed += 1;
+      continue;
+    }
+    kept.push(line);
+  }
+  return { remainder: kept.join('\n'), consumedLines: removed, mode: 'lines' };
+}
+
+function atomicWriteNotify(notifyFile, content) {
+  // Temp-file + rename in the same directory so readers never observe a
+  // half-written file. The pollers re-open the path on every appendFileSync,
+  // so appends after the rename land in the new file; the read→rename window
+  // inside a single ack is microseconds (vs the old read→think→truncate
+  // window of minutes). tail -F watchers see the rename as a rotation and
+  // re-open; the IAK Monitor/hook patterns re-read the whole file anyway.
+  let mode;
+  try {
+    mode = statSync(notifyFile).mode & 0o777;
+  } catch {
+    // File missing — default mode is fine.
+  }
+  const tmp = `${notifyFile}.ack-${process.pid}-${Date.now()}.tmp`;
+  writeFileSync(tmp, content, mode != null ? { mode } : undefined);
+  renameSync(tmp, notifyFile);
+}
+
+export function ackNotificationFile(notifyFile, consumedRaw) {
+  // consumedRaw === null → no room_list_new recorded this session: legacy
+  // clear-everything behavior (kept for cold callers, inherently racy).
+  // Otherwise remove only the consumed content; late arrivals survive.
+  let current = '';
+  try {
+    current = readFileSync(notifyFile, 'utf8');
+  } catch {
+    current = ''; // missing file == already empty
+  }
+  if (consumedRaw == null) {
+    if (current !== '') atomicWriteNotify(notifyFile, '');
+    return { mode: 'all', consumedLines: countNotificationLines(current), preservedLines: 0 };
+  }
+  const { remainder, consumedLines, mode } = removeConsumedNotifications(current, consumedRaw);
+  if (remainder !== current) atomicWriteNotify(notifyFile, remainder);
+  return { mode, consumedLines, preservedLines: countNotificationLines(remainder) };
+}
+
 function ok(text) {
   return { content: [{ type: 'text', text }] };
 }
@@ -326,6 +415,10 @@ export async function runMcpServer({ configPath } = {}) {
     );
   }
 
+  // Per-session memory of what the last room_list_new returned, keyed by
+  // notification file path. room_ack uses it to clear only consumed lines.
+  const lastRoomListNew = new Map();
+
   const tools = [
     {
       name: 'room_list_new',
@@ -334,7 +427,9 @@ export async function runMcpServer({ configPath } = {}) {
     },
     {
       name: 'room_ack',
-      description: 'Clear the notification file, acknowledging that messages have been read.',
+      description:
+        'Acknowledge the messages returned by the last room_list_new. Only those lines are ' +
+        'removed from the notification file; anything appended since that read is preserved.',
       inputSchema: { type: 'object', properties: {} },
     },
     {
@@ -520,20 +615,39 @@ export async function runMcpServer({ configPath } = {}) {
       switch (name) {
         case 'room_list_new': {
           const notifyFile = config?.poller?.notification_file || '/tmp/iak-new-messages.txt';
+          let raw = '';
           try {
-            const content = readFileSync(notifyFile, 'utf8').trim();
-            if (!content) return ok('No new messages.');
-            return ok(content);
+            raw = readFileSync(notifyFile, 'utf8');
           } catch {
-            return ok('No new messages.');
+            raw = '';
           }
+          // Remember exactly what this read returned so room_ack clears only
+          // these bytes — lines the poller appends after this point survive.
+          lastRoomListNew.set(notifyFile, raw);
+          const content = raw.trim();
+          if (!content) return ok('No new messages.');
+          return ok(content);
         }
         case 'room_ack': {
           const notifyFile = config?.poller?.notification_file || '/tmp/iak-new-messages.txt';
           try {
-            const { writeFileSync } = await import('node:fs');
-            writeFileSync(notifyFile, '');
-            return ok('Acknowledged new messages.');
+            const consumedRaw = lastRoomListNew.has(notifyFile) ? lastRoomListNew.get(notifyFile) : null;
+            const result = ackNotificationFile(notifyFile, consumedRaw);
+            lastRoomListNew.delete(notifyFile);
+            if (result.mode === 'all') {
+              return ok(
+                'Acknowledged new messages (no room_list_new recorded this session — cleared the whole file; ' +
+                  'prefer room_list_new → room_ack so late arrivals are preserved).'
+              );
+            }
+            if (result.preservedLines > 0) {
+              return ok(
+                `Acknowledged ${result.consumedLines} read message line(s); ` +
+                  `${result.preservedLines} line(s) arrived after the last room_list_new and were preserved — ` +
+                  'call room_list_new again to see them.'
+              );
+            }
+            return ok(`Acknowledged ${result.consumedLines} read message line(s).`);
           } catch (e) {
             return err('Failed to ack: ' + e.message);
           }

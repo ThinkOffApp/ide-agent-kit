@@ -17,6 +17,8 @@ import {
   decideTmuxRunMode,
   configuredAgentSessions,
   roomApiConfigured,
+  removeConsumedNotifications,
+  ackNotificationFile,
 } from '../src/mcp-server.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -148,7 +150,7 @@ test('roomApiConfigured: requires both API key and room', () => {
 
 // --- end-to-end stdio smoke ------------------------------------------------
 
-import { writeFileSync, mkdtempSync, rmSync } from 'node:fs';
+import { writeFileSync, appendFileSync, readFileSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 
 function rpc(line) { return JSON.stringify(line) + '\n'; }
@@ -223,6 +225,167 @@ test('iak-mcp.mjs with room API config exposes low-latency room tools', async ()
     assert.ok(tools.includes('room_recent'), `expected room_recent, got ${tools.join(',')}`);
     assert.ok(tools.includes('alert_recipient'), `expected alert_recipient, got ${tools.join(',')}`);
   } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// --- removeConsumedNotifications (pure) --------------------------------------
+
+test('removeConsumedNotifications: consumed prefix is dropped, later append survives', () => {
+  const consumed = '[room] alice: first\n[room] bob: second\n';
+  const current = consumed + '[room] petrus: arrived after the read\n';
+  const r = removeConsumedNotifications(current, consumed);
+  assert.equal(r.remainder, '[room] petrus: arrived after the read\n');
+  assert.equal(r.consumedLines, 2);
+  assert.equal(r.mode, 'prefix');
+});
+
+test('removeConsumedNotifications: nothing appended → file drains to empty', () => {
+  const consumed = '[room] alice: first\n';
+  const r = removeConsumedNotifications(consumed, consumed);
+  assert.equal(r.remainder, '');
+  assert.equal(r.consumedLines, 1);
+});
+
+test('removeConsumedNotifications: empty read consumes nothing (late lines survive)', () => {
+  const r = removeConsumedNotifications('[room] petrus: late\n', '');
+  assert.equal(r.remainder, '[room] petrus: late\n');
+  assert.equal(r.consumedLines, 0);
+  assert.equal(r.mode, 'noop');
+});
+
+test('removeConsumedNotifications: rewritten file falls back to per-line removal', () => {
+  // File no longer starts with what was read (e.g. rotated/edited in between):
+  // remove read lines by exact match, keep everything else.
+  const consumed = '[room] alice: first\n[room] bob: second\n';
+  const current = '[room] petrus: new head\n[room] bob: second\n[room] alice: first\n[room] petrus: tail\n';
+  const r = removeConsumedNotifications(current, consumed);
+  assert.equal(r.remainder, '[room] petrus: new head\n[room] petrus: tail\n');
+  assert.equal(r.consumedLines, 2);
+  assert.equal(r.mode, 'lines');
+});
+
+test('removeConsumedNotifications: duplicate lines removed with multiset semantics', () => {
+  const consumed = '[room] bot: ping\n';
+  const current = '[room] bot: other\n[room] bot: ping\n[room] bot: ping\n';
+  const r = removeConsumedNotifications(current, consumed);
+  // Only ONE copy of the read line is removed; the second (unread) survives.
+  assert.equal(r.remainder, '[room] bot: other\n[room] bot: ping\n');
+  assert.equal(r.consumedLines, 1);
+});
+
+// --- ackNotificationFile (file-level) ----------------------------------------
+
+test('ackNotificationFile: REGRESSION — poller append between read and ack survives', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'iak-ack-test-'));
+  const notifyFile = join(dir, 'new-messages.txt');
+  try {
+    // Agent reads (room_list_new captures this content)...
+    const consumed = '[room] alice: task A\n[room] bob: task B\n';
+    writeFileSync(notifyFile, consumed);
+    // ...poller races in and appends BEFORE the agent acks (the 2026-07-08
+    // incident shape: an owner instruction landed in this window)...
+    appendFileSync(notifyFile, '[room] petrus: send all 3\n');
+    // ...agent acks what it read.
+    const r = ackNotificationFile(notifyFile, consumed);
+    assert.equal(r.consumedLines, 2);
+    assert.equal(r.preservedLines, 1);
+    // The late line MUST still be in the file, unread but not lost.
+    assert.equal(readFileSync(notifyFile, 'utf8'), '[room] petrus: send all 3\n');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('ackNotificationFile: no prior read (null) keeps legacy clear-all contract', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'iak-ack-test-'));
+  const notifyFile = join(dir, 'new-messages.txt');
+  try {
+    writeFileSync(notifyFile, '[room] a: x\n[room] b: y\n');
+    const r = ackNotificationFile(notifyFile, null);
+    assert.equal(r.mode, 'all');
+    assert.equal(readFileSync(notifyFile, 'utf8'), '');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('ackNotificationFile: missing notification file is a no-op ack', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'iak-ack-test-'));
+  const notifyFile = join(dir, 'does-not-exist.txt');
+  try {
+    const r = ackNotificationFile(notifyFile, '[room] a: x\n');
+    assert.equal(r.consumedLines, 0);
+    assert.equal(r.preservedLines, 0);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// --- end-to-end stdio regression: room_list_new → append → room_ack ---------
+
+function bootMcp(configPath) {
+  const child = spawn('node', [BIN, '--config', configPath], { stdio: ['pipe', 'pipe', 'pipe'] });
+  let buf = '';
+  const waiters = new Map();
+  child.stdout.on('data', (b) => {
+    buf += b.toString('utf8');
+    let idx;
+    while ((idx = buf.indexOf('\n')) >= 0) {
+      const line = buf.slice(0, idx);
+      buf = buf.slice(idx + 1);
+      if (!line.trim()) continue;
+      let msg;
+      try { msg = JSON.parse(line); } catch { continue; }
+      const settle = waiters.get(msg.id);
+      if (settle) { waiters.delete(msg.id); settle(msg); }
+    }
+  });
+  let nextId = 100;
+  const request = (method, params) =>
+    new Promise((resolvePromise, rejectPromise) => {
+      const id = nextId++;
+      waiters.set(id, resolvePromise);
+      setTimeout(() => {
+        if (waiters.delete(id)) rejectPromise(new Error(`timeout waiting for ${method} (id ${id})`));
+      }, 10000).unref();
+      child.stdin.write(rpc({ jsonrpc: '2.0', id, method, params }));
+    });
+  child.stdin.write(rpc({ jsonrpc: '2.0', id: 1, method: 'initialize',
+    params: { protocolVersion: '2025-03-26', capabilities: {}, clientInfo: { name: 'test', version: '0' } } }));
+  child.stdin.write(rpc({ jsonrpc: '2.0', method: 'notifications/initialized' }));
+  const close = async () => {
+    child.kill('SIGTERM');
+    await new Promise((r) => child.on('exit', r));
+  };
+  return { request, close };
+}
+
+test('iak-mcp.mjs REGRESSION: room_ack clears only what room_list_new returned', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'iak-mcp-test-'));
+  const cfgPath = join(dir, 'config.json');
+  const notifyFile = join(dir, 'new-messages.txt');
+  writeFileSync(cfgPath, JSON.stringify({
+    poller: { notification_file: notifyFile },
+    tmux: { allow: [], default_session: 't' },
+  }));
+  writeFileSync(notifyFile, '[room] alice: first\n[room] bob: second\n');
+  const { request, close } = bootMcp(cfgPath);
+  try {
+    const listed = await request('tools/call', { name: 'room_list_new', arguments: {} });
+    assert.match(listed.result.content[0].text, /alice: first/);
+    // Poller races in between the read and the ack.
+    appendFileSync(notifyFile, '[room] petrus: send all 3\n');
+    const acked = await request('tools/call', { name: 'room_ack', arguments: {} });
+    assert.match(acked.result.content[0].text, /preserved/);
+    assert.equal(readFileSync(notifyFile, 'utf8'), '[room] petrus: send all 3\n');
+    // Second read+ack drains the file completely.
+    const listed2 = await request('tools/call', { name: 'room_list_new', arguments: {} });
+    assert.match(listed2.result.content[0].text, /send all 3/);
+    await request('tools/call', { name: 'room_ack', arguments: {} });
+    assert.equal(readFileSync(notifyFile, 'utf8'), '');
+  } finally {
+    await close();
     rmSync(dir, { recursive: true, force: true });
   }
 });
