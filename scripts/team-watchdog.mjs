@@ -73,10 +73,22 @@ async function wakeGate(gate) {
 }
 function wakeLocal(script) {
   // Local GUI nudge for same-machine agents (codex). Silent by contract:
-  // success or failure, we log and never room-post.
+  // success or failure, we log and never room-post. Must pass the same env
+  // the webhook supervisor uses: codex lives INSIDE ChatGPT.app (the default
+  // app name "Codex" does not exist -> AppleScript focus ABORTs), and launchd
+  // strips PATH so the helper binaries need absolute paths.
   if (!script) return Promise.resolve(false);
   return new Promise((resolve) => {
-    execFile('bash', [script], { timeout: 30_000 }, (err) => resolve(!err));
+    execFile('bash', [script], {
+      timeout: 30_000,
+      env: {
+        ...process.env,
+        IAK_CODEX_APP_NAME: 'ChatGPT',
+        IAK_NUDGE_TEXT: 'check rooms [codex]',
+        IAK_CLICLICK_BIN: '/opt/homebrew/bin/cliclick',
+        IAK_PYTHON_BIN: '/opt/homebrew/bin/python3',
+      },
+    }, (err) => resolve(!err));
   });
 }
 function lastSeen(msgs, handle) {
