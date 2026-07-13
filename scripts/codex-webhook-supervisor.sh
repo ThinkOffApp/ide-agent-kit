@@ -31,7 +31,17 @@ log(){ echo "[$(date '+%F %T')] $*" | tee -a "$LOG"; }
 SECRET=$(cat "$SECRET_FILE")
 KEY=$(tr -d '\n' < "$KEY_FILE")
 
-receiver_running(){ lsof -nP -iTCP:$PORT -sTCP:LISTEN 2>/dev/null | grep -q node; }
+# Match OUR receiver specifically, not any node process that happens to be
+# listening on the port (codex review of IAK PR #28).
+receiver_running(){
+  local pid
+  for pid in $(lsof -nP -iTCP:$PORT -sTCP:LISTEN -t 2>/dev/null); do
+    if ps -o command= -p "$pid" 2>/dev/null | grep -q "webhook-wake.mjs"; then
+      return 0
+    fi
+  done
+  return 1
+}
 start_receiver(){
   receiver_running || {
     WEBHOOK_WAKE_SECRET="$SECRET" \
@@ -66,14 +76,16 @@ get_url(){
 }
 
 register(){
+  # Key travels via environment, never as a process argument visible in ps
+  # (codex review of IAK PR #28).
   local hook="$1/hook/$SECRET"
-  python3 -c "
-import urllib.request,json,sys
+  IAK_REG_KEY="$KEY" python3 -c "
+import urllib.request,json,sys,os
 req=urllib.request.Request('https://groupmind.one/api/v1/agents/me/webhook', data=json.dumps({'webhook_url':sys.argv[1]}).encode(), method='PUT')
-req.add_header('X-API-Key', sys.argv[2])
+req.add_header('X-API-Key', os.environ['IAK_REG_KEY'])
 req.add_header('Content-Type', 'application/json')
 print(urllib.request.urlopen(req, timeout=15).status)
-" "$hook" "$KEY" 2>&1
+" "$hook" 2>&1
 }
 
 log "supervisor start"
@@ -100,8 +112,10 @@ while true; do
     [ -n "$NEW" ] && { URL="$NEW"; result=$(register "$URL"); log "re-registered after restart $URL (http $result)"; }
     continue
   fi
-  if tail -5 "$CF_LOG" 2>/dev/null | grep -q "Retrying connection"; then
-    log "tunnel flapping (Retrying connection); forcing restart"
+  # Sustained flapping only: a single transient retry self-recovers and must
+  # not trigger a restart + URL churn (codex review of IAK PR #28).
+  if [ "$(tail -20 "$CF_LOG" 2>/dev/null | grep -c "Retrying connection")" -ge 3 ]; then
+    log "tunnel flapping (3+ retries in recent log); forcing restart"
     start_tunnel
     NEW=$(get_url)
     [ -n "$NEW" ] && { URL="$NEW"; result=$(register "$URL"); log "re-registered after flap $URL (http $result)"; }
