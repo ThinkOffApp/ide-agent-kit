@@ -14,6 +14,26 @@ fi
 
 printf '[%s] codex_gui_nudge: start app=%s text=%q\n' "$(date -u +%FT%TZ)" "$APP_NAME" "$PROMPT_TEXT" >>"$LOG_FILE"
 
+# NEVER type into a locked screen: on a locked Mac the keystrokes land in the
+# lock-screen password field and register as failed unlock attempts
+# (claudemm review of IAK PR #28, confirmed Jul 13). Abort softly when locked
+# or when the lock state cannot be determined.
+LOCK_PY="$PYTHON_BIN"; [ -x "$LOCK_PY" ] || LOCK_PY="$(command -v python3 || true)"
+if [ -n "$LOCK_PY" ]; then
+  LOCK_STATE=$("$LOCK_PY" - <<'PY' 2>/dev/null || echo unknown
+import Quartz
+d = dict(Quartz.CGSessionCopyCurrentDictionary() or {})
+print("locked" if d.get("CGSSessionScreenIsLocked", False) else "unlocked")
+PY
+)
+else
+  LOCK_STATE=unknown
+fi
+if [ "$LOCK_STATE" != "unlocked" ]; then
+  printf '[%s] codex_gui_nudge: ABORT screen %s - refusing to type\n' "$(date -u +%FT%TZ)" "$LOCK_STATE" >>"$LOG_FILE"
+  exit 0
+fi
+
 # Prefer cliclick for background wakes. launchd's /usr/bin/osascript process is
 # not necessarily granted Accessibility access even when Terminal is, while the
 # already-approved cliclick binary can generate the click and keystrokes. Quartz

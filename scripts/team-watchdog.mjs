@@ -67,7 +67,15 @@ async function postRoom(body) {
 async function wakeGate(gate) {
   if (!gate) return false;
   try {
-    const r = await fetch(`${gate}/wake`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ text: 'check rooms' }), signal: AbortSignal.timeout(5000) });
+    // Gates may require Bearer auth (claudemm's :8788 does since Jul 8 - every
+    // unauthenticated wake 401s, claudemm review of IAK PR #28). Token is read
+    // from a private file, never committed, never logged.
+    const headers = { 'Content-Type': 'application/json' };
+    try {
+      const tok = readFileSync(`${process.env.HOME}/.iak/gate_bearer`, 'utf8').trim();
+      if (tok) headers['Authorization'] = `Bearer ${tok}`;
+    } catch {}
+    const r = await fetch(`${gate}/wake`, { method: 'POST', headers, body: JSON.stringify({ text: 'check rooms' }), signal: AbortSignal.timeout(5000) });
     return r.ok;
   } catch { return false; }
 }

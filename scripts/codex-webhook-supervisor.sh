@@ -4,7 +4,19 @@
 set -u
 
 SECRET_FILE="$HOME/.iak-codex-webhook-secret"
-KEY_FILE="/Users/petrus/AndroidStudioProjects/ThinkOff/results/su2_signal_scan/codexmb_api_key.txt"
+# Key lives in a private dot-directory (chmod 600), path overridable via env.
+# Never point this at a location inside a public repo's working tree.
+KEY_FILE="${IAK_CODEX_KEY_FILE:-$HOME/.iak/codexmb_api_key.txt}"
+
+# Single-instance guard: a second supervisor fights the first over the tunnel
+# (kills its cloudflared, re-registers a different URL - claudemm review of
+# IAK PR #28). Exit if another copy is already running.
+for pid in $(pgrep -f "codex-webhook-supervisor.sh" 2>/dev/null); do
+  if [ "$pid" != "$$" ] && [ "$pid" != "$PPID" ]; then
+    echo "another supervisor (pid $pid) is already running; exiting" >&2
+    exit 0
+  fi
+done
 RECEIVER="$HOME/ide-agent-kit/scripts/webhook-wake.mjs"
 WAKE="$HOME/ide-agent-kit/tools/codex_gui_nudge.sh"
 PORT=8791
