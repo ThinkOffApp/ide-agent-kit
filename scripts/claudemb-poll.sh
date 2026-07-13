@@ -234,12 +234,22 @@ except Exception:
 " 2>/dev/null)
     fi
 
-    if [[ $new_count -gt 0 ]]; then
-        echo "[$(date +%H:%M:%S)] $new_count new message(s)"
+    # Ack-after-success delivery (codex acceptance gate, #29 blocker 3):
+    # message BODIES are durably in $NEW_FILE, so nothing is lost when a
+    # wake aborts (human active / focus failure) - but the old condition
+    # only attempted a wake on cycles with NEW messages, so one failed
+    # wake stalled delivery until the next unrelated message arrived.
+    # Retry the wake on EVERY cycle while undelivered content is pending.
+    if [[ $new_count -gt 0 || -s "$NEW_FILE" ]]; then
+        if [[ $new_count -gt 0 ]]; then
+            echo "[$(date +%H:%M:%S)] $new_count new message(s)"
+        else
+            echo "[$(date +%H:%M:%S)] undelivered messages pending in $NEW_FILE - retrying wake"
+        fi
         if [[ -x "$WAKE_SCRIPT" ]]; then
             if can_wake_now; then
                 if ! CLAUDEMB_SESSION="$WAKE_SESSION" "$WAKE_SCRIPT" "$NUDGE_TEXT"; then
-                    echo "[$(date +%H:%M:%S)] wake failed: target session '$WAKE_SESSION' not found (exact match required)"
+                    echo "[$(date +%H:%M:%S)] wake NOT DELIVERED (human active, focus failure, or session missing) - retrying next cycle"
                 fi
             else
                 echo "[$(date +%H:%M:%S)] wake skipped: cooldown active (${WAKE_COOLDOWN_SEC}s)"

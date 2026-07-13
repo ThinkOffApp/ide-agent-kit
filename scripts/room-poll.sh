@@ -39,16 +39,46 @@ if [ ! -f "$CHECK_SCRIPT" ]; then
     exit 1
 fi
 
+# Durable-retry marker (codex acceptance gate, #29 blocker 3): the check
+# script advances its seen-set when it reports NEW, so a skipped/failed
+# nudge would otherwise be consumed-but-never-delivered. Persist the
+# pending state and keep retrying until a nudge fully lands.
+PENDING_FILE="${IAK_NUDGE_PENDING_FILE:-/tmp/iak_nudge_pending}"
+GUARD="${IAK_IDLE_GUARD:-$SCRIPT_DIR/../tools/human-idle-guard.sh}"
+
 while true; do
     HAS_NEW=$(python3 "$CHECK_SCRIPT" 2>"$ERR_LOG")
     echo "[$(date -u +%FT%TZ)] Poll result: $HAS_NEW"
 
     if [ "$HAS_NEW" = "NEW" ]; then
+        touch "$PENDING_FILE"
+    fi
+
+    if [ -f "$PENDING_FILE" ]; then
         if tmux has-session -t "$TMUX_SESSION" 2>/dev/null; then
-            tmux send-keys -t "$TMUX_SESSION" -l "$NUDGE_TEXT"
-            sleep 0.3
-            tmux send-keys -t "$TMUX_SESSION" Enter
-            echo "[$(date -u +%FT%TZ)] Sent short nudge"
+            # Never type over the human (petrus 2026-07-13): tmux send-keys
+            # lands in the pane regardless of window focus, so if the human
+            # is typing in that terminal this shreds their input. Guard
+            # before EACH injection; a skipped nudge stays pending and
+            # retries next cycle.
+            if ! "$GUARD"; then
+                echo "[$(date -u +%FT%TZ)] nudge deferred: human active - retrying next cycle"
+            else
+                tmux send-keys -t "$TMUX_SESSION" -l "$NUDGE_TEXT"
+                sleep 0.3
+                if "$GUARD"; then
+                    tmux send-keys -t "$TMUX_SESSION" Enter
+                    rm -f "$PENDING_FILE"
+                    echo "[$(date -u +%FT%TZ)] Sent short nudge"
+                else
+                    # Human became active in the 300ms window: withhold Enter
+                    # rather than firing it into their flow, and erase the
+                    # nudge text we just typed (C-u clears the input line)
+                    # so the pending retry doesn't double-type it.
+                    tmux send-keys -t "$TMUX_SESSION" C-u
+                    echo "[$(date -u +%FT%TZ)] Enter withheld: human became active mid-nudge; input line cleared"
+                fi
+            fi
         else
             echo "[$(date -u +%FT%TZ)] tmux session not found: $TMUX_SESSION"
         fi

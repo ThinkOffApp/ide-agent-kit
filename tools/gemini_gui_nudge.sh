@@ -21,10 +21,27 @@ if ! command -v osascript >/dev/null 2>&1; then
   exit 1
 fi
 
-osascript - "$APP_NAME" "$PROMPT_TEXT" <<'APPLESCRIPT'
+GUARD="$REPO_ROOT/tools/human-idle-guard.sh"
+
+osascript - "$APP_NAME" "$PROMPT_TEXT" "$GUARD" <<'APPLESCRIPT'
+-- Point-of-injection recheck (codex acceptance gate, #29 blocker 1): the
+-- focus loop below burns up to 7.5s after the entry guard passed; the human
+-- can return in that window. Re-verify fresh human-idle immediately before
+-- the FIRST injection. Fail closed. (No recheck after our own keystrokes -
+-- they reset HIDIdleTime and would always false-abort.)
+on idleOk(guardPath)
+  try
+    do shell script "IDLE_THRESHOLD_S=5 " & quoted form of guardPath
+    return true
+  on error
+    return false
+  end try
+end idleOk
+
 on run argv
   set appName to item 1 of argv
   set promptText to item 2 of argv
+  set guardPath to item 3 of argv
 
   -- v0.7.2 — process-targeted keystroke (matches scripts/claudemb-wake.sh).
   --
@@ -54,6 +71,9 @@ on run argv
   on error
   end try
   if promptAlreadyTyped then
+    if not idleOk(guardPath) then
+      error "gui_nudge: human active at pre-Enter (prompt already typed)" number 86
+    end if
     log "gui_nudge: prompt already typed - sending Enter"
     tell application "System Events"
       tell process appName
@@ -119,6 +139,9 @@ on run argv
     error "gui_nudge could not bring " & appName & " to front" number 100
   end if
 
+  if not idleOk(guardPath) then
+    error "gui_nudge: human active at pre-keystroke (after focus loop)" number 86
+  end if
   try
     tell application "System Events"
       tell process appName

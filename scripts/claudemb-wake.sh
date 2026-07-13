@@ -64,6 +64,8 @@ if [ -f "$HEARTBEAT" ]; then
   fi
 fi
 
+GUARD="$REPO_ROOT/tools/human-idle-guard.sh"
+
 {
   printf "[%s] wake: sending nudge to '%s' app (no focus steal): %s\n" "$(date -u +%FT%TZ)" "$APP_NAME" "$MSG"
   # v0.7.1 — process-targeted keystroke + verify-then-log fallback.
@@ -79,10 +81,32 @@ fi
   # `tell process "$APP_NAME"`. Then a post-keystroke verify check logs
   # WARN when frontmost app != target so we have a paper trail for any
   # remaining edge cases.
-  osascript - "$APP_NAME" "$MSG" <<'APPLESCRIPT'
+  osascript - "$APP_NAME" "$MSG" "$GUARD" <<'APPLESCRIPT'
+-- Point-of-injection recheck (codex acceptance gate, #29 blocker 1): the
+-- entry --wait guard passed SECONDS ago, but the focus loop below burns up
+-- to ~3.5s in which the human can come back. Re-verify a fresh human-idle
+-- window immediately before EVERY keystroke/Enter. 5s threshold: catches a
+-- human who just touched the keyboard without re-requiring the full 60s.
+-- Fail CLOSED: guard unreadable/erroring = treat as human-active.
+on idleOk(guardPath)
+  try
+    do shell script "IDLE_THRESHOLD_S=5 " & quoted form of guardPath
+    return true
+  on error
+    return false
+  end try
+end idleOk
+
+-- Abort so osascript exits NON-ZERO: the bash wrapper must exit 1 so the
+-- caller does not mark the message delivered (ack-after-success).
+on abortHumanActive(spot)
+  error "IAK_ABORT_HUMAN_ACTIVE at " & spot number 86
+end abortHumanActive
+
 on run argv
   set appName to item 1 of argv
   set promptText to item 2 of argv
+  set guardPath to item 3 of argv
 
   -- Remember which app has focus so we can restore it.
   tell application "System Events"
@@ -122,6 +146,7 @@ on run argv
     -- silently drop every wake forever.
   end try
   if promptAlreadyTyped then
+    if not idleOk(guardPath) then abortHumanActive("pre-Enter (prompt already typed)")
     log "wake: prompt already typed - sending Enter"
     tell application "System Events"
       tell process appName
@@ -185,17 +210,18 @@ on run argv
   end repeat
 
   if not focusOk then
-    log "wake: focus loop exhausted after 8 attempts; sending keystroke anyway (better to risk wrong-app than drop wake)"
-    -- v0.8.5 fallback: blast the keystroke. If it lands in the wrong
-    -- app, the WARN below logs it; if it lands in Claude (frontmost
-    -- check is racy and can lie), we get the wake. Either way is
-    -- better than the silent 100%-drop we had under v0.8.4.
+    -- Convergence branch: the old v0.8.5 "blast the keystroke anyway"
+    -- fallback typed into whatever was frontmost - possibly the human's
+    -- editor. With ack-after-success delivery (the caller retries when we
+    -- exit non-zero) dropping this attempt is now SAFE, so bail instead.
+    abortHumanActive("focus loop exhausted - refusing wrong-app keystroke")
   end if
 
   -- Now we're sure Claude is frontmost. Keystroke.
   -- v0.7.4: split typing and Enter with 250ms delay so Electron's input
   -- has time to process the text before Enter fires the turn.
   set sendOk to false
+  if not idleOk(guardPath) then abortHumanActive("pre-keystroke (after focus loop)")
   try
     tell application "System Events"
       tell process appName
@@ -246,6 +272,9 @@ on run argv
           set reEnterAttempts to reEnterAttempts + 1
         end repeat
         if reEnterOk then
+          -- No idle recheck here: our own keystroke promptText just reset
+          -- HIDIdleTime, so a recheck would always false-abort. The
+          -- collision-relevant gate is before the FIRST injection above.
           tell application "System Events"
             tell process appName
               key code 36
@@ -257,6 +286,8 @@ on run argv
           log "wake: ABORT Enter — could not reclaim " & appName & " focus after 5 retries (text typed but no Enter; user can press it manually)"
         end if
       else
+        -- No idle recheck (see focus-reclaim branch note: our own typing
+        -- reset HIDIdleTime 250ms ago).
         tell application "System Events"
           tell process appName
             key code 36
@@ -266,6 +297,10 @@ on run argv
       end if
     end try
   on error errMsg number errNum
+    -- The human-active abort must NOT be swallowed here: re-raise so
+    -- osascript exits non-zero and the caller retries instead of marking
+    -- the message delivered.
+    if errNum is 86 then error errMsg number errNum
     log "wake: keystroke failed — " & errNum & " " & errMsg
     if errNum is 1002 then
       log "wake: HINT — accessibility permission revoked. System Settings → Privacy & Security → Accessibility → toggle osascript / Terminal off+on."
@@ -277,5 +312,10 @@ on run argv
   tell application frontApp to activate
 end run
 APPLESCRIPT
+  osa_rc=$?
+  if [ "$osa_rc" -ne 0 ]; then
+    printf "[%s] wake: NOT DELIVERED (osascript rc=%s, human-active abort or keystroke failure) - caller should retry\n" "$(date -u +%FT%TZ)" "$osa_rc"
+    exit 1
+  fi
   printf "[%s] wake: nudge sent, focus restored\n" "$(date -u +%FT%TZ)"
 } >> "$LOG_FILE" 2>&1
