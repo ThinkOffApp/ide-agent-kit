@@ -1,4 +1,13 @@
 #!/usr/bin/env bash
+
+# Never type over the human (petrus 2026-07-13: "tmux should not write if i
+# am writing!"). Skip this nudge cycle unless the machine is human-idle.
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+if ! "$REPO_ROOT/tools/human-idle-guard.sh"; then
+    echo "skipping nudge: human recently active" >&2
+    exit 0
+fi
+
 set -euo pipefail
 
 APP_NAME="${IAK_CODEX_APP_NAME:-Codex}"
