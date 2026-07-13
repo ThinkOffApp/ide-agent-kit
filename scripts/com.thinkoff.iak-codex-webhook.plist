@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  launchd wiring for the codex webhook supervisor (codex review of IAK PR #28:
+  without this, process death or reboot leaves the wake path silently dead).
+
+  Install:
+    cp scripts/com.thinkoff.iak-codex-webhook.plist ~/Library/LaunchAgents/
+    launchctl load ~/Library/LaunchAgents/com.thinkoff.iak-codex-webhook.plist
+
+  KeepAlive restarts the supervisor if it dies; the supervisor's own
+  single-instance guard makes a race between launchd and a manual start safe.
+-->
+<!-- Install: copy to ~/Library/LaunchAgents and replace REPLACE_WITH_IAK_ROOT
+     with your ide-agent-kit checkout path (launchd cannot expand $HOME):
+     sed "s|REPLACE_WITH_IAK_ROOT|$HOME/ide-agent-kit|" ... (#30 gate, B3) -->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.thinkoff.iak-codex-webhook</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>REPLACE_WITH_IAK_ROOT/scripts/codex-webhook-supervisor.sh</string>
+  </array>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>StandardOutPath</key>
+  <string>/tmp/codex-webhook-supervisor.launchd.log</string>
+  <key>StandardErrorPath</key>
+  <string>/tmp/codex-webhook-supervisor.launchd.log</string>
+  <key>ThrottleInterval</key>
+  <integer>30</integer>
+</dict>
+</plist>

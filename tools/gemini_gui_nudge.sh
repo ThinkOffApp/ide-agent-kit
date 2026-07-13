@@ -1,4 +1,16 @@
 #!/usr/bin/env bash
+
+# Never type over the human (petrus 2026-07-13: "tmux should not write if i
+# am writing!"). Skip this nudge cycle unless the machine is human-idle.
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# WAIT for an idle window rather than skipping: by the time this script runs
+# the poller has marked the message seen, so skipping would consume it
+# undelivered. Exit 1 on timeout so the caller's failure path applies.
+if ! "$REPO_ROOT/tools/human-idle-guard.sh" --wait 300; then
+    echo "nudge aborted: human continuously active" >&2
+    exit 1
+fi
+
 set -euo pipefail
 
 APP_NAME="${IAK_GEMINI_APP_NAME:-Claude}"
@@ -9,10 +21,45 @@ if ! command -v osascript >/dev/null 2>&1; then
   exit 1
 fi
 
-osascript - "$APP_NAME" "$PROMPT_TEXT" <<'APPLESCRIPT'
+GUARD="$REPO_ROOT/tools/human-idle-guard.sh"
+
+osascript - "$APP_NAME" "$PROMPT_TEXT" "$GUARD" <<'APPLESCRIPT'
+-- Point-of-injection recheck (codex acceptance gate, #29 blocker 1): the
+-- focus loop below burns up to 7.5s after the entry guard passed; the human
+-- can return in that window. Re-verify fresh human-idle immediately before
+-- the FIRST injection. Fail closed. (No recheck after our own keystrokes -
+-- they reset HIDIdleTime and would always false-abort.)
+on idleOk(guardPath)
+  try
+    do shell script "IDLE_THRESHOLD_S=5 " & quoted form of guardPath
+    return true
+  on error
+    return false
+  end try
+end idleOk
+
 on run argv
   set appName to item 1 of argv
   set promptText to item 2 of argv
+  set guardPath to item 3 of argv
+
+  -- M1 (#30 gate): remember the human's app and restore it on ANY abort -
+  -- previously an error path left focus stolen on the agent app, so the
+  -- returning human typed into it (the original incident inverted).
+  tell application "System Events"
+    set frontApp to name of first application process whose frontmost is true
+  end tell
+  try
+    doWake(appName, promptText, guardPath)
+  on error errMsg number errNum
+    try
+      tell application frontApp to activate
+    end try
+    error errMsg number errNum
+  end try
+end run
+
+on doWake(appName, promptText, guardPath)
 
   -- v0.7.2 — process-targeted keystroke (matches scripts/claudemb-wake.sh).
   --
@@ -42,6 +89,9 @@ on run argv
   on error
   end try
   if promptAlreadyTyped then
+    if not idleOk(guardPath) then
+      error "gui_nudge: human active at pre-Enter (prompt already typed)" number 86
+    end if
     log "gui_nudge: prompt already typed - sending Enter"
     tell application "System Events"
       tell process appName
@@ -77,6 +127,11 @@ on run argv
   set focusOk to false
   set focusAttempts to 0
   repeat while focusAttempts < 15
+    -- M1 (#30 gate): if the human returns during this up-to-7.5s loop,
+    -- abort instead of wrestling them for focus.
+    if not idleOk(guardPath) then
+      error "gui_nudge: human returned during focus loop" number 86
+    end if
     try
       tell application "System Events"
         tell process appName
@@ -107,6 +162,9 @@ on run argv
     error "gui_nudge could not bring " & appName & " to front" number 100
   end if
 
+  if not idleOk(guardPath) then
+    error "gui_nudge: human active at pre-keystroke (after focus loop)" number 86
+  end if
   try
     tell application "System Events"
       tell process appName
@@ -120,7 +178,12 @@ on run argv
         set midFront to name of first application process whose frontmost is true
       end tell
       if midFront is not appName then
-        log "gui_nudge: WARN — focus left " & appName & " mid-keystroke (now " & midFront & "); skipping Enter"
+        -- M2-consistency (#30 gate): focus loss after typing aborts (86)
+        -- instead of silently skipping Enter with exit 0 - the caller
+        -- retries and the promptAlreadyTyped branch delivers Enter once
+        -- the machine is idle. Exit-0-on-skip marked undelivered wakes
+        -- as delivered.
+        error "gui_nudge: focus left " & appName & " mid-keystroke (now " & midFront & ")" number 86
       else
         tell application "System Events"
           tell process appName
@@ -128,12 +191,17 @@ on run argv
           end tell
         end tell
       end if
+    on error errMsg number errNum
+      -- bare try would SWALLOW the 86 abort raised above; re-raise it and
+      -- tolerate only genuine midFront-check failures.
+      if errNum is 86 then error errMsg number errNum
     end try
   on error errMsg number errNum
+    if errNum is 86 then error errMsg number errNum
     log "gui_nudge: keystroke failed — " & errNum & " " & errMsg
     if errNum is 1002 then
       log "gui_nudge: HINT — accessibility permission revoked. Re-grant in System Settings → Privacy & Security → Accessibility."
     end if
   end try
-end run
+end doWake
 APPLESCRIPT

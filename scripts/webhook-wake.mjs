@@ -14,7 +14,10 @@
 //
 // Env: WEBHOOK_WAKE_SECRET (required), WEBHOOK_WAKE_PORT (default 8790),
 //      WEBHOOK_WAKE_SCRIPT (default ../scripts/claudemb-wake.sh),
-//      WEBHOOK_WAKE_SELF (default "@claudeMB" — skip own messages)
+//      WEBHOOK_WAKE_SELF (default "@claudeMB" — skip own messages),
+//      WEBHOOK_WAKE_OWNER (optional owner handle; wake for their messages),
+//      WEBHOOK_WAKE_MENTIONS (optional comma-separated handles to wake for),
+//      WEBHOOK_WAKE_LOG (default /tmp/webhook-wake.log)
 import http from 'node:http';
 import { execFile } from 'node:child_process';
 import { appendFileSync } from 'node:fs';
@@ -28,9 +31,23 @@ if (!SECRET || SECRET.length < 16) {
 }
 const PORT = Number(process.env.WEBHOOK_WAKE_PORT || 8790);
 const SELF = (process.env.WEBHOOK_WAKE_SELF || '@claudeMB').toLowerCase();
+const OWNER = (process.env.WEBHOOK_WAKE_OWNER || '').toLowerCase().replace(/^@/, '');
+const MENTIONS = (process.env.WEBHOOK_WAKE_MENTIONS || '')
+  .split(',').map((s) => s.trim().toLowerCase()).filter(Boolean);
 const WAKE = process.env.WEBHOOK_WAKE_SCRIPT ||
   path.join(path.dirname(fileURLToPath(import.meta.url)), 'claudemb-wake.sh');
-const LOG = '/tmp/webhook-wake.log';
+const LOG = process.env.WEBHOOK_WAKE_LOG || '/tmp/webhook-wake.log';
+
+const textValue = (value, keys = ['handle', 'slug', 'name', 'body', 'text', 'content']) => {
+  if (value == null) return '';
+  if (typeof value === 'string' || typeof value === 'number') return String(value);
+  if (typeof value === 'object') {
+    for (const key of keys) {
+      if (value[key] != null) return textValue(value[key], keys);
+    }
+  }
+  return '';
+};
 
 const log = (line) => {
   const entry = `${new Date().toISOString()} ${line}\n`;
@@ -60,14 +77,25 @@ const server = http.createServer((req, res) => {
     let from = '', body = '', room = '';
     try {
       const p = JSON.parse(raw);
-      from = String(p.from ?? p.sender ?? p.handle ?? '');
-      body = String(p.body ?? p.message ?? p.text ?? '');
-      room = String(p.room ?? p.room_slug ?? '');
+      const message = p.message && typeof p.message === 'object' ? p.message : p;
+      from = textValue(message.from ?? message.sender ?? message.handle ?? p.from ?? p.sender);
+      body = textValue(message.body ?? message.text ?? message.content ?? p.body ?? p.text);
+      room = textValue(message.room ?? message.room_slug ?? p.room ?? p.room_slug);
     } catch { /* non-JSON payload: still wake */ }
     log(`event room=${room} from=${from} bytes=${raw.length} body=${body.slice(0, 120).replace(/\n/g, ' ')}`);
     if (from.toLowerCase() === SELF) return log('skip: own message');
+    if (OWNER || MENTIONS.length) {
+      const sender = from.toLowerCase().replace(/^@/, '');
+      const lowerBody = body.toLowerCase();
+      const wanted = (OWNER && sender === OWNER) || MENTIONS.some((mention) => lowerBody.includes(mention));
+      if (!wanted) return log('skip: not owner/mention');
+    }
     if (rateLimited()) return log('skip: rate limited');
-    execFile('bash', [WAKE, 'check rooms'], { timeout: 30_000 }, (err) =>
+    // 320s: the wake script's human-idle guard legitimately waits up to
+    // 300s for an idle window (#30 gate, B2). The old 30s kill SIGTERMed
+    // the wait and could orphan a mid-flight osascript that typed AFTER
+    // we logged failure.
+    execFile('bash', [WAKE, 'check rooms'], { timeout: 320_000 }, (err) =>
       log(err ? `wake error: ${err.message}` : 'wake fired'));
   });
 });

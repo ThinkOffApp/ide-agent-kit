@@ -1,4 +1,16 @@
 #!/usr/bin/env bash
+
+# Never type over the human (petrus 2026-07-13: "tmux should not write if i
+# am writing!"). Skip this nudge cycle unless the machine is human-idle.
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# WAIT for an idle window rather than skipping: by the time this script runs
+# the poller has marked the message seen, so skipping would consume it
+# undelivered. Exit 1 on timeout so the caller's failure path applies.
+if ! "$REPO_ROOT/tools/human-idle-guard.sh" --wait 300; then
+    echo "nudge aborted: human continuously active" >&2
+    exit 1
+fi
+
 # ClaudeMB wake-up script
 # Uses osascript to send a nudge into the Claude Code desktop app
 # then restores focus to the previously active app (no focus steal).
@@ -52,6 +64,8 @@ if [ -f "$HEARTBEAT" ]; then
   fi
 fi
 
+GUARD="$REPO_ROOT/tools/human-idle-guard.sh"
+
 {
   printf "[%s] wake: sending nudge to '%s' app (no focus steal): %s\n" "$(date -u +%FT%TZ)" "$APP_NAME" "$MSG"
   # v0.7.1 — process-targeted keystroke + verify-then-log fallback.
@@ -67,16 +81,56 @@ fi
   # `tell process "$APP_NAME"`. Then a post-keystroke verify check logs
   # WARN when frontmost app != target so we have a paper trail for any
   # remaining edge cases.
-  osascript - "$APP_NAME" "$MSG" <<'APPLESCRIPT'
+  # if-condition form: under set -e a bare failing osascript would exit the
+  # script before the rc check below ever ran (#30 gate, medium).
+  osa_rc=0
+  osascript - "$APP_NAME" "$MSG" "$GUARD" <<'APPLESCRIPT' || osa_rc=$?
+-- Point-of-injection recheck (codex acceptance gate, #29 blocker 1): the
+-- entry --wait guard passed SECONDS ago, but the focus loop below burns up
+-- to ~3.5s in which the human can come back. Re-verify a fresh human-idle
+-- window immediately before EVERY keystroke/Enter. 5s threshold: catches a
+-- human who just touched the keyboard without re-requiring the full 60s.
+-- Fail CLOSED: guard unreadable/erroring = treat as human-active.
+on idleOk(guardPath)
+  try
+    do shell script "IDLE_THRESHOLD_S=5 " & quoted form of guardPath
+    return true
+  on error
+    return false
+  end try
+end idleOk
+
+-- Abort so osascript exits NON-ZERO: the bash wrapper must exit 1 so the
+-- caller does not mark the message delivered (ack-after-success).
+on abortHumanActive(spot)
+  error "IAK_ABORT_HUMAN_ACTIVE at " & spot number 86
+end abortHumanActive
+
 on run argv
   set appName to item 1 of argv
   set promptText to item 2 of argv
+  set guardPath to item 3 of argv
 
   -- Remember which app has focus so we can restore it.
   tell application "System Events"
     set frontApp to name of first application process whose frontmost is true
   end tell
 
+  -- M1 (#30 gate): abort paths used to raise AFTER the focus loop stole
+  -- focus, skipping the frontApp restore at the bottom - so the returning
+  -- human's next keystrokes landed in the agent app: the original incident
+  -- inverted. Every error now restores the human's app before propagating.
+  try
+    doWake(appName, promptText, guardPath, frontApp)
+  on error errMsg number errNum
+    try
+      tell application frontApp to activate
+    end try
+    error errMsg number errNum
+  end try
+end run
+
+on doWake(appName, promptText, guardPath, frontApp)
   -- v0.8.2 — skip the wake ONLY when the user is actively typing
   -- (text already in the prompt input), not just because they have
   -- Claude.app focused. v0.7.5 used frontmost-app as the proxy and
@@ -110,6 +164,7 @@ on run argv
     -- silently drop every wake forever.
   end try
   if promptAlreadyTyped then
+    if not idleOk(guardPath) then abortHumanActive("pre-Enter (prompt already typed)")
     log "wake: prompt already typed - sending Enter"
     tell application "System Events"
       tell process appName
@@ -148,6 +203,10 @@ on run argv
   set focusOk to false
   set focusAttempts to 0
   repeat while focusAttempts < 8
+    -- M1 (#30 gate): idle-gate every focus-loop iteration. If the human
+    -- returns during this ~3.5s loop, stop wrestling them for focus and
+    -- abort (the wrapper restores their app; the caller retries later).
+    if not idleOk(guardPath) then abortHumanActive("human returned during focus loop")
     try
       -- Re-activate every iteration; some macOS states need it again.
       tell application appName to activate
@@ -173,17 +232,18 @@ on run argv
   end repeat
 
   if not focusOk then
-    log "wake: focus loop exhausted after 8 attempts; sending keystroke anyway (better to risk wrong-app than drop wake)"
-    -- v0.8.5 fallback: blast the keystroke. If it lands in the wrong
-    -- app, the WARN below logs it; if it lands in Claude (frontmost
-    -- check is racy and can lie), we get the wake. Either way is
-    -- better than the silent 100%-drop we had under v0.8.4.
+    -- Convergence branch: the old v0.8.5 "blast the keystroke anyway"
+    -- fallback typed into whatever was frontmost - possibly the human's
+    -- editor. With ack-after-success delivery (the caller retries when we
+    -- exit non-zero) dropping this attempt is now SAFE, so bail instead.
+    abortHumanActive("focus loop exhausted - refusing wrong-app keystroke")
   end if
 
   -- Now we're sure Claude is frontmost. Keystroke.
   -- v0.7.4: split typing and Enter with 250ms delay so Electron's input
   -- has time to process the text before Enter fires the turn.
   set sendOk to false
+  if not idleOk(guardPath) then abortHumanActive("pre-keystroke (after focus loop)")
   try
     tell application "System Events"
       tell process appName
@@ -199,52 +259,19 @@ on run argv
         set midFront to name of first application process whose frontmost is true
       end tell
       if midFront is not appName then
-        log "wake: focus left " & appName & " mid-keystroke (now " & midFront & "); re-activating before Enter"
-        -- v0.8.7 — petrus 2026-05-04: simultaneous wakes from claudemb +
-        -- codex pollers race for focus. Codex.app grabs focus between
-        -- my keystroke and Enter, so v0.8.5 SKIPPED Enter — text
-        -- landed in Claude's input box but the turn never started.
-        -- Petrus saw "all pollers down" because no agent responded.
-        --
-        -- Fix: re-activate Claude (up to 5 attempts), then send Enter.
-        -- If we can't reclaim focus, log + skip (prevents wrong-app
-        -- Enter trigger). Net: most cases now succeed, edge cases
-        -- still safely drop one wake.
-        set reEnterOk to false
-        set reEnterAttempts to 0
-        repeat while reEnterAttempts < 5
-          try
-            tell application appName to activate
-            tell application "System Events"
-              tell process appName
-                set frontmost to true
-              end tell
-            end tell
-          end try
-          delay 0.3
-          try
-            tell application "System Events"
-              set checkFront to name of first application process whose frontmost is true
-            end tell
-            if checkFront is appName then
-              set reEnterOk to true
-              exit repeat
-            end if
-          end try
-          set reEnterAttempts to reEnterAttempts + 1
-        end repeat
-        if reEnterOk then
-          tell application "System Events"
-            tell process appName
-              key code 36
-            end tell
-          end tell
-          set sendOk to true
-          log "wake: Enter sent after focus reclaim (" & reEnterAttempts & " retries)"
-        else
-          log "wake: ABORT Enter — could not reclaim " & appName & " focus after 5 retries (text typed but no Enter; user can press it manually)"
-        end if
+        -- M2 (#30 gate): the old v0.8.7 branch wrestled focus back for up
+        -- to 1.5s and fired Enter with NO human heuristic - if the focus
+        -- thief was the HUMAN (a click, not a racing poller), we yanked
+        -- their app away and hit Enter. Focus loss after typing is now an
+        -- abort: the text stays in the agent's input box, the wrapper
+        -- restores the human's app, the caller retries, and the retry's
+        -- promptAlreadyTyped branch (idle-gated) delivers the Enter once
+        -- the machine is genuinely idle again. Racing-poller wakes are
+        -- delayed one cycle; humans are never fought for focus.
+        abortHumanActive("focus left " & appName & " mid-keystroke (now " & midFront & ")")
       else
+        -- No idle recheck (see focus-reclaim branch note: our own typing
+        -- reset HIDIdleTime 250ms ago).
         tell application "System Events"
           tell process appName
             key code 36
@@ -252,8 +279,16 @@ on run argv
         end tell
         set sendOk to true
       end if
+    on error errMsg number errNum
+      -- a bare inner try would SWALLOW the 86 abort raised above; re-raise
+      -- it and tolerate only genuine midFront-check failures.
+      if errNum is 86 then error errMsg number errNum
     end try
   on error errMsg number errNum
+    -- The human-active abort must NOT be swallowed here: re-raise so
+    -- osascript exits non-zero and the caller retries instead of marking
+    -- the message delivered.
+    if errNum is 86 then error errMsg number errNum
     log "wake: keystroke failed — " & errNum & " " & errMsg
     if errNum is 1002 then
       log "wake: HINT — accessibility permission revoked. System Settings → Privacy & Security → Accessibility → toggle osascript / Terminal off+on."
@@ -263,7 +298,11 @@ on run argv
   delay 0.2
   -- Restore focus to whatever the user was actually in.
   tell application frontApp to activate
-end run
+end doWake
 APPLESCRIPT
+  if [ "$osa_rc" -ne 0 ]; then
+    printf "[%s] wake: NOT DELIVERED (osascript rc=%s, human-active abort or keystroke failure) - caller should retry\n" "$(date -u +%FT%TZ)" "$osa_rc"
+    exit 1
+  fi
   printf "[%s] wake: nudge sent, focus restored\n" "$(date -u +%FT%TZ)"
 } >> "$LOG_FILE" 2>&1
