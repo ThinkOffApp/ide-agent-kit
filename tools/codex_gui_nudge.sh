@@ -6,6 +6,8 @@ PROMPT_TEXT="${IAK_NUDGE_TEXT:-check room and respond [codex]}"
 LOG_FILE="${IAK_CODEX_NUDGE_LOG:-/tmp/codex_gui_nudge.log}"
 CLICLICK_BIN="${IAK_CLICLICK_BIN:-/opt/homebrew/bin/cliclick}"
 PYTHON_BIN="${IAK_PYTHON_BIN:-/opt/homebrew/bin/python3}"
+HUMAN_IDLE_SEC="${IAK_HUMAN_IDLE_SEC:-60}"
+HUMAN_IDLE_CHECK="${IAK_HUMAN_IDLE_CHECK:-$(dirname "$0")/macos_human_idle.py}"
 
 if ! command -v osascript >/dev/null 2>&1; then
   echo "osascript not found" >&2
@@ -33,6 +35,31 @@ if [ "$LOCK_STATE" != "unlocked" ]; then
   printf '[%s] codex_gui_nudge: ABORT screen %s - refusing to type\n' "$(date -u +%FT%TZ)" "$LOCK_STATE" >>"$LOG_FILE"
   exit 0
 fi
+
+# GUI injection is a last-resort wake path. Never focus, click, paste, or press
+# Enter while the human has used the keyboard or pointer in the last minute.
+# Unknown idle state fails closed. Recheck immediately before each injection to
+# close the race where the human starts typing while Codex is being focused.
+require_human_idle() {
+  local phase="$1" idle_seconds rc
+  if [ ! -x "$LOCK_PY" ] || [ ! -f "$HUMAN_IDLE_CHECK" ]; then
+    printf '[%s] codex_gui_nudge: ABORT human-idle check unavailable at %s\n' "$(date -u +%FT%TZ)" "$phase" >>"$LOG_FILE"
+    return 1
+  fi
+  if idle_seconds=$("$LOCK_PY" "$HUMAN_IDLE_CHECK" "$HUMAN_IDLE_SEC" 2>/dev/null); then
+    return 0
+  else
+    rc=$?
+  fi
+  if [ "$rc" -eq 1 ] && [ -n "$idle_seconds" ]; then
+    printf '[%s] codex_gui_nudge: ABORT human active at %s (idle=%ss, required=%ss)\n' "$(date -u +%FT%TZ)" "$phase" "$idle_seconds" "$HUMAN_IDLE_SEC" >>"$LOG_FILE"
+  else
+    printf '[%s] codex_gui_nudge: ABORT human-idle state unknown at %s\n' "$(date -u +%FT%TZ)" "$phase" >>"$LOG_FILE"
+  fi
+  return 1
+}
+
+require_human_idle "wake start" || exit 0
 
 # Prefer cliclick for background wakes. launchd's /usr/bin/osascript process is
 # not necessarily granted Accessibility access even when Terminal is, while the
@@ -79,6 +106,7 @@ PY
   if read -r WIN_X WIN_Y WIN_W WIN_H <<<"$WINDOW_BOUNDS" && [ -n "${WIN_H:-}" ]; then
     CLICK_X=$((WIN_X + WIN_W / 2))
     CLICK_Y=$((WIN_Y + WIN_H - 72))
+    require_human_idle "before cliclick injection" || exit 0
     if "$CLICLICK_BIN" -r -w 20 "c:${CLICK_X},${CLICK_Y}" "t:${PROMPT_TEXT}" kp:return; then
       printf '[%s] codex_gui_nudge: sent via cliclick x=%s y=%s\n' "$(date -u +%FT%TZ)" "$CLICK_X" "$CLICK_Y" >>"$LOG_FILE"
       exit 0
@@ -87,11 +115,16 @@ PY
   printf '[%s] codex_gui_nudge: cliclick path unavailable; falling back to AppleScript\n' "$(date -u +%FT%TZ)" >>"$LOG_FILE"
 fi
 
-osascript - "$APP_NAME" "$PROMPT_TEXT" "$LOG_FILE" <<'APPLESCRIPT'
+require_human_idle "before AppleScript wake" || exit 0
+
+osascript - "$APP_NAME" "$PROMPT_TEXT" "$LOG_FILE" "$LOCK_PY" "$HUMAN_IDLE_CHECK" "$HUMAN_IDLE_SEC" <<'APPLESCRIPT'
 on run argv
   set appName to item 1 of argv
   set promptText to item 2 of argv
   set logFile to item 3 of argv
+  set pythonBin to item 4 of argv
+  set idleCheck to item 5 of argv
+  set idleThreshold to item 6 of argv
 
   my writeLog(logFile, "applescript start")
 
@@ -143,6 +176,11 @@ on run argv
     error "could not focus " & appName number 1001
   end if
 
+  if not my humanIsIdle(pythonBin, idleCheck, idleThreshold) then
+    my writeLog(logFile, "ABORT human active or idle state unknown before AppleScript injection")
+    return
+  end if
+
   try
     tell application "System Events"
       tell process appName
@@ -177,6 +215,15 @@ on run argv
     error errMsg number errNum
   end try
 end run
+
+on humanIsIdle(pythonBin, idleCheck, idleThreshold)
+  try
+    do shell script quoted form of pythonBin & " " & quoted form of idleCheck & " " & quoted form of idleThreshold
+    return true
+  on error
+    return false
+  end try
+end humanIsIdle
 
 on writeLog(logFile, msg)
   do shell script "printf '[%s] %s\\n' \"$(date -u +%FT%TZ)\" " & quoted form of ("codex_gui_nudge: " & msg) & " >> " & quoted form of logFile
