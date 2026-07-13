@@ -41,6 +41,16 @@ fi
 if [ -x "$CLICLICK_BIN" ] && [ -x "$PYTHON_BIN" ] && "$PYTHON_BIN" -c 'import Quartz' >/dev/null 2>&1; then
   open -a "$APP_NAME"
   sleep 0.6
+  # Guard: only type if the target app is actually FRONTMOST. cliclick clicks
+  # window-relative coordinates, and when another window overlaps that point
+  # (or focus shifts between open and click) the nudge text lands in whatever
+  # is on top - observed leaking "check rooms [codex]" into a Claude Code CLI
+  # on Jul 13. Abort softly instead.
+  FRONT_APP=$(osascript -e 'tell application "System Events" to get name of first process whose frontmost is true' 2>/dev/null || echo unknown)
+  if [ "$FRONT_APP" != "$APP_NAME" ]; then
+    printf '[%s] codex_gui_nudge: ABORT frontmost is %q not %q - refusing to type\n' "$(date -u +%FT%TZ)" "$FRONT_APP" "$APP_NAME" >>"$LOG_FILE"
+    exit 0
+  fi
   WINDOW_BOUNDS=$("$PYTHON_BIN" - "$APP_NAME" <<'PY'
 import sys
 import Quartz
