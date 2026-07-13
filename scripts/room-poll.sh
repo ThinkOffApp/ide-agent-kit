@@ -64,19 +64,30 @@ while true; do
             if ! "$GUARD"; then
                 echo "[$(date -u +%FT%TZ)] nudge deferred: human active - retrying next cycle"
             else
-                tmux send-keys -t "$TMUX_SESSION" -l "$NUDGE_TEXT"
-                sleep 0.3
-                if "$GUARD"; then
-                    tmux send-keys -t "$TMUX_SESSION" Enter
-                    rm -f "$PENDING_FILE"
-                    echo "[$(date -u +%FT%TZ)] Sent short nudge"
+                # Pin the pane id BEFORE typing (#30 gate, medium): if the
+                # human switches the session's active pane between our
+                # keystrokes, session-targeted Enter/C-u would land in THEIR
+                # pane - C-u would wipe their input line. All three
+                # injections target the same resolved pane.
+                PANE_ID="$(tmux display-message -p -t "$TMUX_SESSION" '#{pane_id}' 2>/dev/null || true)"
+                if [ -z "$PANE_ID" ]; then
+                    echo "[$(date -u +%FT%TZ)] nudge deferred: cannot resolve pane id"
                 else
-                    # Human became active in the 300ms window: withhold Enter
-                    # rather than firing it into their flow, and erase the
-                    # nudge text we just typed (C-u clears the input line)
-                    # so the pending retry doesn't double-type it.
-                    tmux send-keys -t "$TMUX_SESSION" C-u
-                    echo "[$(date -u +%FT%TZ)] Enter withheld: human became active mid-nudge; input line cleared"
+                    tmux send-keys -t "$PANE_ID" -l "$NUDGE_TEXT"
+                    sleep 0.3
+                    if "$GUARD"; then
+                        tmux send-keys -t "$PANE_ID" Enter
+                        rm -f "$PENDING_FILE"
+                        echo "[$(date -u +%FT%TZ)] Sent short nudge"
+                    else
+                        # Human became active in the 300ms window: withhold
+                        # Enter rather than firing it into their flow, and
+                        # erase the nudge text we typed (C-u clears OUR
+                        # pinned pane's input line) so the retry doesn't
+                        # double-type it.
+                        tmux send-keys -t "$PANE_ID" C-u
+                        echo "[$(date -u +%FT%TZ)] Enter withheld: human became active mid-nudge; input line cleared"
+                    fi
                 fi
             fi
         else

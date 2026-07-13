@@ -21,6 +21,9 @@ NUDGE_TEXT="${NUDGE_TEXT:-check rooms}"
 WAKE_COOLDOWN_SEC="${WAKE_COOLDOWN_SEC:-45}"
 LAST_WAKE_FILE="${LAST_WAKE_FILE:-/tmp/claude-gui-last-wake.txt}"
 NEW_FILE="${NEW_FILE:-/tmp/iak-new-messages.txt}"
+# Timestamp of the last SUCCESSFUL wake: retries only fire for content newer
+# than this, so a session that is still starting up isn't re-nudged forever.
+WAKE_OK_FILE="${WAKE_OK_FILE:-/tmp/claude-gui-wake-ok.txt}"
 
 [[ -z "$API_KEY" ]] && { echo "ERROR: Set IAK_API_KEY" >&2; exit 1; }
 
@@ -89,7 +92,20 @@ while true; do
 
     # Retry the wake on every cycle while undelivered content is pending
     # (durable retry, #29 blocker 3) - not only on cycles with new IDs.
-    [[ -s "$NEW_FILE" ]] && do_wake
+    # B1 (claudemm gate review on #30): under set -e a bare `do_wake`
+    # returning 1 as the last command TERMINATES the poller - the shipped
+    # plist has KeepAlive=false, so one failed wake would kill the wake
+    # path permanently. Tolerate the failure; the retry is state-driven.
+    # Post-success re-nudge guard: only retry when NEW_FILE has content
+    # NEWER than the last successful wake, else a slow-to-start session
+    # gets re-nudged every cycle after a wake that already worked.
+    if [[ -s "$NEW_FILE" ]]; then
+        if [[ ! -f "$WAKE_OK_FILE" || "$NEW_FILE" -nt "$WAKE_OK_FILE" ]]; then
+            if do_wake; then
+                touch "$WAKE_OK_FILE"
+            fi
+        fi
+    fi
 
     sleep "$POLL_INTERVAL"
 done

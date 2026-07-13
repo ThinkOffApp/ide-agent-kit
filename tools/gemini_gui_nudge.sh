@@ -43,6 +43,24 @@ on run argv
   set promptText to item 2 of argv
   set guardPath to item 3 of argv
 
+  -- M1 (#30 gate): remember the human's app and restore it on ANY abort -
+  -- previously an error path left focus stolen on the agent app, so the
+  -- returning human typed into it (the original incident inverted).
+  tell application "System Events"
+    set frontApp to name of first application process whose frontmost is true
+  end tell
+  try
+    doWake(appName, promptText, guardPath)
+  on error errMsg number errNum
+    try
+      tell application frontApp to activate
+    end try
+    error errMsg number errNum
+  end try
+end run
+
+on doWake(appName, promptText, guardPath)
+
   -- v0.7.2 — process-targeted keystroke (matches scripts/claudemb-wake.sh).
   --
   -- The old `tell application "System Events" to keystroke` routed to
@@ -109,6 +127,11 @@ on run argv
   set focusOk to false
   set focusAttempts to 0
   repeat while focusAttempts < 15
+    -- M1 (#30 gate): if the human returns during this up-to-7.5s loop,
+    -- abort instead of wrestling them for focus.
+    if not idleOk(guardPath) then
+      error "gui_nudge: human returned during focus loop" number 86
+    end if
     try
       tell application "System Events"
         tell process appName
@@ -155,7 +178,12 @@ on run argv
         set midFront to name of first application process whose frontmost is true
       end tell
       if midFront is not appName then
-        log "gui_nudge: WARN — focus left " & appName & " mid-keystroke (now " & midFront & "); skipping Enter"
+        -- M2-consistency (#30 gate): focus loss after typing aborts (86)
+        -- instead of silently skipping Enter with exit 0 - the caller
+        -- retries and the promptAlreadyTyped branch delivers Enter once
+        -- the machine is idle. Exit-0-on-skip marked undelivered wakes
+        -- as delivered.
+        error "gui_nudge: focus left " & appName & " mid-keystroke (now " & midFront & ")" number 86
       else
         tell application "System Events"
           tell process appName
@@ -163,12 +191,17 @@ on run argv
           end tell
         end tell
       end if
+    on error errMsg number errNum
+      -- bare try would SWALLOW the 86 abort raised above; re-raise it and
+      -- tolerate only genuine midFront-check failures.
+      if errNum is 86 then error errMsg number errNum
     end try
   on error errMsg number errNum
+    if errNum is 86 then error errMsg number errNum
     log "gui_nudge: keystroke failed — " & errNum & " " & errMsg
     if errNum is 1002 then
       log "gui_nudge: HINT — accessibility permission revoked. Re-grant in System Settings → Privacy & Security → Accessibility."
     end if
   end try
-end run
+end doWake
 APPLESCRIPT

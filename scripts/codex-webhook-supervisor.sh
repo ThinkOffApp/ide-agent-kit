@@ -53,8 +53,10 @@ start_receiver(){
     WEBHOOK_WAKE_LOG="/tmp/codex-webhook-wake.log" \
     IAK_CODEX_APP_NAME="ChatGPT" \
     IAK_NUDGE_TEXT="check rooms [codex]" \
-      /usr/local/bin/node "$RECEIVER" >>/tmp/codex-webhook-wake.log 2>&1 &
-    log "receiver started"
+      NODE_BIN="$(command -v node || echo /usr/local/bin/node)"
+      "$NODE_BIN" "$RECEIVER" >>/tmp/codex-webhook-wake.log 2>&1 &
+      sleep 1
+      if kill -0 $! 2>/dev/null; then log "receiver started"; else log "receiver FAILED to start"; fi
   }
 }
 

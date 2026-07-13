@@ -45,7 +45,8 @@ else
 fi
 if [ "$LOCK_STATE" != "unlocked" ]; then
   printf '[%s] codex_gui_nudge: ABORT screen %s - refusing to type\n' "$(date -u +%FT%TZ)" "$LOCK_STATE" >>"$LOG_FILE"
-  exit 0
+  # M3 (#30 gate): abort = NOT delivered; exit 1 so the caller retries
+  exit 1
 fi
 
 # GUI injection is a last-resort wake path. Never focus, click, paste, or press
@@ -71,7 +72,7 @@ require_human_idle() {
   return 1
 }
 
-require_human_idle "wake start" || exit 0
+require_human_idle "wake start" || exit 1
 
 # Prefer cliclick for background wakes. launchd's /usr/bin/osascript process is
 # not necessarily granted Accessibility access even when Terminal is, while the
@@ -88,7 +89,7 @@ if [ -x "$CLICLICK_BIN" ] && [ -x "$PYTHON_BIN" ] && "$PYTHON_BIN" -c 'import Qu
   FRONT_APP=$(osascript -e 'tell application "System Events" to get name of first process whose frontmost is true' 2>/dev/null || echo unknown)
   if [ "$FRONT_APP" != "$APP_NAME" ]; then
     printf '[%s] codex_gui_nudge: ABORT frontmost is %q not %q - refusing to type\n' "$(date -u +%FT%TZ)" "$FRONT_APP" "$APP_NAME" >>"$LOG_FILE"
-    exit 0
+    exit 1
   fi
   WINDOW_BOUNDS=$("$PYTHON_BIN" - "$APP_NAME" <<'PY'
 import sys
@@ -118,7 +119,7 @@ PY
   if read -r WIN_X WIN_Y WIN_W WIN_H <<<"$WINDOW_BOUNDS" && [ -n "${WIN_H:-}" ]; then
     CLICK_X=$((WIN_X + WIN_W / 2))
     CLICK_Y=$((WIN_Y + WIN_H - 72))
-    require_human_idle "before cliclick injection" || exit 0
+    require_human_idle "before cliclick injection" || exit 1
     if "$CLICLICK_BIN" -r -w 20 "c:${CLICK_X},${CLICK_Y}" "t:${PROMPT_TEXT}" kp:return; then
       printf '[%s] codex_gui_nudge: sent via cliclick x=%s y=%s\n' "$(date -u +%FT%TZ)" "$CLICK_X" "$CLICK_Y" >>"$LOG_FILE"
       exit 0

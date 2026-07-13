@@ -91,7 +91,11 @@ const server = http.createServer((req, res) => {
       if (!wanted) return log('skip: not owner/mention');
     }
     if (rateLimited()) return log('skip: rate limited');
-    execFile('bash', [WAKE, 'check rooms'], { timeout: 30_000 }, (err) =>
+    // 320s: the wake script's human-idle guard legitimately waits up to
+    // 300s for an idle window (#30 gate, B2). The old 30s kill SIGTERMed
+    // the wait and could orphan a mid-flight osascript that typed AFTER
+    // we logged failure.
+    execFile('bash', [WAKE, 'check rooms'], { timeout: 320_000 }, (err) =>
       log(err ? `wake error: ${err.message}` : 'wake fired'));
   });
 });

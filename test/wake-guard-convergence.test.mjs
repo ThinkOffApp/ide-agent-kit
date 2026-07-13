@@ -80,6 +80,7 @@ function runRoomPollCycles({ guardFailures, cycles }) {
   const tmuxStub = path.join(dir, 'tmux');
   writeFileSync(tmuxStub, `#!/bin/sh
 if [ "$1" = "has-session" ]; then exit 0; fi
+if [ "$1" = "display-message" ]; then echo "%1"; exit 0; fi
 echo "$@" >> ${JSON.stringify(tmuxLog)}
 exit 0
 `);
@@ -159,6 +160,7 @@ test('room-poll: pre-Enter recheck failure sends C-u and retains pending', () =>
   const tmuxStub = path.join(dir, 'tmux');
   writeFileSync(tmuxStub, `#!/bin/sh
 if [ "$1" = "has-session" ]; then exit 0; fi
+if [ "$1" = "display-message" ]; then echo "%1"; exit 0; fi
 echo "$@" >> ${JSON.stringify(tmuxLog)}
 exit 0
 `);
@@ -209,6 +211,6 @@ else:
 
   assert.match(r.stdout, /Enter withheld: human became active mid-nudge/);
   assert.match(sent, /C-u/, 'typed nudge must be erased when Enter is withheld');
-  assert.doesNotMatch(sent, /(^|\n)send-keys -t stub-session Enter($|\n)/, 'Enter must not fire');
+  assert.doesNotMatch(sent, /(^|\n)send-keys -t %1 Enter($|\n)/, 'Enter must not fire');
   assert.equal(pendingLeft, true, 'message must remain pending for retry');
 });

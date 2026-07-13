@@ -42,6 +42,9 @@ NUDGE_TEXT="${IAK_NUDGE_TEXT:-${CONFIG_NUDGE_TEXT:-check rooms}}"
 WAKE_COOLDOWN_SEC="${WAKE_COOLDOWN_SEC:-45}"
 LAST_WAKE_FILE="${LAST_WAKE_FILE:-/tmp/claudemb_last_wake_epoch.txt}"
 NEW_FILE="${IAK_NEW_FILE:-/tmp/iak-new-messages.txt}"
+# Timestamp of the last SUCCESSFUL wake: pending-content retries only fire
+# for content newer than this (see the wake block below).
+WAKE_OK_FILE="${IAK_WAKE_OK_FILE:-/tmp/claudemb-wake-ok.txt}"
 NEW_FILE_COMPAT="${IAK_NEW_FILE_COMPAT:-/tmp/iak_new_messages.txt}"
 
 # --- tmux management ---
@@ -239,8 +242,12 @@ except Exception:
     # wake aborts (human active / focus failure) - but the old condition
     # only attempted a wake on cycles with NEW messages, so one failed
     # wake stalled delivery until the next unrelated message arrived.
-    # Retry the wake on EVERY cycle while undelivered content is pending.
-    if [[ $new_count -gt 0 || -s "$NEW_FILE" ]]; then
+    # Retry the wake on EVERY cycle while undelivered content is pending -
+    # but only for content NEWER than the last SUCCESSFUL wake (claudemm
+    # gate review on #30, medium): the session may take minutes to start
+    # and consume $NEW_FILE, and re-nudging a woken session every cycle
+    # is spam.
+    if [[ $new_count -gt 0 || ( -s "$NEW_FILE" && ( ! -f "$WAKE_OK_FILE" || "$NEW_FILE" -nt "$WAKE_OK_FILE" ) ) ]]; then
         if [[ $new_count -gt 0 ]]; then
             echo "[$(date +%H:%M:%S)] $new_count new message(s)"
         else
@@ -248,7 +255,9 @@ except Exception:
         fi
         if [[ -x "$WAKE_SCRIPT" ]]; then
             if can_wake_now; then
-                if ! CLAUDEMB_SESSION="$WAKE_SESSION" "$WAKE_SCRIPT" "$NUDGE_TEXT"; then
+                if CLAUDEMB_SESSION="$WAKE_SESSION" "$WAKE_SCRIPT" "$NUDGE_TEXT"; then
+                    touch "$WAKE_OK_FILE"
+                else
                     echo "[$(date +%H:%M:%S)] wake NOT DELIVERED (human active, focus failure, or session missing) - retrying next cycle"
                 fi
             else

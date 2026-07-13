@@ -14,7 +14,9 @@
 //      COOLDOWN_MIN, INTERVAL_MIN, MAX_NUDGES.
 
 const API   = 'https://antfarm.world/api/v1';
-const KEY   = process.env.ANTFARM_KEY || JSON.parse(readFileSync('/Users/petrus/ide-agent-kit/config/macbook.json','utf8')).poller.api_key;
+const HOME  = process.env.HOME || '';
+const REPO  = process.env.IAK_ROOT || new URL('..', import.meta.url).pathname.replace(/\/$/, '');
+const KEY   = process.env.ANTFARM_KEY || JSON.parse(readFileSync(process.env.IAK_CONFIG || `${REPO}/config/macbook.json`,'utf8')).poller.api_key;
 const ROOM  = process.env.ROOM || 'thinkoff-development';
 const DRY   = process.env.DRY_RUN === '1';
 const STALE_MS    = (Number(process.env.STALE_MIN)    || 20) * 60_000;
@@ -31,19 +33,33 @@ const SELF = 'claudemb';
 // flood): the ONLY thing that makes them talk is being @mentioned, so a
 // watchdog nudge to them re-creates the exact noise petrus complained about.
 // Watch only the agents that should be autonomously live in the room.
-const ROSTER = [
-  { handle: '@claudemm',    gate: 'http://100.97.140.13:8788' },
+// Roster comes from config (gitignored) or env - a public repo must not
+// hardcode tailnet IPs or machine paths (#30 gate, B3). File format:
+// config/watchdog-roster.json = [{"handle":"@x","gate":"http://host:8788"},
+// {"handle":"@y","localWake":"/abs/path.sh"}]
+function loadRoster() {
+  const fromEnv = process.env.IAK_WATCHDOG_ROSTER;
+  const file = process.env.IAK_WATCHDOG_ROSTER_FILE || `${REPO}/config/watchdog-roster.json`;
+  try {
+    if (fromEnv) return JSON.parse(fromEnv);
+    return JSON.parse(readFileSync(file, 'utf8'));
+  } catch {
+    console.log(`team-watchdog: no roster (set IAK_WATCHDOG_ROSTER or ${file}); nothing to watch`);
+    return [];
+  }
+}
+const ROSTER = loadRoster();
+/* Historical roster notes (Jul 2026):
   // codex ADDED with a silent LOCAL wake (Jul 13 2026): its webhook-wake tunnel
   // died silently Jul 9-12 and nobody noticed for three days. The watchdog is
   // the backstop: if @codexmb goes quiet, run the local GUI nudge directly -
   // never a room post (same lesson as antigravity below).
-  { handle: '@codexmb',     localWake: '/Users/petrus/ide-agent-kit/tools/codex_gui_nudge.sh' },
   // antigravity REMOVED from room-nudging (petrus, Jul 5 2026: "your
   // antigravity checks are spamming the room pls stop them"). It is gateless,
   // so the only way to nudge it was a room @mention every ~48min, which read
   // as spam. It runs on this MacBook, so if death-detection is wanted later,
   // do it via a silent local process check, never a room post.
-];
+*/
 
 // State persists to a file so it survives one-shot (StartInterval) runs and
 // sleep/wake. In-process setTimeout pauses when the Mac sleeps, so the watchdog
@@ -88,7 +104,7 @@ function wakeLocal(script) {
   if (!script) return Promise.resolve(false);
   return new Promise((resolve) => {
     execFile('bash', [script], {
-      timeout: 30_000,
+      timeout: 320_000, // wake waits up to 300s for human-idle (#30 gate, B2)
       env: {
         ...process.env,
         IAK_CODEX_APP_NAME: 'ChatGPT',

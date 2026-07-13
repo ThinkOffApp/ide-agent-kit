@@ -11,6 +11,9 @@
   KeepAlive restarts the supervisor if it dies; the supervisor's own
   single-instance guard makes a race between launchd and a manual start safe.
 -->
+<!-- Install: copy to ~/Library/LaunchAgents and replace REPLACE_WITH_IAK_ROOT
+     with your ide-agent-kit checkout path (launchd cannot expand $HOME):
+     sed "s|REPLACE_WITH_IAK_ROOT|$HOME/ide-agent-kit|" ... (#30 gate, B3) -->
 <plist version="1.0">
 <dict>
   <key>Label</key>
@@ -18,7 +21,7 @@
   <key>ProgramArguments</key>
   <array>
     <string>/bin/bash</string>
-    <string>/Users/petrus/ide-agent-kit/scripts/codex-webhook-supervisor.sh</string>
+    <string>REPLACE_WITH_IAK_ROOT/scripts/codex-webhook-supervisor.sh</string>
   </array>
   <key>RunAtLoad</key>
   <true/>
