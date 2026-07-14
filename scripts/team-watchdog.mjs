@@ -1,22 +1,61 @@
 #!/usr/bin/env node
-// team-watchdog (claudeMB / MacBook) — keep the team alive in the room.
+// team-watchdog — peer-wake watchdog: keep the team alive in the room.
 //
 // Runs in the ALWAYS-ON layer (launchd / tmux), independent of any agent IDE.
 // Every INTERVAL it reads the room, computes each roster agent's last-seen, and
-// wakes any that has gone quiet too long: POST <gate>/wake (if reachable) + an
-// @mention nudge their poller catches. Rate-limited so it never spams.
+// wakes any that has gone quiet too long. Each roster entry picks ONE wake path:
+//   - localWake: a SAME-MACHINE GUI wake script (idle-guarded) — the watchdog
+//     on machine M can revive any agent whose IDE runs on M, even with no
+//     network reachability. This is the "same-machine peer wake" primitive.
+//   - gate: a cross-machine POST <gate>/wake to a peer daemon (reachable only
+//     while that machine is awake and its receiver is running).
+//   - neither: a room @mention nudge the agent's own poller catches.
+// Rate-limited (cooldown + MAX_NUDGES) so it never spams the room.
 //
-// DRY_RUN=1  -> detect + log only, NO room posts / wakes (safe before Tailscale
-//               to the Mini is up, since unreachable agents would just get spam).
-// Flip to active (unset DRY_RUN) once `tailscale up` is done on the Mini.
+// localWake targets MUST be idle-guarded scripts (they call tools/human-idle-guard.sh
+// so they never type over an active human). The repo's claude-gui-wake.sh and
+// tools/codex_gui_nudge.sh already do; any custom script you point localWake at must too.
 //
-// Env: ANTFARM_KEY (defaults to claudeMB posting key), ROOM, STALE_MIN,
-//      COOLDOWN_MIN, INTERVAL_MIN, MAX_NUDGES.
+// DRY_RUN=1  -> detect + log only, NO room posts / wakes (safe while peers are
+//               unreachable, since they would otherwise just get spam).
+//
+// Env: GROUPMIND_KEY (or legacy ANTFARM_KEY), ROOM, STALE_MIN, COOLDOWN_MIN,
+//      INTERVAL_MIN, MAX_NUDGES, WATCHDOG_SELF. Roster: IAK_WATCHDOG_ROSTER
+//      (inline JSON) or IAK_WATCHDOG_ROSTER_FILE (default config/watchdog-roster.json).
 
-const API   = 'https://antfarm.world/api/v1';
+// Every call site uses groupmind.one; antfarm.world is the dead legacy host.
+export const API = 'https://groupmind.one/api/v1';
 const HOME  = process.env.HOME || '';
 const REPO  = process.env.IAK_ROOT || new URL('..', import.meta.url).pathname.replace(/\/$/, '');
-const KEY   = process.env.ANTFARM_KEY || JSON.parse(readFileSync(process.env.IAK_CONFIG || `${REPO}/config/macbook.json`,'utf8')).poller.api_key;
+// Resolved lazily so importing this module (e.g. from a test) never touches the
+// config file. GROUPMIND_KEY is the current name; ANTFARM_KEY stays as a legacy alias.
+let _key;
+function KEY() {
+  if (_key === undefined) {
+    // Resolve the key from env, else the config the installer actually writes
+    // (ide-agent-kit.json), falling back to the legacy config/macbook.json so
+    // existing hand-wired setups keep working (codex review, #34: the opt-in
+    // install only sets IAK_ROOT, so a macbook.json-only default threw every
+    // tick on a fresh install).
+    if (process.env.GROUPMIND_KEY || process.env.ANTFARM_KEY) {
+      _key = process.env.GROUPMIND_KEY || process.env.ANTFARM_KEY;
+    } else {
+      const candidates = [
+        process.env.IAK_CONFIG,
+        `${REPO}/ide-agent-kit.json`,
+        `${REPO}/config/macbook.json`,
+      ].filter(Boolean);
+      let found;
+      for (const c of candidates) {
+        try { found = JSON.parse(readFileSync(c, 'utf8'))?.poller?.api_key; } catch { /* next */ }
+        if (found) break;
+      }
+      if (!found) throw new Error(`team-watchdog: no GROUPMIND_KEY and no poller.api_key in ${candidates.join(', ')}`);
+      _key = found;
+    }
+  }
+  return _key;
+}
 const ROOM  = process.env.ROOM || 'thinkoff-development';
 const DRY   = process.env.DRY_RUN === '1';
 const STALE_MS    = (Number(process.env.STALE_MIN)    || 20) * 60_000;
@@ -28,7 +67,7 @@ const MAX_NUDGES  = Number(process.env.MAX_NUDGES) || 2;   // stop room-posting 
 // it - silence is an accepted state. Only a gateless agent (room @mention is its
 // wake path) or an UNREACHABLE gate produces a room post.
 
-const SELF = 'claudemb';
+const SELF = process.env.WATCHDOG_SELF || 'claudemb';
 // ether + hermes are set to mention_only (Jul 5 2026, after the overnight
 // flood): the ONLY thing that makes them talk is being @mentioned, so a
 // watchdog nudge to them re-creates the exact noise petrus complained about.
@@ -37,7 +76,7 @@ const SELF = 'claudemb';
 // hardcode tailnet IPs or machine paths (#30 gate, B3). File format:
 // config/watchdog-roster.json = [{"handle":"@x","gate":"http://host:8788"},
 // {"handle":"@y","localWake":"/abs/path.sh"}]
-function loadRoster() {
+export function loadRoster() {
   const fromEnv = process.env.IAK_WATCHDOG_ROSTER;
   const file = process.env.IAK_WATCHDOG_ROSTER_FILE || `${REPO}/config/watchdog-roster.json`;
   try {
@@ -48,7 +87,7 @@ function loadRoster() {
     return [];
   }
 }
-const ROSTER = loadRoster();
+let ROSTER = [];
 /* Historical roster notes (Jul 2026):
   // codex ADDED with a silent LOCAL wake (Jul 13 2026): its webhook-wake tunnel
   // died silently Jul 9-12 and nobody noticed for three days. The watchdog is
@@ -64,21 +103,22 @@ const ROSTER = loadRoster();
 // State persists to a file so it survives one-shot (StartInterval) runs and
 // sleep/wake. In-process setTimeout pauses when the Mac sleeps, so the watchdog
 // runs as a launchd StartInterval one-shot (ONCE=1) instead of a long loop.
-import { readFileSync, writeFileSync } from 'node:fs';
+import { readFileSync, writeFileSync, realpathSync } from 'node:fs';
 import { execFile } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 const STATE_FILE = '/tmp/team-watchdog-state.json';
 let state = {};
-try { state = JSON.parse(readFileSync(STATE_FILE, 'utf8')); } catch {}
+function loadState() { try { return JSON.parse(readFileSync(STATE_FILE, 'utf8')); } catch { return {}; } }
 function saveState() { try { writeFileSync(STATE_FILE, JSON.stringify(state)); } catch {} }
 
 async function getMessages() {
-  const r = await fetch(`${API}/rooms/${ROOM}/messages?limit=80`, { headers: { 'X-API-Key': KEY }, signal: AbortSignal.timeout(15000) });
+  const r = await fetch(`${API}/rooms/${ROOM}/messages?limit=80`, { headers: { 'X-API-Key': KEY() }, signal: AbortSignal.timeout(15000) });
   const d = await r.json();
   return d.messages || [];
 }
 async function postRoom(body) {
   if (DRY) { console.log('[dry] would post:', body); return; }
-  await fetch(`${API}/messages`, { method: 'POST', headers: { 'X-API-Key': KEY, 'Content-Type': 'application/json' }, body: JSON.stringify({ room: ROOM, body }), signal: AbortSignal.timeout(15000) });
+  await fetch(`${API}/messages`, { method: 'POST', headers: { 'X-API-Key': KEY(), 'Content-Type': 'application/json' }, body: JSON.stringify({ room: ROOM, body }), signal: AbortSignal.timeout(15000) });
 }
 async function wakeGate(gate) {
   if (!gate) return false;
@@ -115,7 +155,7 @@ function wakeLocal(script) {
     }, (err) => resolve(!err));
   });
 }
-function lastSeen(msgs, handle) {
+export function lastSeen(msgs, handle) {
   const h = handle.replace(/^@/, '').toLowerCase();
   let t = 0;
   for (const m of msgs) {
@@ -126,6 +166,14 @@ function lastSeen(msgs, handle) {
   }
   return t;
 }
+// Pure staleness helpers (exported for unit tests). `seen` is the epoch-ms
+// timestamp from lastSeen(); 0 means "never seen" -> infinitely stale.
+export function ageMinutes(seen, now) {
+  return seen ? Math.round((now - seen) / 60000) : Infinity;
+}
+export function isStale(seen, now, staleMs) {
+  return (now - (seen || 0)) > staleMs;
+}
 
 async function tick() {
   const msgs = await getMessages();
@@ -133,9 +181,9 @@ async function tick() {
   const toNudge = [];
   for (const a of ROSTER) {
     const seen = lastSeen(msgs, a.handle);
-    const ageMin = seen ? Math.round((now - seen) / 60000) : Infinity;
+    const ageMin = ageMinutes(seen, now);
     const st = (state[a.handle] ||= { lastNudge: 0, misses: 0, silentWakes: 0 });
-    const stale = (now - (seen || 0)) > STALE_MS;
+    const stale = isStale(seen, now, STALE_MS);
     if (!stale) { st.misses = 0; st.silentWakes = 0; continue; }
     if (now - st.lastNudge < COOLDOWN_MS) continue;      // rate-limit
     if (st.misses >= MAX_NUDGES) { console.log(`${a.handle} still down (giving room a rest after ${st.misses} nudges)`); continue; }
@@ -172,17 +220,28 @@ async function tick() {
   if (toNudge.length) {
     const mentions = toNudge.map(n => n.handle).join(' ');
     const detail = toNudge.map(n => `${n.handle} quiet ${n.ageMin}m${n.wedged ? ' [gate woke but no post - possibly wedged]' : ''}`).join(', ');
-    await postRoom(`${mentions} [team-watchdog] you have gone quiet - check rooms and reply here. (${detail}; auto from claudeMB)`);
+    await postRoom(`${mentions} [team-watchdog] you have gone quiet - check rooms and reply here. (${detail}; auto from ${SELF})`);
   }
   saveState();
   console.log(new Date().toISOString(), `checked ${ROSTER.length}`, toNudge.length ? `nudged: ${toNudge.map(n=>n.handle).join(',')}` : 'all healthy/cooling');
 }
 
-(async () => {
+async function run() {
+  ROSTER = loadRoster();
+  state = loadState();
   console.log(`team-watchdog up. DRY_RUN=${DRY} stale=${STALE_MS/60000}m cooldown=${COOLDOWN_MS/60000}m interval=${INTERVAL_MS/60000}m`);
   for (;;) {
     try { await tick(); } catch (e) { console.error('tick error:', e.message); }
     if (process.env.ONCE === '1') break;
     await new Promise(r => setTimeout(r, INTERVAL_MS));
   }
+}
+
+// Only run the loop when executed directly (node scripts/team-watchdog.mjs),
+// never when imported by a test. Keeping import side-effect-free is what lets
+// the pure helpers (loadRoster, lastSeen, ageMinutes, isStale) be unit-tested.
+const invokedDirectly = (() => {
+  try { return !!process.argv[1] && realpathSync(process.argv[1]) === fileURLToPath(import.meta.url); }
+  catch { return false; }
 })();
+if (invokedDirectly) run();

@@ -1,0 +1,62 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  launchd wiring for the peer-wake team-watchdog (opt-in, one per machine).
+
+  The watchdog is the ALWAYS-ON layer that revives sleeping colleagues: every
+  interval it reads the room and, for any roster agent that has gone quiet, runs
+  its wake path (same-machine localWake GUI nudge, cross-machine gate POST, or a
+  room @mention). See README "Peer wake" and config/watchdog-roster.example.json.
+
+  Install (launchd cannot expand $HOME, so bake the checkout path in with sed):
+    mkdir -p ~/Library/LaunchAgents
+    sed "s|REPLACE_WITH_IAK_ROOT|$HOME/ide-agent-kit|g" \
+      examples/team-watchdog-launchd.plist \
+      > ~/Library/LaunchAgents/com.thinkoff.iak-team-watchdog.plist
+    launchctl load ~/Library/LaunchAgents/com.thinkoff.iak-team-watchdog.plist
+
+  Prereq: a real roster at REPLACE_WITH_IAK_ROOT/config/watchdog-roster.json
+  (copy config/watchdog-roster.example.json and sed the same path in). The real
+  roster is gitignored — never commit hosts or machine paths.
+
+  KeepAlive restarts the long-running loop if it exits. On a LAPTOP that sleeps,
+  the in-process interval timer stalls across sleep; prefer the one-shot variant
+  instead — set ONCE=1 in EnvironmentVariables and swap KeepAlive for:
+    <key>StartInterval</key><integer>300</integer>
+  so launchd re-runs a single tick every 5 minutes regardless of sleep/wake.
+
+  Optional EnvironmentVariables (see scripts/team-watchdog.mjs header): ROOM,
+  STALE_MIN, COOLDOWN_MIN, INTERVAL_MIN, MAX_NUDGES, WATCHDOG_SELF, DRY_RUN,
+  GROUPMIND_KEY. If GROUPMIND_KEY is unset it is read from config (poller.api_key).
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.thinkoff.iak-team-watchdog</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>-c</string>
+    <string>cd REPLACE_WITH_IAK_ROOT &amp;&amp; exec node scripts/team-watchdog.mjs</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    <key>IAK_ROOT</key>
+    <string>REPLACE_WITH_IAK_ROOT</string>
+    <key>IAK_CONFIG</key>
+    <string>REPLACE_WITH_IAK_ROOT/ide-agent-kit.json</string>
+  </dict>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>ThrottleInterval</key>
+  <integer>30</integer>
+  <key>StandardOutPath</key>
+  <string>/tmp/iak-team-watchdog.launchd.log</string>
+  <key>StandardErrorPath</key>
+  <string>/tmp/iak-team-watchdog.launchd.log</string>
+</dict>
+</plist>

@@ -1,0 +1,17 @@
+[
+  {
+    "handle": "@codex-on-this-mac",
+    "localWake": "REPLACE_WITH_IAK_ROOT/tools/codex_gui_nudge.sh"
+  },
+  {
+    "handle": "@claude-on-this-mac",
+    "localWake": "REPLACE_WITH_IAK_ROOT/scripts/claude-gui-wake.sh"
+  },
+  {
+    "handle": "@agent-on-another-machine",
+    "gate": "http://REPLACE_WITH_PEER_HOST:8788"
+  },
+  {
+    "handle": "@gateless-agent-in-the-room"
+  }
+]
