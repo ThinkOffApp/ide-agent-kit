@@ -37,6 +37,7 @@ import { execApprovalRequest, execApprovalWait, execApprovalResolve, execApprova
 import { listHooks, createForwarderHook, deleteHook } from '../src/openclaw-hooks.mjs';
 import { cronList, cronAdd, cronRemove, cronRun, cronStatus } from '../src/openclaw-cron.mjs';
 import { keepaliveStart, keepaliveStop, keepaliveStatus } from '../src/session-keepalive.mjs';
+import { ensureHookInSettingsFile } from '../src/claude-settings.mjs';
 
 const pkg = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'));
 const args = process.argv.slice(2);
@@ -1624,15 +1625,17 @@ async function initIdeConfig(ide, profile = 'balanced') {
 
   const outPath = resolve(preset.filename);
   if (existsSync(outPath)) {
+    // Don't return: the hook/settings steps below are individually guarded
+    // and idempotent, so re-running init upgrades an existing install
+    // (e.g. adds newly shipped hooks) without touching the config.
     console.log(`Config already exists: ${outPath}`);
-    return;
-  }
-
-  writeFileSync(outPath, JSON.stringify(preset.config, null, 2) + '\n');
-  console.log(`Created ${outPath} for ${targetIde}`);
-  console.log(preset.notes);
-  if (!hasClaudeMem) {
-    console.warn('\nâš  WARNING: claude-mem is not installed. Hooks will be generated but will fail until you run: npm install -g claude-mem');
+  } else {
+    writeFileSync(outPath, JSON.stringify(preset.config, null, 2) + '\n');
+    console.log(`Created ${outPath} for ${targetIde}`);
+    console.log(preset.notes);
+    if (!hasClaudeMem) {
+      console.warn('\nâš  WARNING: claude-mem is not installed. Hooks will be generated but will fail until you run: npm install -g claude-mem');
+    }
   }
 
   // Generate check-rooms hook script
@@ -1773,6 +1776,38 @@ fi
       console.log(`Created ${settingsPath} with Antigravity auto-approve + room polling hook (profile: ${normalizedProfile})`);
     } else {
       console.log(`Claude Code settings already exist: ${settingsPath}`);
+    }
+  }
+
+  // SessionStart auto-bootstrap hook: after an IDE restart the agent self-arms
+  // the room loop (Monitor on the notification file + backlog read + fallback
+  // ScheduleWakeup) instead of waiting for someone to type "/loop check rooms".
+  // The hook is merged into .claude/settings.json without touching unrelated
+  // hooks and is deduped, so re-running init never duplicates it.
+  if (['claude-code', 'antigravity'].includes(targetIde)) {
+    try {
+      const { chmodSync, copyFileSync } = await import('node:fs');
+      const { fileURLToPath } = await import('node:url');
+      const scriptsDir = resolve('.claude', 'scripts');
+      if (!existsSync(scriptsDir)) mkdirSync(scriptsDir, { recursive: true });
+      const bootstrapScript = resolve(scriptsDir, 'session-bootstrap.sh');
+      if (!existsSync(bootstrapScript)) {
+        const sourceScript = fileURLToPath(new URL('../scripts/session-bootstrap.sh', import.meta.url));
+        copyFileSync(sourceScript, bootstrapScript);
+        chmodSync(bootstrapScript, 0o755);
+        console.log(`Created ${bootstrapScript}`);
+      }
+      const settingsPath = resolve('.claude', 'settings.json');
+      const { changed, backupPath } = ensureHookInSettingsFile(
+        settingsPath, 'SessionStart', `bash ${bootstrapScript}`, { timeout: 10 }
+      );
+      if (changed) {
+        console.log(`Installed SessionStart auto-bootstrap hook in ${settingsPath}${backupPath ? ` (backup: ${backupPath})` : ''}`);
+      } else {
+        console.log(`SessionStart auto-bootstrap hook already present in ${settingsPath}`);
+      }
+    } catch (err) {
+      console.warn(`Skipped SessionStart auto-bootstrap hook: ${err?.message || err}`);
     }
   }
 
