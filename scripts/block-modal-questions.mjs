@@ -25,15 +25,20 @@ let input = '';
 process.stdin.setEncoding('utf8');
 process.stdin.on('data', (chunk) => { input += chunk; });
 process.stdin.on('end', () => {
+  // NOTE: never call process.exit() after writing to stdout. On POSIX a
+  // hook's stdout is a PIPE and writes are async, so process.exit() can kill
+  // the process before the deny payload flushes — silently shipping a partial
+  // or empty decision and failing to block (codex review, #36). Instead we
+  // just `return`; node exits 0 naturally once stdout has drained.
   let toolName = '';
   try {
     toolName = JSON.parse(input || '{}').tool_name || '';
   } catch {
-    process.exit(0); // fail open — never block on a parse error
+    return; // fail open — never block on a parse error
   }
 
   if (toolName !== 'AskUserQuestion') {
-    process.exit(0); // allow every other tool
+    return; // allow every other tool
   }
 
   const reason = [
@@ -59,5 +64,5 @@ process.stdin.on('end', () => {
       permissionDecisionReason: reason,
     },
   }));
-  process.exit(0);
+  // no process.exit — let stdout flush and node exit 0 on its own.
 });

@@ -21,6 +21,21 @@ test('denies AskUserQuestion with a redirect-to-room reason', () => {
   assert.match(out.hookSpecificOutput.permissionDecisionReason, /room|phone|Approve\/Deny/);
 });
 
+test('deny payload is never truncated across many runs (no process.exit-before-flush)', () => {
+  // Regression for the POSIX async-pipe truncation bug (codex review, #36):
+  // process.exit() after stdout.write could ship a partial/empty decision.
+  // A large reason string + repeated runs would surface truncation as a
+  // JSON parse failure or a missing permissionDecision.
+  for (let i = 0; i < 50; i++) {
+    const r = run(JSON.stringify({ tool_name: 'AskUserQuestion', tool_input: {} }));
+    assert.equal(r.status, 0, `run ${i} exit`);
+    let out;
+    assert.doesNotThrow(() => { out = JSON.parse(r.stdout); }, `run ${i} produced unparseable/truncated JSON: ${JSON.stringify(r.stdout)}`);
+    assert.equal(out.hookSpecificOutput.permissionDecision, 'deny', `run ${i} missing deny`);
+    assert.ok(out.hookSpecificOutput.permissionDecisionReason.length > 100, `run ${i} reason truncated`);
+  }
+});
+
 test('allows every other tool (no output, exit 0)', () => {
   for (const tool of ['Bash', 'Read', 'Edit', 'room_post', 'request_confirmation']) {
     const r = run(JSON.stringify({ tool_name: tool, tool_input: {} }));
