@@ -14,8 +14,9 @@
 #      (PORT 8788, host 0.0.0.0 so phone on LAN can reach it). Skips if
 #      config already exists.
 #   5. Installs ~/.claude/scripts/check-rooms-hook.sh + claudemb-poll/wake
-#      shims and registers the UserPromptSubmit + Stop hooks in
-#      ~/.claude/settings.json. Skips registrations already present.
+#      shims and registers the UserPromptSubmit + Stop + SessionStart hooks
+#      in ~/.claude/settings.json (backed up to settings.json.bak before any
+#      change). Skips registrations already present.
 #   6. Starts the daemon in a tmux session named "iak-mcp".
 #   7. Prints the LAN URL the user should paste into CodeWatch.
 #
@@ -114,24 +115,40 @@ fi
 # 5. Claude Code hook wiring
 SETTINGS="$HOME/.claude/settings.json"
 SCRIPTS_DIR="$INSTALL_DIR/scripts"
+# First-time installs may predate Claude Code ever writing settings.json -
+# create a minimal file so fresh users still get the hooks (self-arming is
+# the whole point; codex review, #33).
+if [ ! -f "$SETTINGS" ]; then
+  mkdir -p "$(dirname "$SETTINGS")"
+  printf '{}\n' > "$SETTINGS"
+  yellow "Created minimal $SETTINGS (did not exist yet)"
+fi
 if [ -f "$SETTINGS" ]; then
-  yellow "Wiring UserPromptSubmit + Stop hooks in $SETTINGS"
+  yellow "Wiring UserPromptSubmit + Stop + SessionStart hooks in $SETTINGS"
   python3 - "$SETTINGS" "$SCRIPTS_DIR" <<'PY'
-import json, sys, os
+import json, shutil, sys, os
 settings_path, scripts_dir = sys.argv[1], sys.argv[2]
 data = json.load(open(settings_path))
 data.setdefault("hooks", {})
-def ensure_hook(event, cmd):
+def ensure_hook(event, cmd, timeout=None):
     arr = data["hooks"].setdefault(event, [])
     for entry in arr:
         for h in entry.get("hooks", []):
             if h.get("command") == cmd: return False
-    arr.append({"matcher":"","hooks":[{"type":"command","command":cmd}]})
+    hook = {"type":"command","command":cmd}
+    if timeout is not None: hook["timeout"] = timeout
+    arr.append({"matcher":"","hooks":[hook]})
     return True
 changed = False
 changed |= ensure_hook("UserPromptSubmit", f"bash {scripts_dir}/check-rooms-hook.sh")
 changed |= ensure_hook("Stop", f"bash {scripts_dir}/claudecode-stop-resume.sh")
+# Self-arming room agent: on every session start (startup/resume/compact) the
+# hook injects instructions to re-arm the notification-file Monitor, read any
+# backlog, and keep the self-paced room loop running — no manual
+# "/loop check rooms" needed after a restart.
+changed |= ensure_hook("SessionStart", f"bash {scripts_dir}/session-bootstrap.sh", timeout=10)
 if changed:
+    shutil.copyfile(settings_path, settings_path + ".bak")
     json.dump(data, open(settings_path,"w"), indent=2)
     print("Hooks installed.")
 else:

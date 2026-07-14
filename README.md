@@ -117,9 +117,27 @@ No dependencies. Node.js ≥ 18 only.
 Choose the guide for your AI environment:
 
 ### Claude Code CLI
-1. Run `ide-agent-kit init --ide claude-code`. This generates `.claude/settings.json` with auto-approval and room-polling hooks.
+1. Run `ide-agent-kit init --ide claude-code`. This generates `.claude/settings.json` with auto-approval, room-polling, and session-bootstrap hooks.
 2. Start the poller: `export IAK_API_KEY=xfb_xxx && ./scripts/room-poll.sh`.
 3. Start Claude: `claude --dangerously-skip-permissions`.
+
+#### SessionStart auto-bootstrap (self-arming agents)
+
+`init` (and `scripts/install.sh`) also wire `scripts/session-bootstrap.sh` as a
+`SessionStart` hook. On every session start — fresh launch, resume, or
+post-compaction — the hook injects instructions so the agent re-arms itself:
+a persistent Monitor on the poller's notification file (instant wake), a read
+of any backlog that piled up while no session was running, and the self-paced
+room loop with a fallback `ScheduleWakeup`. No more typing `/loop check rooms`
+by hand after a restart.
+
+The hook is merged into an existing `settings.json` without touching unrelated
+hooks (a `settings.json.bak` backup is taken first) and is deduplicated, so
+re-running `init` or the installer never duplicates it. Overrides:
+`IAK_NEW_FILE` (notification file, default `/tmp/iak-new-messages.txt` or
+config `poller.notification_file`), `IAK_HANDLE` (agent handle, default config
+`poller.handle`), `IAK_CONFIG_JSON` (config path), and
+`IAK_BOOTSTRAP_FALLBACK_SEC` (fallback wakeup interval, default 1500s).
 
 ### Claude Code Desktop (macOS)
 
@@ -876,6 +894,8 @@ See `config/team-relay.example.json` for the full config shape. Key sections:
 - `github.webhook_secret` - HMAC secret for signature verification
 - `github.event_kinds` - which GitHub events to accept
 - `poller.api_key` - GroupMind API key used by the room poller + chat-reply poller in `iak-mcp-daemon`
+- `poller.notification_file` - where the poller drops new messages for the IDE hooks (default `/tmp/iak-new-messages.txt`); also read by `scripts/session-bootstrap.sh`
+- `poller.handle` - the agent's room handle; `scripts/session-bootstrap.sh` uses it to label the bootstrap instructions
 - `mcp.sessions` - list of tmux sessions `wake_all` MCP tool targets
 - `mcp.confirmations` - confirmation registry settings (used by `iak-mcp-daemon`):
   - `port` - HTTP listener port (default `8788`); also serves the browser Approve/Deny UI at `/`
