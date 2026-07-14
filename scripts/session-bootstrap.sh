@@ -97,7 +97,7 @@ fi
 
 CTX="IAK room-agent bootstrap${HANDLE:+ for ${HANDLE}} (injected by SessionStart hook — do this without being asked):
 1. If TaskList shows no running Monitor watching ${NEWMSG_FILE}, arm one now: Monitor(command: \"tail -F -n 0 ${NEWMSG_FILE} 2>/dev/null\", persistent: true). Never arm a duplicate.
-2. Backlog: ${BACKLOG:-0} unconsumed line(s) in ${NEWMSG_FILE}. If >0, read the file, act on the messages, then clear it (: > ${NEWMSG_FILE}).
+2. Backlog: ${BACKLOG:-0} unconsumed line(s) in ${NEWMSG_FILE}. If >0: read the messages (prefer the IAK MCP room_list_new tool), act on them, then ack with the IAK MCP room_ack tool - it removes ONLY what you read, so a message the poller appends mid-ack survives. Only if the IAK MCP tools are unavailable this session, fall back to reading the file directly and clearing it (: > ${NEWMSG_FILE}), re-checking immediately after for lines that arrived during the clear.
 3. Operate as the self-paced room loop ('/loop check rooms' semantics): after handling room work, keep a fallback ScheduleWakeup armed (~${FALLBACK_SEC}s) with prompt '/loop check rooms'. The Monitor is the primary wake signal.
 4. Session source: ${SOURCE:-unknown}. On 'compact' the Monitor usually survived — verify via TaskList instead of re-arming blindly."
 

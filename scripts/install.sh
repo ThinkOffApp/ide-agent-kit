@@ -115,6 +115,14 @@ fi
 # 5. Claude Code hook wiring
 SETTINGS="$HOME/.claude/settings.json"
 SCRIPTS_DIR="$INSTALL_DIR/scripts"
+# First-time installs may predate Claude Code ever writing settings.json -
+# create a minimal file so fresh users still get the hooks (self-arming is
+# the whole point; codex review, #33).
+if [ ! -f "$SETTINGS" ]; then
+  mkdir -p "$(dirname "$SETTINGS")"
+  printf '{}\n' > "$SETTINGS"
+  yellow "Created minimal $SETTINGS (did not exist yet)"
+fi
 if [ -f "$SETTINGS" ]; then
   yellow "Wiring UserPromptSubmit + Stop + SessionStart hooks in $SETTINGS"
   python3 - "$SETTINGS" "$SCRIPTS_DIR" <<'PY'
