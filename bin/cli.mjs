@@ -1820,15 +1820,18 @@ fi
       const scriptsDir = resolve('.claude', 'scripts');
       if (!existsSync(scriptsDir)) mkdirSync(scriptsDir, { recursive: true });
       const guardScript = resolve(scriptsDir, 'block-modal-questions.mjs');
-      if (!existsSync(guardScript)) {
-        const sourceScript = fileURLToPath(new URL('../scripts/block-modal-questions.mjs', import.meta.url));
-        copyFileSync(sourceScript, guardScript);
-        chmodSync(guardScript, 0o755);
-        console.log(`Created ${guardScript}`);
-      }
+      // Always re-copy so `iak init` on an existing install upgrades the
+      // managed script to the current version (claudemm review, #36).
+      const sourceScript = fileURLToPath(new URL('../scripts/block-modal-questions.mjs', import.meta.url));
+      const existedBefore = existsSync(guardScript);
+      copyFileSync(sourceScript, guardScript);
+      chmodSync(guardScript, 0o755);
+      console.log(`${existedBefore ? 'Updated' : 'Created'} ${guardScript}`);
       const settingsPath = resolve('.claude', 'settings.json');
+      // matcher scopes the hook to AskUserQuestion only, so node isn't spawned
+      // on every tool call (claudemm review, #36).
       const { changed, backupPath } = ensureHookInSettingsFile(
-        settingsPath, 'PreToolUse', `node ${guardScript}`, { timeout: 5 }
+        settingsPath, 'PreToolUse', `node ${guardScript}`, { timeout: 5, matcher: 'AskUserQuestion' }
       );
       if (changed) {
         console.log(`Installed PreToolUse modal-question guard in ${settingsPath}${backupPath ? ` (backup: ${backupPath})` : ''}`);

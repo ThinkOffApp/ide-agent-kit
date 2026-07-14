@@ -3,6 +3,7 @@ import { spawnSync } from 'node:child_process';
 import path from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
+import { ensureHookCommand } from '../src/claude-settings.mjs';
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const hook = path.join(repoRoot, 'scripts', 'block-modal-questions.mjs');
@@ -38,4 +39,18 @@ test('fails OPEN on empty stdin', () => {
   const r = run('');
   assert.equal(r.status, 0);
   assert.equal(r.stdout.trim(), '');
+});
+
+test('ensureHookCommand scopes the matcher when given (spawn only for that tool)', () => {
+  const s = {};
+  ensureHookCommand(s, 'PreToolUse', 'node guard.mjs', { matcher: 'AskUserQuestion', timeout: 5 });
+  const entry = s.hooks.PreToolUse[0];
+  assert.equal(entry.matcher, 'AskUserQuestion');
+  assert.deepEqual(entry.hooks[0], { type: 'command', command: 'node guard.mjs', timeout: 5 });
+});
+
+test('ensureHookCommand matcher defaults to empty (all tools / lifecycle events)', () => {
+  const s = {};
+  ensureHookCommand(s, 'SessionStart', 'bash boot.sh');
+  assert.equal(s.hooks.SessionStart[0].matcher, '');
 });
