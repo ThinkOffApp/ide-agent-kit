@@ -59,6 +59,7 @@ LAN URL to paste into CodeWatch — the upcoming mobile + watch companion app.
   - [Env Vars (Generic Poller)](#env-vars-generic-poller)
   - [Env Vars (Codex Smart Poller)](#env-vars-codex-smart-poller)
   - [Background Consolidation](#background-consolidation)
+- [Peer Wake](#peer-wake-same-machine-agents-revive-sleeping-colleagues)
 - [Integrations](#integrations)
   - [GitHub Webhooks](#github-webhooks-srcwebhook-servermjs)
   - [OpenClaw Bot Fleet](#openclaw-bot-fleet-srcopenclaw-mjs)
@@ -488,6 +489,87 @@ Latest local verification from the Petrus machine, dogfooded against `v0.6.1`:
 
 - `GET /intent/petrus` returned `200` on `2026-04-08`, with `agents=[claudemb, claudemm]` and `devices=[macbook, mac-mini]` both active and zero stale slots after the UIK v0.2.2 deployment.
 - `GET /api/search/observations?query=thinkoff&limit=3` returned `200` on `2026-03-31` (claude-mem path unchanged since v0.5.0).
+
+## Peer wake (same-machine agents revive sleeping colleagues)
+
+Pollers and webhooks wake an agent whose receiver is running. But when an agent's
+IDE goes quiet — the session wedged, the tunnel died silently, the app lost focus —
+nothing is listening to wake it. **Peer wake** closes that gap: a watchdog running
+in the always-on layer of a machine can revive any agent whose IDE lives on the
+**same machine**, driving its GUI directly with no network dependency.
+
+`scripts/team-watchdog.mjs` is that watchdog. Every interval it reads the room,
+computes each roster agent's last-seen timestamp, and for anyone that has gone
+quiet past `STALE_MIN` it fires exactly one wake path — rate-limited by a cooldown
+and an `MAX_NUDGES` cap so it never spams.
+
+**The model — who can wake whom:**
+
+```
+machine M (always-on watchdog)
+  ├─ localWake  → agent's IDE is ON machine M      → GUI-wake it directly,
+  │                                                   works even with no network
+  ├─ gate       → agent is on ANOTHER machine       → POST <gate>/wake to its
+  │                                                   daemon — only lands if that
+  │                                                   machine is awake + receiver up
+  └─ (neither)  → gateless agent in the room         → room @mention its poller catches
+```
+
+A watchdog only *directly* revives agents whose IDE runs on its own machine
+(`localWake`). Cross-machine wake (`gate`, the same primitive as the
+[`wake_remote` MCP tool](#whats-new-in-v070)) still needs the target machine
+awake and its receiver alive — a laptop that is *asleep* cannot be woken over the
+network without Wake-on-LAN. That is the one thing peer wake cannot do; run a
+watchdog **on each machine** so every agent has a local reviver.
+
+**Roster format** — `config/watchdog-roster.json` (gitignored; it holds hosts and
+machine paths). Copy [`config/watchdog-roster.example.json`](config/watchdog-roster.example.json)
+and edit it for the agents that live on *this* machine. Each entry names one wake path:
+
+```json
+[
+  { "handle": "@codex-on-this-mac",  "localWake": "/abs/path/ide-agent-kit/tools/codex_gui_nudge.sh" },
+  { "handle": "@agent-elsewhere",    "gate": "http://192.168.0.9:8788" },
+  { "handle": "@gateless-agent" }
+]
+```
+
+The roster can also come from `IAK_WATCHDOG_ROSTER` (inline JSON) or
+`IAK_WATCHDOG_ROSTER_FILE`. No roster → nothing to watch (the watchdog logs and
+idles), so it is safe to run everywhere.
+
+**Safety: never types over a human.** `localWake` GUI-types into the target app,
+so every wake script the watchdog invokes routes through
+[`tools/human-idle-guard.sh`](tools/human-idle-guard.sh): it refuses to inject
+keystrokes unless the machine has been idle past `IDLE_THRESHOLD_S` (default 60s),
+**fails closed** when idle state is unknown, and `--wait`s for an idle window
+rather than dropping the nudge. The shipped wake scripts (`scripts/claude-gui-wake.sh`,
+`tools/codex_gui_nudge.sh`) already call it (and also refuse to type into a locked
+screen or a non-frontmost window). **Any custom script you point `localWake` at
+MUST be idle-guarded too** — the watchdog runs it verbatim.
+
+**Opt-in install (per machine).** The watchdog is off by default — it needs a
+roster. Load it with launchd from the parameterized example:
+
+```bash
+# 1. create your roster from the example
+sed "s|REPLACE_WITH_IAK_ROOT|$HOME/ide-agent-kit|g" \
+  config/watchdog-roster.example.json > config/watchdog-roster.json
+#    then edit handles/paths for the agents whose IDEs run on THIS Mac
+
+# 2. install + load the LaunchAgent (KeepAlive; restarts if it exits)
+sed "s|REPLACE_WITH_IAK_ROOT|$HOME/ide-agent-kit|g" \
+  examples/team-watchdog-launchd.plist \
+  > ~/Library/LaunchAgents/com.thinkoff.iak-team-watchdog.plist
+launchctl load ~/Library/LaunchAgents/com.thinkoff.iak-team-watchdog.plist
+```
+
+Or let the installer do it: `IAK_INSTALL_WATCHDOG=1` makes `scripts/install.sh`
+install the LaunchAgent (only if a roster exists). On a laptop that sleeps, prefer
+the one-shot variant documented in the plist header (`ONCE=1` + `StartInterval`),
+since the in-process interval timer stalls across sleep. Tunables (all env, all
+optional): `STALE_MIN`, `COOLDOWN_MIN`, `INTERVAL_MIN`, `MAX_NUDGES`, `ROOM`,
+`WATCHDOG_SELF`, `DRY_RUN` (detect + log only, no wakes/posts).
 
 ## Integrations
 

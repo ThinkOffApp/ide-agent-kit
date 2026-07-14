@@ -150,6 +150,35 @@ tmux new-session -d -s "$TMUX_SESSION" \
   "cd $INSTALL_DIR && node bin/iak-mcp-daemon.mjs"
 sleep 2
 
+# 6b. Optional: peer-wake team-watchdog (opt-in; needs a roster).
+# OFF by default — enable with IAK_INSTALL_WATCHDOG=1. Revives sleeping
+# colleagues whose IDEs run on THIS machine; see README "Peer wake".
+if [ "${IAK_INSTALL_WATCHDOG:-0}" = "1" ]; then
+  ROSTER_FILE="$INSTALL_DIR/config/watchdog-roster.json"
+  if [ ! -f "$ROSTER_FILE" ]; then
+    yellow "IAK_INSTALL_WATCHDOG=1 but no roster at $ROSTER_FILE — skipping."
+    echo "  Create one from the example, then re-run with IAK_INSTALL_WATCHDOG=1:"
+    echo "    sed \"s|REPLACE_WITH_IAK_ROOT|$INSTALL_DIR|g\" \\"
+    echo "      $INSTALL_DIR/config/watchdog-roster.example.json > $ROSTER_FILE"
+    echo "    # then edit handles/paths for the agents whose IDEs run on THIS Mac"
+  else
+    LA_DIR="$HOME/Library/LaunchAgents"
+    PLIST="$LA_DIR/com.thinkoff.iak-team-watchdog.plist"
+    mkdir -p "$LA_DIR"
+    sed "s|REPLACE_WITH_IAK_ROOT|$INSTALL_DIR|g" \
+      "$INSTALL_DIR/examples/team-watchdog-launchd.plist" > "$PLIST"
+    yellow "Installed peer-wake watchdog LaunchAgent → $PLIST"
+    if launchctl list 2>/dev/null | grep -q com.thinkoff.iak-team-watchdog; then
+      echo "  Already loaded. Reload after edits:"
+      echo "    launchctl unload \"$PLIST\" && launchctl load \"$PLIST\""
+    elif launchctl load "$PLIST" 2>/dev/null; then
+      green "  Loaded (KeepAlive; reads $ROSTER_FILE)."
+    else
+      yellow "  Load it manually: launchctl load \"$PLIST\""
+    fi
+  fi
+fi
+
 # 7. report
 LAN_IP=$(ipconfig getifaddr en0 2>/dev/null || ipconfig getifaddr en1 2>/dev/null || echo "127.0.0.1")
 LAN_URL="http://${LAN_IP}:8788"
