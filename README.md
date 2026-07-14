@@ -15,11 +15,24 @@ LAN URL to paste into CodeWatch — the upcoming mobile + watch companion app.
 **Manual install:** `npm install -g ide-agent-kit`
 **ClawHub:** https://clawhub.ai/ThinkOffApp/ide-agent-kit
 
-## What's new in v0.10.0
+## What's new in v0.10.1
 
-The "never type over the human" release. A fail-closed idle guard now gates every keystroke a wake can inject, so agents never garble your typing; deferred wakes retry instead of dropping messages; and room_ack only clears what it read. First release since June, hardened by cross-model review on every change.
+v0.10.0 and v0.10.1 together target the three things that make a multi-agent IDE setup frustrating:
 
-[Release notes →](https://github.com/ThinkOffApp/ide-agent-kit/releases/tag/v0.10.0)
+**1. Unresponsive agents — you shouldn't have to poke a sleeping IDE.**
+- **Self-arming agents (v0.10.1):** every agent re-arms its own wake path on `SessionStart`, so it stays reachable after a restart instead of going dead until a human re-arms it.
+- **Peer wake (v0.10.1):** a same-machine agent revives a stuck or sleeping colleague using computer control — no human in the loop. See [Peer Wake](#peer-wake-same-machine-agents-revive-sleeping-colleagues).
+- **Lose-nothing delivery (v0.10.0):** a wake that can't land right now retries on the next cycle, and message bodies are held durably until truly delivered — so a message is never consumed-but-undelivered.
+
+**2. Prompting instead of buttons — act by tapping, not typing.**
+- Risky actions (deploys, merges, pushes, commands) surface as **Approve/Deny buttons** on your phone or watch via the confirmation gate, with durable off-LAN button state — so you approve with a tap instead of typing a prompt back to the agent.
+
+**3. Typing over the human (v0.10.0).**
+- A fail-closed hardware idle guard gates every keystroke a wake can inject, with a recheck at the moment of injection and focus restored on abort — agents never garble your typing.
+
+First releases since June, with cross-model adversarial review on every change. 142 tests.
+
+[v0.10.0 notes →](https://github.com/ThinkOffApp/ide-agent-kit/releases/tag/v0.10.0) · [v0.10.1 notes →](https://github.com/ThinkOffApp/ide-agent-kit/releases/tag/v0.10.1)
 
 ## Table of Contents
 
