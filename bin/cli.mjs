@@ -1809,6 +1809,35 @@ fi
     } catch (err) {
       console.warn(`Skipped SessionStart auto-bootstrap hook: ${err?.message || err}`);
     }
+
+    // PreToolUse guard: block Claude Code's built-in AskUserQuestion modal.
+    // It freezes the whole session behind a screen-only popup the user never
+    // sees on their phone, and goes stale — the 9.5h hang on 2026-07-14.
+    // Decisions must go to the room / a phone card, and the agent stays live.
+    try {
+      const { chmodSync, copyFileSync } = await import('node:fs');
+      const { fileURLToPath } = await import('node:url');
+      const scriptsDir = resolve('.claude', 'scripts');
+      if (!existsSync(scriptsDir)) mkdirSync(scriptsDir, { recursive: true });
+      const guardScript = resolve(scriptsDir, 'block-modal-questions.mjs');
+      if (!existsSync(guardScript)) {
+        const sourceScript = fileURLToPath(new URL('../scripts/block-modal-questions.mjs', import.meta.url));
+        copyFileSync(sourceScript, guardScript);
+        chmodSync(guardScript, 0o755);
+        console.log(`Created ${guardScript}`);
+      }
+      const settingsPath = resolve('.claude', 'settings.json');
+      const { changed, backupPath } = ensureHookInSettingsFile(
+        settingsPath, 'PreToolUse', `node ${guardScript}`, { timeout: 5 }
+      );
+      if (changed) {
+        console.log(`Installed PreToolUse modal-question guard in ${settingsPath}${backupPath ? ` (backup: ${backupPath})` : ''}`);
+      } else {
+        console.log(`PreToolUse modal-question guard already present in ${settingsPath}`);
+      }
+    } catch (err) {
+      console.warn(`Skipped PreToolUse modal-question guard: ${err?.message || err}`);
+    }
   }
 
   if (targetIde === 'codex') {
