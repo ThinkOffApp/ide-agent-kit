@@ -45,6 +45,8 @@
     <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
     <key>IAK_ROOT</key>
     <string>REPLACE_WITH_IAK_ROOT</string>
+    <key>IAK_CONFIG</key>
+    <string>REPLACE_WITH_IAK_ROOT/ide-agent-kit.json</string>
   </dict>
   <key>RunAtLoad</key>
   <true/>

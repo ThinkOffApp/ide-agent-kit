@@ -32,8 +32,27 @@ const REPO  = process.env.IAK_ROOT || new URL('..', import.meta.url).pathname.re
 let _key;
 function KEY() {
   if (_key === undefined) {
-    _key = process.env.GROUPMIND_KEY || process.env.ANTFARM_KEY
-      || JSON.parse(readFileSync(process.env.IAK_CONFIG || `${REPO}/config/macbook.json`, 'utf8')).poller.api_key;
+    // Resolve the key from env, else the config the installer actually writes
+    // (ide-agent-kit.json), falling back to the legacy config/macbook.json so
+    // existing hand-wired setups keep working (codex review, #34: the opt-in
+    // install only sets IAK_ROOT, so a macbook.json-only default threw every
+    // tick on a fresh install).
+    if (process.env.GROUPMIND_KEY || process.env.ANTFARM_KEY) {
+      _key = process.env.GROUPMIND_KEY || process.env.ANTFARM_KEY;
+    } else {
+      const candidates = [
+        process.env.IAK_CONFIG,
+        `${REPO}/ide-agent-kit.json`,
+        `${REPO}/config/macbook.json`,
+      ].filter(Boolean);
+      let found;
+      for (const c of candidates) {
+        try { found = JSON.parse(readFileSync(c, 'utf8'))?.poller?.api_key; } catch { /* next */ }
+        if (found) break;
+      }
+      if (!found) throw new Error(`team-watchdog: no GROUPMIND_KEY and no poller.api_key in ${candidates.join(', ')}`);
+      _key = found;
+    }
   }
   return _key;
 }
