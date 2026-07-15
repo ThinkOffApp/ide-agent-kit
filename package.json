@@ -11,7 +11,8 @@
     "test": "node --test test/*.test.mjs packages/user-intent-kit/test/*.test.js",
     "start": "node bin/cli.mjs serve",
     "mcp": "node bin/iak-mcp.mjs",
-    "relay": "node scripts/local-relay.mjs"
+    "relay": "node scripts/local-relay.mjs",
+    "agent": "node scripts/local-agent.mjs"
   },
   "keywords": [
     "ide",
