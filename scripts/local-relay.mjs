@@ -52,6 +52,10 @@ function readMessages(storePath) {
     if (!line.trim()) continue;
     try { out.push(JSON.parse(line)); } catch { /* skip a corrupt line, never crash a read */ }
   }
+  // `seq` is the 1-based append position, assigned HERE on read so it is present
+  // and correct even for rows written before seq existed (e.g. a store from the
+  // #37 MVP). This is the authoritative cursor value; any stored seq is ignored.
+  out.forEach((m, i) => { m.seq = i + 1; });
   return out;
 }
 
@@ -123,12 +127,13 @@ export function startRelay(opts = {}) {
 
   if (!token) log('WARNING: no IAK_RELAY_TOKEN set — relay is LAN-open (fine on a trusted home LAN only).');
 
-  // Monotonic per-message sequence, resumed from the store. `created_at` is
+  // `seq` = 1-based append position (see readMessages). `created_at` is
   // millisecond-resolution so it can't cursor exactly (a same-ms checkpoint
-  // would skip messages); `seq` is the precise cursor for incremental fetch,
-  // which the failover + sync layers rely on.
-  let nextSeq = readMessages(storePath).reduce((mx, m) => Math.max(mx, m.seq || 0), 0) + 1;
-  const commit = (msg) => { msg.seq = nextSeq++; appendMessage(storePath, msg); return msg; };
+  // would skip messages); `seq` is the precise cursor the failover + sync
+  // layers rely on. `count` is seeded from the (possibly pre-seq) store so old
+  // rows are counted, and it tracks the next position across appends in-process.
+  let count = readMessages(storePath).length;
+  const commit = (msg) => { msg.seq = ++count; appendMessage(storePath, msg); return msg; };
 
   function authorized(req) {
     if (!token) return true;
@@ -153,12 +158,19 @@ export function startRelay(opts = {}) {
         const room = decodeURIComponent(getMatch[1]);
         const limit = Math.min(Math.max(1, Number(url.searchParams.get('limit')) || DEFAULT_LIMIT), MAX_LIMIT);
         const since = url.searchParams.get('since');
-        const after = url.searchParams.get('after'); // exact seq cursor
-        // readMessages returns JSONL append order = chronological.
-        let msgs = readMessages(storePath).filter((m) => m.room === room);
-        if (since) msgs = msgs.filter((m) => m.created_at > since);
+        const after = url.searchParams.get('after'); // exact seq cursor (authoritative)
         const cursoring = after !== null && after !== '';
-        if (cursoring) msgs = msgs.filter((m) => (m.seq ?? 0) > Number(after));
+        // readMessages returns JSONL append order = chronological, each with its
+        // positional seq.
+        let msgs = readMessages(storePath).filter((m) => m.room === room);
+        if (cursoring) {
+          // `after` (seq) is authoritative — never ALSO narrow by the
+          // millisecond `since`, which would re-drop the same-ms messages the
+          // cursor is meant to return (PR #38 review).
+          msgs = msgs.filter((m) => m.seq > Number(after));
+        } else if (since) {
+          msgs = msgs.filter((m) => m.created_at > since);
+        }
         // Cursor feed (`after`): chronological forward from the cursor, capped —
         // the client advances its cursor and re-fetches, so nothing is skipped
         // even for same-millisecond messages. Recent view (no cursor):

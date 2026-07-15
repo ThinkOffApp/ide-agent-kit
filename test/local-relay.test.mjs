@@ -3,7 +3,7 @@ import test from 'node:test';
 import { once } from 'node:events';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { rmSync } from 'node:fs';
+import { rmSync, writeFileSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { startRelay } from '../scripts/local-relay.mjs';
 
@@ -163,4 +163,47 @@ test('after-cursor honors limit and stays chronological (forward feed pages)', a
     const page = await (await fetch(`${base}/api/v1/rooms/c/messages?after=0&limit=2`, { headers })).json();
     assert.deepEqual(page.messages.map((m) => m.body), ['m1', 'm2'], 'oldest-first page from the cursor');
   });
+});
+
+test('after is authoritative over since (since must not re-drop same-ms messages)', async () => {
+  await withRelay({}, async ({ base, headers }) => {
+    for (const n of [1, 2, 3]) {
+      await fetch(`${base}/api/v1/messages`, {
+        method: 'POST', headers: j(headers), body: JSON.stringify({ room: 'c', body: `m${n}` }),
+      });
+    }
+    // A future `since` would exclude everything on its own; with `after=0`
+    // present it must be ignored, so all three still come back.
+    const future = new Date(Date.now() + 60_000).toISOString();
+    const res = await (await fetch(
+      `${base}/api/v1/rooms/c/messages?after=0&since=${encodeURIComponent(future)}`, { headers })).json();
+    assert.deepEqual(res.messages.map((m) => m.body), ['m1', 'm2', 'm3'], 'after wins; since ignored');
+  });
+});
+
+test('rows written before seq existed still get a positional seq (upgrade compat)', async () => {
+  const storePath = join(tmpdir(), `iak-relay-seed-${randomUUID()}.jsonl`);
+  // Simulate a #37-era store: rows with NO seq field.
+  const row = (id, body) => JSON.stringify({
+    id, room: 'r', from: '@x', body, created_at: '2026-01-01T00:00:00.000Z', origin: 'local-relay',
+  });
+  writeFileSync(storePath, `${row('a', 'old1')}\n${row('b', 'old2')}\n`);
+  const server = startRelay({ port: 0, storePath, logger: () => {} });
+  await once(server, 'listening');
+  const base = `http://127.0.0.1:${server.address().port}`;
+  try {
+    // after=0 must include BOTH pre-seq rows (not silently skip them)
+    const feed = await (await fetch(`${base}/api/v1/rooms/r/messages?after=0`)).json();
+    assert.deepEqual(feed.messages.map((m) => m.body), ['old1', 'old2']);
+    assert.deepEqual(feed.messages.map((m) => m.seq), [1, 2], 'positional seq assigned to legacy rows');
+    // a new POST continues the sequence past the seeded rows
+    const posted = await (await fetch(`${base}/api/v1/messages`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ room: 'r', body: 'new' }),
+    })).json();
+    assert.equal(posted.seq, 3, 'new message continues after the seeded rows');
+  } finally {
+    server.close();
+    await once(server, 'close');
+    rmSync(storePath, { force: true });
+  }
 });
