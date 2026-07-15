@@ -36,13 +36,16 @@ export function sameHandle(a, b) {
 }
 
 // Ask the local Ollama model for a reply. Returns trimmed text ('' on empty).
-export async function generateReply({ url, model, systemPrompt, context }) {
+export async function generateReply({ url, model, systemPrompt, context, keepAlive }) {
   const res = await fetch(`${url.replace(/\/$/, '')}/api/chat`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
       model,
       stream: false,
+      // Unload the model after idle so a big local model (e.g. the Mini's 17GB
+      // MoE) doesn't permanently pin RAM the machine's other services need.
+      keep_alive: keepAlive || '5m',
       messages: [
         ...(systemPrompt ? [{ role: 'system', content: systemPrompt }] : []),
         { role: 'user', content: context },
@@ -144,7 +147,11 @@ if (import.meta.url === `file://${process.argv[1]}`) {
     room: process.env.AGENT_ROOM || base?.poller?.room || base?.mcp?.confirmations?.room || 'thinkoff-development',
     cloud: { baseUrl: 'https://groupmind.one/api/v1', apiKey: process.env.AGENT_KEY || base?.poller?.api_key },
     relay: process.env.RELAY_URL ? { baseUrl: process.env.RELAY_URL, token: process.env.IAK_RELAY_TOKEN } : undefined,
-    ollama: { url: process.env.OLLAMA_URL || 'http://127.0.0.1:11434', model: process.env.OLLAMA_MODEL || 'hf.co/unsloth/Qwen3.6-35B-A3B-GGUF:UD-Q2_K_XL' },
+    ollama: {
+      url: process.env.OLLAMA_URL || 'http://127.0.0.1:11434',
+      model: process.env.OLLAMA_MODEL || 'hf.co/unsloth/Qwen3.6-35B-A3B-GGUF:UD-Q3_K_M',
+      keepAlive: process.env.OLLAMA_KEEP_ALIVE || '5m',
+    },
     systemPrompt: process.env.AGENT_SYSTEM
       || `You are ${process.env.AGENT_HANDLE || 'mm-local'}, a local on-device model running on a Mac mini in the ThinkOff fleet room. Be concise and useful. You run fully offline via Ollama.`,
     respondTo: process.env.AGENT_RESPOND_TO || 'mention',
