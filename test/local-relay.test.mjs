@@ -126,3 +126,41 @@ test('unknown route is 404', async () => {
     assert.equal(r.status, 404);
   });
 });
+
+test('messages get a monotonic seq; after-cursor is a no-skip chronological feed', async () => {
+  await withRelay({}, async ({ base, headers }) => {
+    const posted = [];
+    for (const n of [1, 2, 3, 4]) {
+      const r = await fetch(`${base}/api/v1/messages`, {
+        method: 'POST', headers: j(headers), body: JSON.stringify({ room: 'c', body: `m${n}` }),
+      });
+      posted.push(await r.json());
+    }
+    // seq strictly increasing even when created_at collides in the same ms
+    for (let i = 1; i < posted.length; i++) assert.ok(posted[i].seq > posted[i - 1].seq, 'seq increases');
+
+    // cursor from 0: all four, oldest-first
+    const all = await (await fetch(`${base}/api/v1/rooms/c/messages?after=0`, { headers })).json();
+    assert.deepEqual(all.messages.map((m) => m.body), ['m1', 'm2', 'm3', 'm4']);
+
+    // cursor from m2's seq: exactly m3, m4 — the same-ms skip that `since` alone would cause
+    const after2 = await (await fetch(`${base}/api/v1/rooms/c/messages?after=${posted[1].seq}`, { headers })).json();
+    assert.deepEqual(after2.messages.map((m) => m.body), ['m3', 'm4']);
+
+    // cursor from the last seq: caught up, empty
+    const afterLast = await (await fetch(`${base}/api/v1/rooms/c/messages?after=${posted[3].seq}`, { headers })).json();
+    assert.equal(afterLast.count, 0);
+  });
+});
+
+test('after-cursor honors limit and stays chronological (forward feed pages)', async () => {
+  await withRelay({}, async ({ base, headers }) => {
+    for (const n of [1, 2, 3, 4, 5]) {
+      await fetch(`${base}/api/v1/messages`, {
+        method: 'POST', headers: j(headers), body: JSON.stringify({ room: 'c', body: `m${n}` }),
+      });
+    }
+    const page = await (await fetch(`${base}/api/v1/rooms/c/messages?after=0&limit=2`, { headers })).json();
+    assert.deepEqual(page.messages.map((m) => m.body), ['m1', 'm2'], 'oldest-first page from the cursor');
+  });
+});

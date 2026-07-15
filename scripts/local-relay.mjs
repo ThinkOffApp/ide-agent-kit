@@ -35,7 +35,7 @@
 
 import http from 'node:http';
 import { appendFileSync, mkdirSync, readFileSync, existsSync } from 'node:fs';
-import { randomUUID } from 'node:crypto';
+import { randomUUID, timingSafeEqual, createHash } from 'node:crypto';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 
@@ -58,6 +58,14 @@ function readMessages(storePath) {
 function appendMessage(storePath, msg) {
   mkdirSync(dirname(storePath), { recursive: true });
   appendFileSync(storePath, JSON.stringify(msg) + '\n');
+}
+
+// Constant-time token compare. Hash both sides to a fixed 32 bytes first so
+// timingSafeEqual never sees a length mismatch (and length isn't leaked).
+function safeTokenEqual(provided, expected) {
+  const a = createHash('sha256').update(String(provided ?? '')).digest();
+  const b = createHash('sha256').update(String(expected ?? '')).digest();
+  return timingSafeEqual(a, b);
 }
 
 function send(res, status, obj) {
@@ -115,10 +123,17 @@ export function startRelay(opts = {}) {
 
   if (!token) log('WARNING: no IAK_RELAY_TOKEN set — relay is LAN-open (fine on a trusted home LAN only).');
 
+  // Monotonic per-message sequence, resumed from the store. `created_at` is
+  // millisecond-resolution so it can't cursor exactly (a same-ms checkpoint
+  // would skip messages); `seq` is the precise cursor for incremental fetch,
+  // which the failover + sync layers rely on.
+  let nextSeq = readMessages(storePath).reduce((mx, m) => Math.max(mx, m.seq || 0), 0) + 1;
+  const commit = (msg) => { msg.seq = nextSeq++; appendMessage(storePath, msg); return msg; };
+
   function authorized(req) {
     if (!token) return true;
     const bearer = (req.headers['authorization'] || '').replace(/^Bearer\s+/i, '');
-    return req.headers['x-api-key'] === token || bearer === token;
+    return safeTokenEqual(req.headers['x-api-key'], token) || safeTokenEqual(bearer, token);
   }
 
   const server = http.createServer(async (req, res) => {
@@ -138,12 +153,17 @@ export function startRelay(opts = {}) {
         const room = decodeURIComponent(getMatch[1]);
         const limit = Math.min(Math.max(1, Number(url.searchParams.get('limit')) || DEFAULT_LIMIT), MAX_LIMIT);
         const since = url.searchParams.get('since');
+        const after = url.searchParams.get('after'); // exact seq cursor
+        // readMessages returns JSONL append order = chronological.
         let msgs = readMessages(storePath).filter((m) => m.room === room);
         if (since) msgs = msgs.filter((m) => m.created_at > since);
-        // JSONL append order IS chronological, so it orders even messages that
-        // share a millisecond timestamp. Take the last `limit` (newest) and
-        // reverse to newest-first, matching GroupMind's shape.
-        const messages = msgs.slice(-limit).reverse();
+        const cursoring = after !== null && after !== '';
+        if (cursoring) msgs = msgs.filter((m) => (m.seq ?? 0) > Number(after));
+        // Cursor feed (`after`): chronological forward from the cursor, capped —
+        // the client advances its cursor and re-fetches, so nothing is skipped
+        // even for same-millisecond messages. Recent view (no cursor):
+        // newest-first, matching GroupMind's shape.
+        const messages = cursoring ? msgs.slice(0, limit) : msgs.slice(-limit).reverse();
         return send(res, 200, { messages, count: messages.length });
       }
 
@@ -152,8 +172,7 @@ export function startRelay(opts = {}) {
         const b = await readJsonBody(req);
         const { msg, error } = buildMessage({ room: b.room, body: b.body, from: b.from, metadata: b.metadata });
         if (error) return send(res, 400, { error });
-        appendMessage(storePath, msg);
-        return send(res, 201, msg);
+        return send(res, 201, commit(msg));
       }
 
       // POST /api/v1/rooms/:room/messages  { body, ... }
@@ -163,8 +182,7 @@ export function startRelay(opts = {}) {
         const b = await readJsonBody(req);
         const { msg, error } = buildMessage({ room, body: b.body, from: b.from, metadata: b.metadata });
         if (error) return send(res, 400, { error });
-        appendMessage(storePath, msg);
-        return send(res, 201, msg);
+        return send(res, 201, commit(msg));
       }
 
       return send(res, 404, { error: 'not found' });
