@@ -52,7 +52,9 @@ export async function generateReply({ url, model, systemPrompt, context }) {
   });
   if (!res.ok) throw new Error(`ollama HTTP ${res.status}: ${(await res.text()).slice(0, 120)}`);
   const d = await res.json();
-  return String(d?.message?.content || '').trim();
+  // Strip thinking-model output (<think>...</think>) so room replies read clean —
+  // the fleet's local models (e.g. qwen3.6 MoE) are reasoning models.
+  return String(d?.message?.content || '').replace(/<think>[\s\S]*?<\/think>/gi, '').trim();
 }
 
 function headersFor(ep) {
@@ -142,7 +144,7 @@ if (import.meta.url === `file://${process.argv[1]}`) {
     room: process.env.AGENT_ROOM || base?.poller?.room || base?.mcp?.confirmations?.room || 'thinkoff-development',
     cloud: { baseUrl: 'https://groupmind.one/api/v1', apiKey: process.env.AGENT_KEY || base?.poller?.api_key },
     relay: process.env.RELAY_URL ? { baseUrl: process.env.RELAY_URL, token: process.env.IAK_RELAY_TOKEN } : undefined,
-    ollama: { url: process.env.OLLAMA_URL || 'http://127.0.0.1:11434', model: process.env.OLLAMA_MODEL || 'gpt-oss:20b' },
+    ollama: { url: process.env.OLLAMA_URL || 'http://127.0.0.1:11434', model: process.env.OLLAMA_MODEL || 'hf.co/unsloth/Qwen3.6-35B-A3B-GGUF:UD-Q2_K_XL' },
     systemPrompt: process.env.AGENT_SYSTEM
       || `You are ${process.env.AGENT_HANDLE || 'mm-local'}, a local on-device model running on a Mac mini in the ThinkOff fleet room. Be concise and useful. You run fully offline via Ollama.`,
     respondTo: process.env.AGENT_RESPOND_TO || 'mention',

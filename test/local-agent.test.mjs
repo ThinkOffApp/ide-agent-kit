@@ -45,6 +45,26 @@ test('generateReply POSTs to ollama /api/chat and returns the content', async ()
   }
 });
 
+test('generateReply strips <think> reasoning from thinking models', async () => {
+  const server = http.createServer((req, res) => {
+    let b = '';
+    req.on('data', (c) => (b += c));
+    req.on('end', () => {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ message: { content: '<think>let me reason about this\nstep by step</think>\n\nThe answer is 42.' } }));
+    });
+  });
+  server.listen(0);
+  await once(server, 'listening');
+  try {
+    const out = await generateReply({ url: `http://127.0.0.1:${server.address().port}`, model: 'm', context: 'q' });
+    assert.equal(out, 'The answer is 42.', 'thinking stripped, only the answer remains');
+  } finally {
+    server.close();
+    await once(server, 'close');
+  }
+});
+
 test('tick: skips history, then replies to a mention (not self, not non-mention)', async () => {
   const posts = [];
   const cfg = { room: 'r', handle: 'mm-local', ollama: { url: 'x', model: 'm' }, respondTo: 'mention' };
