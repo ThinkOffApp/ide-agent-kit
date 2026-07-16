@@ -35,7 +35,7 @@
 
 import http from 'node:http';
 import { appendFileSync, mkdirSync, readFileSync, existsSync } from 'node:fs';
-import { randomUUID } from 'node:crypto';
+import { randomUUID, timingSafeEqual, createHash } from 'node:crypto';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 
@@ -52,12 +52,24 @@ function readMessages(storePath) {
     if (!line.trim()) continue;
     try { out.push(JSON.parse(line)); } catch { /* skip a corrupt line, never crash a read */ }
   }
+  // `seq` is the 1-based append position, assigned HERE on read so it is present
+  // and correct even for rows written before seq existed (e.g. a store from the
+  // #37 MVP). This is the authoritative cursor value; any stored seq is ignored.
+  out.forEach((m, i) => { m.seq = i + 1; });
   return out;
 }
 
 function appendMessage(storePath, msg) {
   mkdirSync(dirname(storePath), { recursive: true });
   appendFileSync(storePath, JSON.stringify(msg) + '\n');
+}
+
+// Constant-time token compare. Hash both sides to a fixed 32 bytes first so
+// timingSafeEqual never sees a length mismatch (and length isn't leaked).
+function safeTokenEqual(provided, expected) {
+  const a = createHash('sha256').update(String(provided ?? '')).digest();
+  const b = createHash('sha256').update(String(expected ?? '')).digest();
+  return timingSafeEqual(a, b);
 }
 
 function send(res, status, obj) {
@@ -115,10 +127,18 @@ export function startRelay(opts = {}) {
 
   if (!token) log('WARNING: no IAK_RELAY_TOKEN set — relay is LAN-open (fine on a trusted home LAN only).');
 
+  // `seq` = 1-based append position (see readMessages). `created_at` is
+  // millisecond-resolution so it can't cursor exactly (a same-ms checkpoint
+  // would skip messages); `seq` is the precise cursor the failover + sync
+  // layers rely on. `count` is seeded from the (possibly pre-seq) store so old
+  // rows are counted, and it tracks the next position across appends in-process.
+  let count = readMessages(storePath).length;
+  const commit = (msg) => { msg.seq = ++count; appendMessage(storePath, msg); return msg; };
+
   function authorized(req) {
     if (!token) return true;
     const bearer = (req.headers['authorization'] || '').replace(/^Bearer\s+/i, '');
-    return req.headers['x-api-key'] === token || bearer === token;
+    return safeTokenEqual(req.headers['x-api-key'], token) || safeTokenEqual(bearer, token);
   }
 
   const server = http.createServer(async (req, res) => {
@@ -138,12 +158,24 @@ export function startRelay(opts = {}) {
         const room = decodeURIComponent(getMatch[1]);
         const limit = Math.min(Math.max(1, Number(url.searchParams.get('limit')) || DEFAULT_LIMIT), MAX_LIMIT);
         const since = url.searchParams.get('since');
+        const after = url.searchParams.get('after'); // exact seq cursor (authoritative)
+        const cursoring = after !== null && after !== '';
+        // readMessages returns JSONL append order = chronological, each with its
+        // positional seq.
         let msgs = readMessages(storePath).filter((m) => m.room === room);
-        if (since) msgs = msgs.filter((m) => m.created_at > since);
-        // JSONL append order IS chronological, so it orders even messages that
-        // share a millisecond timestamp. Take the last `limit` (newest) and
-        // reverse to newest-first, matching GroupMind's shape.
-        const messages = msgs.slice(-limit).reverse();
+        if (cursoring) {
+          // `after` (seq) is authoritative — never ALSO narrow by the
+          // millisecond `since`, which would re-drop the same-ms messages the
+          // cursor is meant to return (PR #38 review).
+          msgs = msgs.filter((m) => m.seq > Number(after));
+        } else if (since) {
+          msgs = msgs.filter((m) => m.created_at > since);
+        }
+        // Cursor feed (`after`): chronological forward from the cursor, capped —
+        // the client advances its cursor and re-fetches, so nothing is skipped
+        // even for same-millisecond messages. Recent view (no cursor):
+        // newest-first, matching GroupMind's shape.
+        const messages = cursoring ? msgs.slice(0, limit) : msgs.slice(-limit).reverse();
         return send(res, 200, { messages, count: messages.length });
       }
 
@@ -152,8 +184,7 @@ export function startRelay(opts = {}) {
         const b = await readJsonBody(req);
         const { msg, error } = buildMessage({ room: b.room, body: b.body, from: b.from, metadata: b.metadata });
         if (error) return send(res, 400, { error });
-        appendMessage(storePath, msg);
-        return send(res, 201, msg);
+        return send(res, 201, commit(msg));
       }
 
       // POST /api/v1/rooms/:room/messages  { body, ... }
@@ -163,8 +194,7 @@ export function startRelay(opts = {}) {
         const b = await readJsonBody(req);
         const { msg, error } = buildMessage({ room, body: b.body, from: b.from, metadata: b.metadata });
         if (error) return send(res, 400, { error });
-        appendMessage(storePath, msg);
-        return send(res, 201, msg);
+        return send(res, 201, commit(msg));
       }
 
       return send(res, 404, { error: 'not found' });

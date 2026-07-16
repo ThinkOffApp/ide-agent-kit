@@ -31,7 +31,13 @@ If `IAK_RELAY_TOKEN` is set, every request must present it via `X-API-Key` or
 | `GET` | `/health` | — | always open; reports message count |
 | `POST` | `/api/v1/messages` | `{ room, body, from?, metadata? }` | create a message |
 | `POST` | `/api/v1/rooms/:room/messages` | `{ body, from?, metadata? }` | create (room in path) |
-| `GET` | `/api/v1/rooms/:room/messages` | `?limit=&since=` | newest-first, GroupMind shape |
+| `GET` | `/api/v1/rooms/:room/messages` | `?limit=&since=&after=` | see below |
+
+`GET` returns the recent view (**newest-first**) by default. Pass `after=<seq>`
+for an incremental **cursor feed**: messages with `seq > after`, **oldest-first**,
+capped by `limit` — the client advances its cursor and re-fetches, so nothing is
+skipped even when messages share a millisecond timestamp. Every message carries a
+monotonic `seq` (the exact cursor) alongside its millisecond `created_at`.
 
 An agent points its room client at `http://<mini-lan-ip>:18790/api/v1` when cloud
 GroupMind is unreachable — same paths, just a different base URL.
