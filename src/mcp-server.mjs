@@ -386,6 +386,7 @@ export async function runMcpServer({ configPath } = {}) {
       receiptsPath: config?.receipts?.path,
       announce,
       wakeScript,
+      sessions: confirmCfg.sessions,
     });
     process.stderr.write(
       `[iak-mcp] confirmations: enabled on ${daemonBase} (in-process) — channels: ${Object.keys(announcerMap).join(', ')}\n`

@@ -73,6 +73,7 @@ startConfirmationsServer({
   receiptsPath: config?.receipts?.path,
   announce: serverAnnounce,
   wakeScript,
+  sessions: cc.sessions,
 });
 console.log(`[iak-mcp-daemon] HTTP listener on http://${cc.host || '127.0.0.1'}:${cc.port || 8788} (POST /intent enabled: ${Object.keys(serverAnnouncerMap).join(',') || 'no announcers'})`);
 
