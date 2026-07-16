@@ -2,7 +2,7 @@
 
 import { describe, it, afterEach } from 'node:test';
 import { strict as assert } from 'node:assert';
-import { execFileSync } from 'node:child_process';
+import { execFile, execFileSync, spawn, spawnSync } from 'node:child_process';
 import { mkdtempSync, writeFileSync, readFileSync, existsSync, rmSync, realpathSync } from 'node:fs';
 import { join, dirname, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -42,6 +42,7 @@ function runHook({ input = '', env = {} } = {}) {
       ...process.env,
       IAK_CONFIG_JSON: '/tmp/iak-nonexistent-config.json',
       IAK_NEW_FILE: '/tmp/iak-nonexistent-new-messages.txt',
+      IAK_RESPONDER_LOCK: 'off',
       ...env,
     },
   });
@@ -106,6 +107,19 @@ describe('session-bootstrap.sh', () => {
     assert.match(ctx, /for @testbot/);
   });
 
+  it('is disabled entirely with IAK_RESPONDER_LOCK=off (no lock file, no lock text)', () => {
+    const dir = tempDir();
+    const newFile = join(dir, 'new.txt');
+    const payload = runHook({
+      input: JSON.stringify({ source: 'startup', session_id: 'sess-off' }),
+      env: { IAK_NEW_FILE: newFile },
+    });
+    const ctx = payload.hookSpecificOutput.additionalContext;
+    assert.match(ctx, /arm one now/);
+    assert.ok(!ctx.includes('room-responder lock'));
+    assert.equal(existsSync(`${newFile}.responder.lock`), false);
+  });
+
   it('env overrides beat the config values', () => {
     const dir = tempDir();
     const configPath = join(dir, 'ide-agent-kit.json');
@@ -121,6 +135,145 @@ describe('session-bootstrap.sh', () => {
     assert.ok(ctx.includes(envFile));
     assert.ok(!ctx.includes('/tmp/from-config.txt'));
     assert.match(ctx, /for @envbot/);
+  });
+});
+
+describe('single-responder lock', () => {
+  let sleeper = null;
+  const startSleeper = () => {
+    sleeper = spawn('sleep', ['60'], { stdio: 'ignore' });
+    sleeper.unref();
+    return sleeper.pid;
+  };
+  afterEach(() => {
+    if (sleeper) {
+      try { sleeper.kill('SIGKILL'); } catch { /* already gone */ }
+      sleeper = null;
+    }
+  });
+
+  const lockEnv = (dir) => {
+    // Undo runHook's 'off' default: use the real derived-path behavior.
+    return { IAK_NEW_FILE: join(dir, 'new.txt'), IAK_RESPONDER_LOCK: `${join(dir, 'new.txt')}.responder.lock` };
+  };
+
+  it('first session claims the lock and gets the ACTIVE bootstrap', () => {
+    const dir = tempDir();
+    const env = lockEnv(dir);
+    const payload = runHook({
+      input: JSON.stringify({ source: 'startup', session_id: 'sess-a' }),
+      env,
+    });
+    const ctx = payload.hookSpecificOutput.additionalContext;
+    assert.match(ctx, /arm one now/);
+    assert.match(ctx, /You hold the room-responder lock/);
+    const lock = readFileSync(env.IAK_RESPONDER_LOCK, 'utf8');
+    assert.match(lock, /^pid=\d+$/m);
+    assert.match(lock, /^sid=sess-a$/m);
+  });
+
+  it('derives the lock path from the notification file when not set explicitly', () => {
+    const dir = tempDir();
+    const newFile = join(dir, 'new.txt');
+    const env = { ...process.env, IAK_CONFIG_JSON: '/tmp/iak-nonexistent-config.json', IAK_NEW_FILE: newFile };
+    delete env.IAK_RESPONDER_LOCK;
+    execFileSync('bash', [bootstrapScript], { input: '{"session_id":"sess-d"}', encoding: 'utf8', env });
+    assert.equal(existsSync(`${newFile}.responder.lock`), true);
+  });
+
+  it('second session goes PASSIVE while the owner process is alive', () => {
+    const dir = tempDir();
+    const env = lockEnv(dir);
+    const ownerPid = startSleeper();
+    writeFileSync(env.IAK_RESPONDER_LOCK, `pid=${ownerPid}\nsid=sess-owner\n`);
+    const payload = runHook({
+      input: JSON.stringify({ source: 'startup', session_id: 'sess-b' }),
+      env,
+    });
+    const ctx = payload.hookSpecificOutput.additionalContext;
+    assert.match(ctx, /PASSIVE/);
+    assert.match(ctx, /Do NOT arm a Monitor/);
+    assert.ok(!ctx.includes('arm one now'));
+    // lock untouched: still owned by the live owner
+    assert.match(readFileSync(env.IAK_RESPONDER_LOCK, 'utf8'), new RegExp(`^pid=${ownerPid}$`, 'm'));
+  });
+
+  it('steals a stale lock whose owner process is dead', () => {
+    const dir = tempDir();
+    const env = lockEnv(dir);
+    const dead = spawnSync('true');
+    writeFileSync(env.IAK_RESPONDER_LOCK, `pid=${dead.pid}\nsid=sess-dead\n`);
+    const payload = runHook({
+      input: JSON.stringify({ source: 'startup', session_id: 'sess-c' }),
+      env,
+    });
+    const ctx = payload.hookSpecificOutput.additionalContext;
+    assert.match(ctx, /arm one now/);
+    assert.match(ctx, /You hold the room-responder lock/);
+    assert.match(readFileSync(env.IAK_RESPONDER_LOCK, 'utf8'), /^sid=sess-c$/m);
+  });
+
+  it('the same session id reclaims its lock on resume even under a live foreign pid', () => {
+    const dir = tempDir();
+    const env = lockEnv(dir);
+    const ownerPid = startSleeper();
+    writeFileSync(env.IAK_RESPONDER_LOCK, `pid=${ownerPid}\nsid=sess-same\n`);
+    const payload = runHook({
+      input: JSON.stringify({ source: 'resume', session_id: 'sess-same' }),
+      env,
+    });
+    const ctx = payload.hookSpecificOutput.additionalContext;
+    assert.match(ctx, /arm one now/);
+    const lock = readFileSync(env.IAK_RESPONDER_LOCK, 'utf8');
+    assert.match(lock, /^sid=sess-same$/m);
+    assert.ok(!new RegExp(`^pid=${ownerPid}$`, 'm').test(lock), 'pid refreshed to the resuming session');
+  });
+
+  it('steals a lock whose pid was recycled by an unrelated process (pstart mismatch)', () => {
+    const dir = tempDir();
+    const env = lockEnv(dir);
+    const recycled = startSleeper(); // alive, but not the recorded owner:
+    writeFileSync(env.IAK_RESPONDER_LOCK, `pid=${recycled}\nsid=sess-old\npstart=Thu Jan  1 00:00:00 1970\n`);
+    const payload = runHook({
+      input: JSON.stringify({ source: 'startup', session_id: 'sess-f' }),
+      env,
+    });
+    const ctx = payload.hookSpecificOutput.additionalContext;
+    assert.match(ctx, /You hold the room-responder lock/);
+    assert.match(readFileSync(env.IAK_RESPONDER_LOCK, 'utf8'), /^sid=sess-f$/m);
+  });
+
+  it('elects exactly one ACTIVE responder among concurrent fresh claims', async () => {
+    const dir = tempDir();
+    const env = lockEnv(dir);
+    const runs = await Promise.all(Array.from({ length: 6 }, (_, i) =>
+      new Promise((resolvePromise, reject) => {
+        execFile('bash', [bootstrapScript], {
+          encoding: 'utf8',
+          env: {
+            ...process.env,
+            IAK_CONFIG_JSON: '/tmp/iak-nonexistent-config.json',
+            ...env,
+          },
+        }, (err, stdout) => err ? reject(err) : resolvePromise(stdout))
+          .stdin.end(JSON.stringify({ source: 'startup', session_id: `sess-par-${i}` }));
+      })
+    ));
+    const actives = runs.filter((out) =>
+      JSON.parse(out).hookSpecificOutput.additionalContext.includes('You hold the room-responder lock'));
+    assert.equal(actives.length, 1, `expected exactly 1 ACTIVE, got ${actives.length}`);
+  });
+
+  it('a corrupt lock file with a live-pid line still fails safe to PASSIVE, not a crash', () => {
+    const dir = tempDir();
+    const env = lockEnv(dir);
+    const ownerPid = startSleeper();
+    writeFileSync(env.IAK_RESPONDER_LOCK, `garbage line\npid=${ownerPid}\n%%%\n`);
+    const payload = runHook({
+      input: JSON.stringify({ source: 'startup', session_id: 'sess-e' }),
+      env,
+    });
+    assert.match(payload.hookSpecificOutput.additionalContext, /PASSIVE/);
   });
 });
 
