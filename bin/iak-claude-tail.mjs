@@ -10,17 +10,27 @@
 // Env:
 //   IAK_HANDLE          (default: @claudemm) — handle this tail represents
 //   IAK_DAEMON_URL      (default: http://127.0.0.1:8788)
+//   IAK_DAEMON_TOKEN    (default: contents of IAK_DAEMON_TOKEN_FILE) — Bearer
+//   IAK_DAEMON_TOKEN_FILE (default: ~/.config/iak-gate.token)
 //   IAK_TAIL_INTERVAL   (default: 2000) — poll interval in ms
 //   IAK_PROJECTS_DIR    (default: ~/.claude/projects)
 //   IAK_TAIL_INCLUDE_TOOLS (default: 0) — 1 to include tool_use / tool_result
 //   IAK_TAIL_MAX_TEXT   (default: 4000) — clamp text length per event
 
 import { readdir, stat, open } from 'node:fs/promises';
+import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
 
 const HANDLE = process.env.IAK_HANDLE || '@claudemm';
 const DAEMON_URL = (process.env.IAK_DAEMON_URL || 'http://127.0.0.1:8788').replace(/\/$/, '');
+// The daemon requires a Bearer token on every route since the :8788 auth
+// hardening — without it this tail 401s silently and the IDE channel in
+// CodeWatch stays empty. Token from env, else the standard gate token file.
+const DAEMON_TOKEN = process.env.IAK_DAEMON_TOKEN || (() => {
+  const file = process.env.IAK_DAEMON_TOKEN_FILE || join(homedir(), '.config', 'iak-gate.token');
+  try { return readFileSync(file, 'utf8').trim(); } catch { return ''; }
+})();
 const POLL_MS = parseInt(process.env.IAK_TAIL_INTERVAL || '2000', 10);
 const PROJECTS_DIR = process.env.IAK_PROJECTS_DIR || join(homedir(), '.claude', 'projects');
 const INCLUDE_TOOLS = process.env.IAK_TAIL_INCLUDE_TOOLS === '1';
@@ -135,10 +145,15 @@ async function postEvent(event) {
   try {
     const res = await fetch(`${DAEMON_URL}/ide-chat/${encodeURIComponent(HANDLE)}`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: {
+        'Content-Type': 'application/json',
+        ...(DAEMON_TOKEN ? { Authorization: `Bearer ${DAEMON_TOKEN}` } : {}),
+      },
       body: JSON.stringify(event),
     });
-    if (!res.ok && res.status !== 404) {
+    if (res.status === 401) {
+      console.warn('[iak-claude-tail] daemon 401 — set IAK_DAEMON_TOKEN or IAK_DAEMON_TOKEN_FILE (default ~/.config/iak-gate.token)');
+    } else if (!res.ok && res.status !== 404) {
       console.warn(`[iak-claude-tail] daemon ${res.status} on POST /ide-chat`);
     }
   } catch (e) {
