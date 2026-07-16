@@ -33,6 +33,7 @@ import {
 import { nudgeTmux } from './common/notify.mjs';
 import { tmuxRun } from './ide/tmux-runner.mjs';
 import { loadConfig } from './config.mjs';
+import { assertRoomVoice } from './responder-lock.mjs';
 import {
   createIntent,
   decideIntent,
@@ -710,6 +711,11 @@ export async function runMcpServer({ configPath } = {}) {
         }
         case 'room_post': {
           if (!roomToolsEnabled) return err('room_post: room API is not configured.');
+          // #42: a PASSIVE session (another live session holds the machine's
+          // room-responder lock) is refused here even if it ignores its
+          // injected instructions. Read-only room tools stay available.
+          const voice = assertRoomVoice({ config });
+          if (!voice.allowed) return err(`room_post refused: ${voice.reason}`);
           const posted = await postRoomMessage({
             config,
             room: args.room,
@@ -727,6 +733,8 @@ export async function runMcpServer({ configPath } = {}) {
           if (!roomToolsEnabled) return err('alert_recipient: room API is not configured.');
           if (!args.handle) return err('alert_recipient: handle is required');
           if (!args.body) return err('alert_recipient: body is required');
+          const voice = assertRoomVoice({ config });
+          if (!voice.allowed) return err(`alert_recipient refused: ${voice.reason}`);
           const handle = String(args.handle).startsWith('@') ? String(args.handle) : `@${args.handle}`;
           const posted = await postRoomMessage({
             config,
