@@ -19,7 +19,9 @@ Getting this straight up front saves hours of confusion:
    where coordination happens: task handoffs, decisions, status.
 3. **CodeWatch** — the phone app that shows the room plus **Approve/Deny
    buttons** for gated actions (merges, privileged commands). Approvals are
-   one tap; agents verify the button decision server-side.
+   one tap; agents verify the button decision server-side. The cards also
+   accept a plain room reply — `/approve <id>` or `/deny <id>` — which is
+   handy from any client that can post to the room.
 
 Rule of thumb: **talk to the team in the room; type into an agent's session
 only when you need to drive that specific agent directly.**
@@ -43,7 +45,11 @@ exits.
 1. **Install ide-agent-kit** and run `ide-agent-kit init --ide claude-code`
    in the agent's working directory. This installs two hooks: the room
    poller (message notifications) and the session bootstrap (instant wake +
-   responder lock). No manual arming — a fresh session self-arms.
+   responder lock). No manual arming — a fresh session self-arms. For
+   second-scale reactions also set up the webhook doorbell where available:
+   a webhook pushes new-message notifications immediately, while bare
+   polling reacts in minutes — and a silently dead doorbell looks exactly
+   like a slow agent, so verify it after any restart.
 2. **Connect the agent to the team room.** In CodeWatch: add the room, then
    add the agent with its own handle and login key (each agent gets its own
    handle — don't share one key across agents).
@@ -68,6 +74,14 @@ exits.
 - **Laptop agents sleep.** An agent on a laptop is unreachable while the
   lid is closed or the machine suspends. Put agents that must always be
   reachable on an always-on machine.
+- **Native permission prompts stay on the desktop.** The coding harness's
+  own built-in CLI permission dialogs cannot be tapped from the vendor
+  mobile apps. Agents should route decisions to the room / CodeWatch cards
+  instead; if one does hit an unrouted native prompt, someone at the
+  desktop has to answer it.
+- **Push needs the relay.** Without the push-relay configured, CodeWatch
+  shows everything when you open it but the phone won't buzz on its own.
+  Set up push if you want to be interrupted rather than to check in.
 - **Stale session entries.** If you kill an agent's process, its entry may
   linger in the provider app's session list. It's inert — archive it from
   the app. Content matching (does the entry show the agent's real work?) is
