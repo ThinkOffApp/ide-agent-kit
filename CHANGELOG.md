@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+- **Duplicate room-responder voices**: `session-bootstrap.sh` now enforces a single room responder per notification file via a lock file (`<notification file>.responder.lock`). The first session claims the lock and gets the full bootstrap; any later session on the same machine gets PASSIVE instructions (serve the user directly, never answer the room) instead of booting a second copy of the same handle. The lock stores the owner's pid + session id, so the owner reclaims it across resume/compact, and a lock whose owner process died is stolen automatically. Disable with `IAK_RESPONDER_LOCK=off`, relocate with `IAK_RESPONDER_LOCK=<path>`. Motivation: on 2026-07-16 a stray `claude rc` session on the Mac mini booted the same bootstrap and posted to the room as a second @claudemm, producing conflicting answers.
+
 ## 0.9.0 (2026-06-10)
 
 ### Added
