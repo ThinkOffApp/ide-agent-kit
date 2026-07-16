@@ -21,6 +21,7 @@ import { createServer } from 'node:http';
 import { randomUUID, createHmac, timingSafeEqual } from 'node:crypto';
 import { appendFileSync } from 'node:fs';
 import { spawn } from 'node:child_process';
+import { deliverToSession, listSessionAgents } from './session-send.mjs';
 
 // --- registry ---------------------------------------------------------------
 
@@ -574,6 +575,7 @@ export function startConfirmationsServer({
   receiptsPath,
   announce, // optional: enables POST /intent to create new intents externally
   wakeScript, // optional: shell script path; enables POST /wake to nudge the local IDE
+  sessions, // optional: {agents: {...}} enables POST /sessions/send + GET /sessions/agents
 } = {}) {
   const server = createServer((req, res) => {
     const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
@@ -727,6 +729,51 @@ export function startConfirmationsServer({
           res.end(JSON.stringify({ ok: false, error: e.message || String(e) }));
         }
       });
+      return;
+    }
+    // POST /sessions/send — deliver text into a named agent's live session
+    // (the CodeWatch send-box primitive). Body: {agent, text, from?}.
+    // 202 = accepted for delivery (GUI adapters may wait on the human-idle
+    // guard before typing). See src/session-send.mjs for adapters/config.
+    if (req.method === 'POST' && url.pathname === '/sessions/send') {
+      if (!sessions || !sessions.agents) {
+        res.writeHead(503, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: false, error: 'sessions not configured' }));
+        return;
+      }
+      let body = '';
+      req.on('data', (c) => { body += c; });
+      req.on('end', async () => {
+        let payload;
+        try { payload = JSON.parse(body); } catch {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: false, error: 'invalid json' }));
+          return;
+        }
+        const result = await deliverToSession(sessions, payload.agent, {
+          text: payload.text,
+          from: payload.from,
+        });
+        postReceipt(receiptsPath, {
+          kind: 'sessions.send',
+          agent: payload.agent,
+          from: payload.from || null,
+          ok: result.ok,
+          delivered_via: result.deliveredVia || null,
+          error: result.error || null,
+          at: new Date().toISOString(),
+        });
+        res.writeHead(result.status, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify(result.ok
+          ? { ok: true, agent: payload.agent, deliveredVia: result.deliveredVia }
+          : { ok: false, error: result.error }));
+      });
+      return;
+    }
+    // GET /sessions/agents — send-box target picker.
+    if (req.method === 'GET' && url.pathname === '/sessions/agents') {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ agents: listSessionAgents(sessions) }));
       return;
     }
     // POST /ide-chat/<handle>  body { role, text, ts, session_id, tool_calls? }

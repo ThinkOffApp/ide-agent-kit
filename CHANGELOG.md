@@ -3,6 +3,7 @@
 ## Unreleased
 
 ### Added
+- **Send-to-session**: the :8788 daemon gains `POST /sessions/send {agent, text, from?}` — deliver text as user input into any named agent's live session — plus `GET /sessions/agents` for the target picker. Four delivery adapters, configured per agent under `mcp.confirmations.sessions.agents`: `wake` (spawn a wake/injection script), `gui` (same, chained behind a human-idle guard with `--wait` so it never types over the user), `tmux` (literal `send-keys` + Enter), and `forward` (relay to the owning machine's daemon, provenance passed through so the `[from …]` prefix is applied exactly once). Deliveries are accepted-async (202) and every attempt is receipted. This is the backend half of the CodeWatch send box; it drives any agent uniformly, including headless sessions the provider apps cannot reach.
 - **Responder-lock enforcement in the MCP room tools (#42)**: `room_post` and `alert_recipient` now refuse when another live session holds the machine's room-responder lock — a PASSIVE session that ignores its injected instructions still cannot post as the agent through IAK tooling. Lock semantics mirror the SessionStart hook exactly (pid + process-start-time identity, stale locks ignored, fail-open on mechanics); the owning session is recognized by finding the lock's pid in the caller's process-ancestor chain. Read-only room tools (`room_recent`) are unaffected. Raw HTTP posting against GroupMind is out of scope client-side and tracked in issue #42's server-side follow-up.
 
 ### Fixed
