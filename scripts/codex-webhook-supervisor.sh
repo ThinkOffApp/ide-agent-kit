@@ -44,6 +44,11 @@ receiver_running(){
 }
 start_receiver(){
   receiver_running || {
+    # NODE_BIN must be resolved on its own line: if it sits at the end of the
+    # env-assignment chain, the whole chain becomes an assignment-only
+    # statement and node launches with NO env (receiver exits on missing
+    # WEBHOOK_WAKE_SECRET, crash-looping every cycle).
+    NODE_BIN="$(command -v node || echo /usr/local/bin/node)"
     WEBHOOK_WAKE_SECRET="$SECRET" \
     WEBHOOK_WAKE_PORT="$PORT" \
     WEBHOOK_WAKE_SCRIPT="$WAKE" \
@@ -53,7 +58,6 @@ start_receiver(){
     WEBHOOK_WAKE_LOG="/tmp/codex-webhook-wake.log" \
     IAK_CODEX_APP_NAME="ChatGPT" \
     IAK_NUDGE_TEXT="check rooms [codex]" \
-      NODE_BIN="$(command -v node || echo /usr/local/bin/node)"
       "$NODE_BIN" "$RECEIVER" >>/tmp/codex-webhook-wake.log 2>&1 &
       sleep 1
       if kill -0 $! 2>/dev/null; then log "receiver started"; else log "receiver FAILED to start"; fi
