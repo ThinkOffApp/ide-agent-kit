@@ -2,7 +2,7 @@
 
 import { describe, it, afterEach } from 'node:test';
 import { strict as assert } from 'node:assert';
-import { execFileSync, spawn, spawnSync } from 'node:child_process';
+import { execFile, execFileSync, spawn, spawnSync } from 'node:child_process';
 import { mkdtempSync, writeFileSync, readFileSync, existsSync, rmSync, realpathSync } from 'node:fs';
 import { join, dirname, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -227,6 +227,41 @@ describe('single-responder lock', () => {
     const lock = readFileSync(env.IAK_RESPONDER_LOCK, 'utf8');
     assert.match(lock, /^sid=sess-same$/m);
     assert.ok(!new RegExp(`^pid=${ownerPid}$`, 'm').test(lock), 'pid refreshed to the resuming session');
+  });
+
+  it('steals a lock whose pid was recycled by an unrelated process (pstart mismatch)', () => {
+    const dir = tempDir();
+    const env = lockEnv(dir);
+    const recycled = startSleeper(); // alive, but not the recorded owner:
+    writeFileSync(env.IAK_RESPONDER_LOCK, `pid=${recycled}\nsid=sess-old\npstart=Thu Jan  1 00:00:00 1970\n`);
+    const payload = runHook({
+      input: JSON.stringify({ source: 'startup', session_id: 'sess-f' }),
+      env,
+    });
+    const ctx = payload.hookSpecificOutput.additionalContext;
+    assert.match(ctx, /You hold the room-responder lock/);
+    assert.match(readFileSync(env.IAK_RESPONDER_LOCK, 'utf8'), /^sid=sess-f$/m);
+  });
+
+  it('elects exactly one ACTIVE responder among concurrent fresh claims', async () => {
+    const dir = tempDir();
+    const env = lockEnv(dir);
+    const runs = await Promise.all(Array.from({ length: 6 }, (_, i) =>
+      new Promise((resolvePromise, reject) => {
+        execFile('bash', [bootstrapScript], {
+          encoding: 'utf8',
+          env: {
+            ...process.env,
+            IAK_CONFIG_JSON: '/tmp/iak-nonexistent-config.json',
+            ...env,
+          },
+        }, (err, stdout) => err ? reject(err) : resolvePromise(stdout))
+          .stdin.end(JSON.stringify({ source: 'startup', session_id: `sess-par-${i}` }));
+      })
+    ));
+    const actives = runs.filter((out) =>
+      JSON.parse(out).hookSpecificOutput.additionalContext.includes('You hold the room-responder lock'));
+    assert.equal(actives.length, 1, `expected exactly 1 ACTIVE, got ${actives.length}`);
   });
 
   it('a corrupt lock file with a live-pid line still fails safe to PASSIVE, not a crash', () => {

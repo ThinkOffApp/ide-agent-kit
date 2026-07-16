@@ -19,10 +19,14 @@
 # handle — duplicate, conflicting posts (bit the fleet on 2026-07-16). The
 # first session claims a lock file; later sessions get PASSIVE instructions
 # (serve the user directly, stay out of the room). The lock carries the
-# owner's pid + session id: it is reclaimed by the same session on
-# resume/compact and stolen automatically once the owner process is dead.
-# Any failure in the lock mechanics degrades to ACTIVE (status quo) — a
-# rare duplicate voice beats a machine with no room responder at all.
+# owner's pid + session id + process start time: it is reclaimed by the
+# same session on resume/compact, and stolen automatically once the owner
+# process is dead — start time is the identity check, so a recycled pid
+# never masquerades as the owner. Initial claim is O_EXCL-atomic and every
+# winner re-verifies after a short settle, so concurrent starts elect
+# exactly one responder. Any failure in the lock mechanics degrades to
+# ACTIVE (status quo) — a rare duplicate voice beats a machine with no
+# room responder at all.
 #
 # Configuration (first match wins):
 #   notification file : $IAK_NEW_FILE, else config poller.notification_file,
@@ -113,41 +117,97 @@ LOCK_FILE="${IAK_RESPONDER_LOCK:-${NEWMSG_FILE}.responder.lock}"
 ROLE="active"
 LOCK_PID=""
 LOCK_SID=""
+LOCK_PSTART=""
 LOCK_HELD=""
+SETTLE_SEC="${IAK_RESPONDER_SETTLE_SEC:-0.3}"
 
-pid_alive() {
-    [ -n "$1" ] || return 1
+# Process start time doubles as an identity check: a recycled pid has a
+# different start time, so a dead owner is never mistaken for alive. Using
+# ps (not kill -0) also keeps a cross-user owner visible — kill -0 reports
+# EPERM there, which must not read as "dead".
+proc_lstart() {
+    [ -n "${1:-}" ] || return 1
     case "$1" in (*[!0-9]*|'') return 1;; esac
-    kill -0 "$1" 2>/dev/null
+    ps -p "$1" -o lstart= 2>/dev/null | sed 's/^ *//;s/ *$//' | head -1
 }
 
-write_lock() {
-    # Best-effort atomic replace; failure leaves ROLE=active (fail open).
+read_lock() {
+    LOCK_PID=$(sed -n 's/^pid=//p' "$LOCK_FILE" 2>/dev/null | head -1)
+    LOCK_SID=$(sed -n 's/^sid=//p' "$LOCK_FILE" 2>/dev/null | head -1)
+    LOCK_PSTART=$(sed -n 's/^pstart=//p' "$LOCK_FILE" 2>/dev/null | head -1)
+}
+
+owner_alive() {
+    local now
+    now=$(proc_lstart "$LOCK_PID") || return 1
+    [ -n "$now" ] || return 1
+    # Locks written before pstart existed carry no identity beyond the pid.
+    [ -z "$LOCK_PSTART" ] || [ "$now" = "$LOCK_PSTART" ]
+}
+
+lock_content() {
+    printf 'pid=%s\nsid=%s\npstart=%s\nclaimed_at=%s\n' \
+        "$PPID" "$SESSION_ID" "$(proc_lstart "$PPID" || true)" \
+        "$(date -u '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || true)"
+}
+
+claim_atomic() {
+    # O_CREAT|O_EXCL via noclobber: exactly one concurrent claimer wins.
+    ( set -o noclobber; lock_content > "$LOCK_FILE" ) 2>/dev/null
+}
+
+claim_overwrite() {
+    # Only for refreshing a lock this session already owns.
     local tmp="${LOCK_FILE}.$$"
-    {
-        printf 'pid=%s\n' "$PPID"
-        printf 'sid=%s\n' "$SESSION_ID"
-        printf 'claimed_at=%s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || true)"
-    } > "$tmp" 2>/dev/null && mv -f "$tmp" "$LOCK_FILE" 2>/dev/null || rm -f "$tmp" 2>/dev/null
+    { lock_content > "$tmp" && mv -f "$tmp" "$LOCK_FILE"; } 2>/dev/null \
+        || { rm -f "$tmp" 2>/dev/null; return 1; }
+}
+
+lost_claim_race() {
+    # A failed claim only demotes us if somebody else really holds the
+    # file; an unwritable directory is a mechanics failure -> fail open.
+    [ -f "$LOCK_FILE" ] && ROLE="passive"
 }
 
 if [ "$LOCK_FILE" != "off" ]; then
     if [ -f "$LOCK_FILE" ]; then
-        LOCK_PID=$(sed -n 's/^pid=//p' "$LOCK_FILE" 2>/dev/null | head -1)
-        LOCK_SID=$(sed -n 's/^sid=//p' "$LOCK_FILE" 2>/dev/null | head -1)
+        read_lock
         if [ -n "$SESSION_ID" ] && [ "$LOCK_SID" = "$SESSION_ID" ]; then
-            write_lock   # same session resuming: refresh pid
-        elif [ "$LOCK_PID" = "$PPID" ]; then
-            write_lock   # same process (e.g. compact): keep ownership
-        elif pid_alive "$LOCK_PID"; then
+            claim_overwrite || true    # same session resuming: refresh pid
+        elif [ -z "$SESSION_ID" ] && [ "$LOCK_PID" = "$PPID" ]; then
+            # pid fallback ONLY when the harness passes no session id
+            # (e.g. compact re-runs in the same process). With a session
+            # id present the sid line is the sole reclaim identity —
+            # sibling hook processes can legitimately share a parent pid.
+            claim_overwrite || true
+        elif owner_alive; then
             ROLE="passive"
         else
-            write_lock   # owner died without cleanup: steal the stale lock
+            rm -f "$LOCK_FILE" 2>/dev/null   # owner gone (or pid recycled)
+            claim_atomic || lost_claim_race
         fi
     else
-        write_lock
+        claim_atomic || lost_claim_race
     fi
-    [ "$ROLE" = "active" ] && LOCK_HELD="$LOCK_FILE"
+
+    if [ "$ROLE" = "active" ]; then
+        # Post-claim verify: near-simultaneous steals can overwrite each
+        # other; after a short settle whoever the lock names is the single
+        # winner, everyone else demotes to PASSIVE (the machine still has
+        # exactly one responder). An unreadable lock here is a mechanics
+        # failure and stays ACTIVE.
+        sleep "$SETTLE_SEC" 2>/dev/null || true
+        read_lock
+        if [ -n "$LOCK_PID" ] && [ "$LOCK_PID" != "$PPID" ]; then
+            ROLE="passive"
+        elif [ -n "$SESSION_ID" ] && [ -n "$LOCK_SID" ] && [ "$LOCK_SID" != "$SESSION_ID" ]; then
+            ROLE="passive"
+        else
+            LOCK_HELD="$LOCK_FILE"
+        fi
+    else
+        read_lock
+    fi
 fi
 
 BACKLOG=""
