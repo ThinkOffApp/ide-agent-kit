@@ -21,7 +21,7 @@ import { createServer } from 'node:http';
 import { randomUUID, createHmac, timingSafeEqual } from 'node:crypto';
 import { appendFileSync } from 'node:fs';
 import { spawn } from 'node:child_process';
-import { deliverToSession, listSessionAgents } from './session-send.mjs';
+import { deliverToSession, listSessionAgents, HOP_HEADER } from './session-send.mjs';
 
 // --- registry ---------------------------------------------------------------
 
@@ -742,17 +742,37 @@ export function startConfirmationsServer({
         return;
       }
       let body = '';
-      req.on('data', (c) => { body += c; });
+      let overflow = false;
+      req.on('data', (c) => {
+        body += c;
+        // 64 KiB is far beyond any legal payload (text caps at 4000 chars);
+        // stop buffering hostile bodies instead of holding them in memory.
+        if (body.length > 64 * 1024 && !overflow) {
+          overflow = true;
+          res.writeHead(413, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: false, error: 'body too large' }));
+          req.destroy();
+        }
+      });
       req.on('end', async () => {
+        if (overflow) return;
         let payload;
         try { payload = JSON.parse(body); } catch {
           res.writeHead(400, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ ok: false, error: 'invalid json' }));
           return;
         }
+        const hops = Math.max(0, Math.min(8, parseInt(req.headers[HOP_HEADER] || '0', 10) || 0));
         const result = await deliverToSession(sessions, payload.agent, {
           text: payload.text,
           from: payload.from,
+          hops,
+          onAsyncError: (e) => postReceipt(receiptsPath, {
+            kind: 'sessions.send.async_error',
+            agent: payload.agent,
+            error: e.message || String(e),
+            at: new Date().toISOString(),
+          }),
         });
         postReceipt(receiptsPath, {
           kind: 'sessions.send',

@@ -5,6 +5,7 @@ import { strict as assert } from 'node:assert';
 import { mkdtempSync, writeFileSync, readFileSync, existsSync, rmSync, chmodSync, realpathSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
+import { createServer } from 'node:http';
 import { deliverToSession, listSessionAgents } from '../src/session-send.mjs';
 import { startConfirmationsServer } from '../src/confirmations.mjs';
 
@@ -134,6 +135,70 @@ describe('deliverToSession', () => {
     assert.equal(res.status, 502);
     assert.match(res.error, /peer/);
   });
+
+  it('refuses to forward past the hop limit (loop guard)', async () => {
+    const sessions = { agents: { mb: { adapter: 'forward', peer: 'http://127.0.0.1:1' } } };
+    const res = await deliverToSession(sessions, 'mb', { text: 'x', hops: 1 });
+    assert.equal(res.status, 508);
+    assert.match(res.error, /hop limit/);
+  });
+
+  it('a self-pointing peer terminates after one hop instead of looping', async () => {
+    // Daemon whose only route for 'mb' forwards to ITSELF. The first hop
+    // re-enters with hops=1, the inner forward refuses (508), the outer
+    // reports 502 — two requests total, no recursion.
+    const dir = tempDir();
+    const sessions = { agents: { mb: { adapter: 'forward', peer: 'SELF' } } };
+    const { port } = await listenEphemeral({
+      authToken: '', // forward carries no token here; keep the peer open
+      receiptsPath: join(dir, 'receipts.jsonl'),
+      sessions,
+    });
+    sessions.agents.mb.peer = `http://127.0.0.1:${port}`;
+    const resp = await fetch(`http://127.0.0.1:${port}/sessions/send`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ agent: 'mb', text: 'loop me' }),
+    });
+    assert.equal(resp.status, 502);
+    assert.match((await resp.json()).error, /hop limit/);
+  });
+
+  it('a peer answering bare 200 without ok:true is NOT a delivery', async () => {
+    const bare = createServer((req, res) => {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end('{}');
+    });
+    servers.push(bare);
+    await new Promise((r) => bare.listen(0, '127.0.0.1', r));
+    const sessions = {
+      agents: { mb: { adapter: 'forward', peer: `http://127.0.0.1:${bare.address().port}` } },
+    };
+    const res = await deliverToSession(sessions, 'mb', { text: 'x' });
+    assert.equal(res.status, 502);
+    assert.match(res.error, /unexpected response 200/);
+  });
+
+  it('rejects an oversized or non-string from', async () => {
+    const sessions = { agents: { mm: { adapter: 'wake', script: '/bin/true' } } };
+    assert.equal((await deliverToSession(sessions, 'mm', { text: 'x', from: 'f'.repeat(201) })).status, 400);
+    assert.equal((await deliverToSession(sessions, 'mm', { text: 'x', from: 42 })).status, 400);
+  });
+
+  it('reports async adapter failures through onAsyncError', async () => {
+    const failures = [];
+    const dir = tempDir();
+    const bad = join(dir, 'fail.sh');
+    writeFileSync(bad, '#!/bin/bash\nexit 1\n');
+    chmodSync(bad, 0o755);
+    const sessions = { agents: { mm: { adapter: 'wake', script: bad } } };
+    const res = await deliverToSession(sessions, 'mm', {
+      text: 'x', onAsyncError: (e) => failures.push(e.message),
+    });
+    assert.equal(res.status, 202); // accepted-async by design
+    assert.ok(await waitFor(() => failures.length > 0), 'failure reported');
+    assert.match(failures[0], /exited 1/);
+  });
 });
 
 describe('sessions HTTP routes', () => {
@@ -173,6 +238,20 @@ describe('sessions HTTP routes', () => {
       body: JSON.stringify({ agent: 'x', text: 'y' }),
     });
     assert.equal(noCfg.status, 503);
+  });
+
+  it('rejects oversized request bodies with 413', async () => {
+    const { port } = await listenEphemeral({
+      sessions: { agents: { mm: { adapter: 'wake', script: '/bin/true' } } },
+    });
+    const resp = await fetch(`http://127.0.0.1:${port}/sessions/send`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ agent: 'mm', text: 'x', padding: 'p'.repeat(100 * 1024) }),
+    }).catch(() => null);
+    // Depending on timing the server may destroy the socket mid-upload
+    // (fetch rejects) or answer 413 — both prove the cap.
+    if (resp) assert.equal(resp.status, 413);
   });
 });
 

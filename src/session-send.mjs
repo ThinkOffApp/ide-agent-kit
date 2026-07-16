@@ -37,7 +37,14 @@ import { readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 
 const MAX_TEXT_LENGTH = 4000;
+const MAX_FROM_LENGTH = 200;
 const FORWARD_TIMEOUT_MS = 8000;
+// One forward, ever: app → reachable daemon → owning daemon. The owning
+// daemon must deliver locally; a second hop means a misconfigured peer
+// chain (worst case a peer pointing back at itself), so it is refused
+// instead of retried.
+const MAX_FORWARD_HOPS = 1;
+export const HOP_HEADER = 'x-iak-send-hops';
 
 function expandHome(p) {
   if (typeof p !== 'string') return p;
@@ -57,7 +64,7 @@ export function listSessionAgents(sessions) {
  * Returns {ok, status, deliveredVia?|error?} — status is the HTTP code the
  * caller should use. Never throws.
  */
-export async function deliverToSession(sessions, agentName, { text, from } = {}) {
+export async function deliverToSession(sessions, agentName, { text, from, hops = 0, onAsyncError } = {}) {
   if (typeof agentName !== 'string' || !agentName.trim()) {
     return { ok: false, status: 400, error: 'missing agent' };
   }
@@ -67,12 +74,18 @@ export async function deliverToSession(sessions, agentName, { text, from } = {})
   if (text.length > MAX_TEXT_LENGTH) {
     return { ok: false, status: 400, error: `text too long (max ${MAX_TEXT_LENGTH})` };
   }
+  if (from !== undefined && (typeof from !== 'string' || from.length > MAX_FROM_LENGTH)) {
+    return { ok: false, status: 400, error: `from must be a string of at most ${MAX_FROM_LENGTH} characters` };
+  }
   const cfg = sessions && sessions.agents && sessions.agents[agentName];
   if (!cfg) {
     return { ok: false, status: 404, error: 'unknown agent' };
   }
 
-  const message = from && typeof from === 'string' ? `[from ${from}] ${text}` : text;
+  const message = from ? `[from ${from}] ${text}` : text;
+  // Delivery is accepted-async: a failure after the detached spawn cannot
+  // change the already-sent 202, but it must not vanish either.
+  const reportAsync = (e) => { try { onAsyncError?.(e); } catch { /* never throw */ } };
 
   switch (cfg.adapter) {
     case 'wake':
@@ -92,6 +105,10 @@ export async function deliverToSession(sessions, agentName, { text, from } = {})
         } else {
           child = spawn(script, [message], { detached: true, stdio: 'ignore' });
         }
+        child.on('error', reportAsync);
+        child.on('close', (code) => {
+          if (code !== 0 && code !== null) reportAsync(new Error(`${cfg.adapter} adapter exited ${code}`));
+        });
         child.unref();
         return { ok: true, status: 202, deliveredVia: cfg.adapter };
       } catch (e) {
@@ -113,6 +130,9 @@ export async function deliverToSession(sessions, agentName, { text, from } = {})
     }
     case 'forward': {
       if (!cfg.peer) return { ok: false, status: 503, error: 'no adapter configured' };
+      if (hops >= MAX_FORWARD_HOPS) {
+        return { ok: false, status: 508, error: 'forward hop limit reached — peer chain is misconfigured (possible loop)' };
+      }
       let token = cfg.token || '';
       if (!token && cfg.token_file) {
         try { token = readFileSync(expandHome(cfg.token_file), 'utf8').trim(); } catch { /* peer may be open */ }
@@ -124,6 +144,7 @@ export async function deliverToSession(sessions, agentName, { text, from } = {})
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
+            [HOP_HEADER]: String(hops + 1),
             ...(token ? { Authorization: `Bearer ${token}` } : {}),
           },
           // The peer daemon owns the final adapter; pass provenance through
@@ -132,9 +153,11 @@ export async function deliverToSession(sessions, agentName, { text, from } = {})
           signal: controller.signal,
         });
         clearTimeout(timer);
-        const data = await resp.json().catch(() => ({}));
-        if (!resp.ok || data.ok === false) {
-          return { ok: false, status: 502, error: `peer: ${data.error || resp.status}` };
+        const data = await resp.json().catch(() => null);
+        // Peer confirmation must be explicit: exactly 202 + ok:true. A bare
+        // 200/204 or an unparseable body is NOT a delivery.
+        if (resp.status !== 202 || !data || data.ok !== true) {
+          return { ok: false, status: 502, error: `peer: ${(data && data.error) || `unexpected response ${resp.status}`}` };
         }
         return { ok: true, status: 202, deliveredVia: `forward:${data.deliveredVia || cfg.peer}` };
       } catch (e) {
