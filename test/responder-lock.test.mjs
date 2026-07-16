@@ -26,7 +26,16 @@ function fakeExec(table) {
     const pid = parseInt(args[1], 10);
     const col = args[3];
     const row = table[pid];
-    if (!row) throw new Error(`no such process ${pid}`);
+    if (!row) {
+      // Mimic execFileSync when ps RAN and found no such pid: nonzero exit.
+      const e = new Error(`no such process ${pid}`);
+      e.status = 1;
+      throw e;
+    }
+    if (row === 'SPAWN_FAILURE') {
+      // Mimic a spawn-level failure: ps never ran, no .status on the error.
+      throw new Error('spawn ps EAGAIN');
+    }
     if (col === 'lstart=') return `${row.lstart}\n`;
     if (col === 'ppid=') return `${row.ppid}\n`;
     throw new Error(`unexpected ps column ${col}`);
@@ -128,6 +137,34 @@ describe('assertRoomVoice', () => {
     const dir = tempDir();
     const lock = writeLock(dir, { pid: 500 });
     const table = { 10: { lstart: 'a', ppid: 1 }, 500: { lstart: START, ppid: 1 } };
+    const verdict = assertRoomVoice({ env: { IAK_RESPONDER_LOCK: lock }, selfPid: 10, exec: fakeExec(table) });
+    assert.equal(verdict.allowed, false);
+  });
+
+  it('fails OPEN when an intermediate ancestor lookup fails at spawn level (codex regression)', () => {
+    const dir = tempDir();
+    const lock = writeLock(dir, { pid: 500, pstart: START });
+    // Owner 500 is alive and IS our grandparent, but the walk's lookup of
+    // pid 20's parent fails at spawn level — must fail open, not refuse.
+    const table = {
+      10: { lstart: 'a', ppid: 20 },
+      20: 'SPAWN_FAILURE',
+      500: { lstart: START, ppid: 1 },
+    };
+    const verdict = assertRoomVoice({ env: { IAK_RESPONDER_LOCK: lock }, selfPid: 10, exec: fakeExec(table) });
+    assert.equal(verdict.allowed, true);
+    assert.match(verdict.reason, /fail open/);
+  });
+
+  it('a walk ancestor that exited (ps ran, pid gone) ends the chain and refuses', () => {
+    const dir = tempDir();
+    const lock = writeLock(dir, { pid: 500, pstart: START });
+    // self 10 -> parent 77 which is GONE (ps exits 1): chain ends without
+    // reaching the live owner 500 -> refused, not crashed.
+    const table = {
+      10: { lstart: 'a', ppid: 77 },
+      500: { lstart: START, ppid: 1 },
+    };
     const verdict = assertRoomVoice({ env: { IAK_RESPONDER_LOCK: lock }, selfPid: 10, exec: fakeExec(table) });
     assert.equal(verdict.allowed, false);
   });

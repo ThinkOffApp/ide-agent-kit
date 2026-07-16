@@ -58,16 +58,26 @@ function procStart(pid, exec) {
   }
 }
 
+// Returns the parent pid, 0 when the chain legitimately ended (ps ran and
+// the pid is gone), or null when the LOOKUP ITSELF failed (spawn-level
+// error) — the caller must treat null as unknown, never as "not an
+// ancestor", or a transient ps failure would refuse a legitimate owner
+// (codex review on #45).
 function parentOf(pid, exec) {
   try {
     const out = exec('ps', ['-p', String(pid), '-o', 'ppid='], { encoding: 'utf8' }).trim();
     const parent = parseInt(out, 10);
     return Number.isInteger(parent) && parent > 0 ? parent : 0;
-  } catch {
-    return 0;
+  } catch (e) {
+    // execFileSync sets .status when the command RAN and exited nonzero —
+    // for ps that means "no such pid": the chain ended. No .status means
+    // ps never ran (ENOENT, EAGAIN, …): mechanics failure -> unknown.
+    if (e && typeof e.status === 'number') return 0;
+    return null;
   }
 }
 
+// true / false / null(unknown — caller fails open).
 function isSelfOrAncestor(targetPid, fromPid, exec) {
   let pid = fromPid;
   // The owning session process is normally our direct parent; walk a few
@@ -75,6 +85,7 @@ function isSelfOrAncestor(targetPid, fromPid, exec) {
   for (let hops = 0; hops < 10 && pid && pid > 1; hops++) {
     if (pid === targetPid) return true;
     pid = parentOf(pid, exec);
+    if (pid === null) return null;
   }
   return false;
 }
@@ -104,7 +115,11 @@ export function assertRoomVoice({
       return { allowed: true, reason: 'lock owner pid was recycled (stale lock)' };
     }
 
-    if (isSelfOrAncestor(lock.pid, selfPid, exec)) {
+    const ancestry = isSelfOrAncestor(lock.pid, selfPid, exec);
+    if (ancestry === null) {
+      return { allowed: true, reason: 'ancestor lookup failed mid-walk (fail open)' };
+    }
+    if (ancestry) {
       return { allowed: true, reason: 'this session holds the responder lock' };
     }
 
