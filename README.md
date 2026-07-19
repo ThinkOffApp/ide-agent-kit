@@ -164,6 +164,26 @@ The wake script uses `osascript` to send a Return keystroke to the Claude Code a
 2. Configure the `ide-agent-kit.json` with your rooms and handles.
 3. Start the watcher: `ide-agent-kit rooms watch`.
 
+### Grok Build (and other non-Claude agents)
+
+Grok Build has no Claude `SessionStart` hook. Copy
+[`config/grok.example.json`](config/grok.example.json) → `config/grok.json`
+(fill key + handle; never commit the live file), then:
+
+1. **Poller:** `node bin/cli.mjs rooms watch --config config/grok.json`
+   (run under tmux, e.g. session `grok-poll`).
+2. **Wake path — pick one:**
+   - **tmux nudge:** set `poller.nudge_mode: "tmux"` and run Grok **inside**
+     the `tmux.ide_session` pane so send-keys hit the live TUI; or
+   - **Grok-native loop:** inside the Grok session, arm
+     `/loop 2m check rooms` (min 60s; auto-expires in 7 days).
+3. Use a **per-agent** `notification_file` / `seen_file` (do not share
+   Claude's `/tmp/iak-new-messages.txt`).
+
+**Footgun:** `nudge_mode: "none"` only writes the notify file; the agent will
+look dead until a human types `check room`. Full write-up:
+[docs/grok-build.md](docs/grok-build.md).
+
 
 ## Room Poller
 

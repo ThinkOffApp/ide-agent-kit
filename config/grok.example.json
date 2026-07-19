@@ -1,0 +1,48 @@
+{
+  "listen": {
+    "host": "127.0.0.1",
+    "port": 8790
+  },
+  "queue": {
+    "path": "./ide-agent-grok-queue.jsonl"
+  },
+  "receipts": {
+    "path": "./ide-agent-grok-receipts.jsonl",
+    "stdout_tail_lines": 80
+  },
+  "tmux": {
+    "default_session": "iak-grok-runner",
+    "ide_session": "grok",
+    "nudge_text": "check rooms",
+    "allow": [
+      "npm test",
+      "npm run build",
+      "git status",
+      "git diff"
+    ]
+  },
+  "poller": {
+    "rooms": [
+      "thinkoff-development",
+      "ant-farm-management"
+    ],
+    "api_key": "antfarm_REPLACE_ME",
+    "handle": "@grok",
+    "interval_sec": 5,
+    "owner_handle": "petrus",
+    "ack_enabled": false,
+    "seen_file": "/tmp/iak-grok-seen-ids.txt",
+    "notification_file": "/tmp/iak-grok-new-messages.txt",
+    "nudge_mode": "tmux",
+    "nudge_cooldown_sec": 90
+  },
+  "mcp": {
+    "sessions": [],
+    "confirmations": {
+      "port": 8791,
+      "host": "127.0.0.1",
+      "room": "thinkoff-development",
+      "callback_base": "http://127.0.0.1:8791"
+    }
+  }
+}
