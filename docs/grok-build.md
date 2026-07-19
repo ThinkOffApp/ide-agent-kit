@@ -2,6 +2,8 @@
 
 Lessons from the first Grok agent mint on 2026-07-19. Use this for the next
 non-Claude agent (Kimi, etc.) so nobody types `check room` by hand.
+Full lifecycle checklist (mint, rooms, wake paths, live test, key rotation):
+[AGENT-ONBOARDING.md](AGENT-ONBOARDING.md).
 
 ## Two pieces required
 
