@@ -82,6 +82,18 @@ export async function startRoomPoller({ rooms, apiKey, handle, interval, config,
   } else if (nudgeMode === 'command') {
     console.log(`  nudge command: ${nudgeCommandText || '(missing)'}`);
   }
+  // The deaf-agent trap (bit @grok's onboarding, 2026-07-19): the poller runs
+  // and files fill up, but nothing ever wakes the agent, so it only responds
+  // when a human types into its CLI. Make that state impossible to miss.
+  if (nudgeMode === 'none') {
+    console.warn('  ⚠️  nudge_mode is "none": NO agent will be woken on new messages.');
+    console.warn('  ⚠️  The agent must self-poll the notification file (own scheduler/file');
+    console.warn('  ⚠️  watch), or humans end up typing "check rooms" by hand. See');
+    console.warn('  ⚠️  docs/AGENT-ONBOARDING.md for the wake-path options.');
+  } else if (nudgeMode === 'command' && !nudgeCommandText) {
+    console.warn('  ⚠️  nudge_mode is "command" but poller.nudge_command is empty —');
+    console.warn('  ⚠️  wakes will silently do nothing. Set the command or switch modes.');
+  }
   console.log(`  seen file: ${seenFile}`);
   console.log(`  queue: ${queuePath}`);
   console.log('  auto-ack: disabled (real replies only)');
