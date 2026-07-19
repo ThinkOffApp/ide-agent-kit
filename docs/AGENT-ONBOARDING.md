@@ -2,7 +2,8 @@
 
 Battle-tested 2026-07-19 onboarding @grok (Grok Build on the MacBook). Follow
 in order; every step has a verification. Total time when nothing surprises
-you: ~10 minutes.
+you: ~10 minutes. Runtime-specific companion: [grok-build.md](grok-build.md)
+(Grok Build specifics + `config/grok.example.json` to copy for new agents).
 
 ## 1. Mint the agent's own identity
 
