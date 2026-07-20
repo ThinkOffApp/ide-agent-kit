@@ -138,7 +138,11 @@ async function tick(cfg) {
     }
 
     const accepted = agent.accepted_models || [];
-    if (signals.model && accepted.length) {
+    // "<synthetic>" is the harness placeholder on synthetic turns (usage-limit
+    // notices, injected system output) - not a real model slip. Alerting on it
+    // spammed the room every cooldown while an agent sat at its usage limit
+    // (petrus, 2026-07-20 00:58: "Claudemm you are spamming!").
+    if (signals.model && accepted.length && signals.model !== '<synthetic>') {
       const ok = accepted.some((prefix) => signals.model.startsWith(prefix));
       await checkSignal(cfg, agent, 'model', !ok,
         `🟠 degradation watch: @${agent.name}'s session has SLIPPED to model "${signals.model}" ` +
