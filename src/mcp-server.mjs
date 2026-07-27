@@ -124,6 +124,40 @@ export function gateAuthHeaders(token) {
   return token ? { Authorization: `Bearer ${token}` } : {};
 }
 
+// The fleet gate token must never travel to a caller-influenced destination:
+// tool args are reachable from untrusted input (room messages, web pages, PR
+// text can steer a wake_remote call), so an arbitrary gateUrl + bearer header
+// is a token-exfiltration path (claudemm, PR #52 review). Trusted hosts are
+// where fleet daemons can actually live: loopback, RFC1918 LAN ranges, the
+// tailnet CGNAT range, and .local mDNS names. Anything else still gets the
+// wake — just unauthenticated, the same graceful degradation open daemons
+// already rely on.
+export function isTrustedGateHost(hostname) {
+  const h = String(hostname || '').toLowerCase().replace(/^\[|\]$/g, '');
+  if (h === 'localhost' || h === '::1') return true;
+  if (h.endsWith('.local')) return true;
+  const m = h.match(/^(\d+)\.(\d+)\.(\d+)\.(\d+)$/);
+  if (!m) return false;
+  const [a, b] = [Number(m[1]), Number(m[2])];
+  if (a === 127) return true;                       // loopback
+  if (a === 10) return true;                        // RFC1918
+  if (a === 172 && b >= 16 && b <= 31) return true; // RFC1918
+  if (a === 192 && b === 168) return true;          // RFC1918
+  if (a === 100 && b >= 64 && b <= 127) return true; // tailnet CGNAT
+  return false;
+}
+
+// Auth headers for a request to `url`: bearer only when the destination host
+// is trusted, {} otherwise (and {} on any unparseable URL).
+export function gateAuthHeadersFor(url, token = resolveGateToken()) {
+  try {
+    if (!isTrustedGateHost(new URL(url).hostname)) return {};
+  } catch {
+    return {};
+  }
+  return gateAuthHeaders(token);
+}
+
 export function confirmationFromHandle(args = {}, config = {}) {
   const explicit = args.fromHandle || args.from_handle;
   if (typeof explicit === 'string' && explicit.trim()) return explicit.trim();
@@ -722,7 +756,7 @@ export async function runMcpServer({ configPath } = {}) {
           try {
             const res = await fetch(`${args.gateUrl}/wake`, {
               method: 'POST',
-              headers: { 'Content-Type': 'application/json', ...gateAuthHeaders(resolveGateToken()) },
+              headers: { 'Content-Type': 'application/json', ...gateAuthHeadersFor(args.gateUrl) },
               body: JSON.stringify({ text }),
               signal: AbortSignal.timeout(5000),
             });

@@ -21,6 +21,8 @@ import {
   ackNotificationFile,
   resolveGateToken,
   gateAuthHeaders,
+  gateAuthHeadersFor,
+  isTrustedGateHost,
 } from '../src/mcp-server.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -281,6 +283,31 @@ test('resolveGateToken: no file and no env resolves to empty (open daemons keep 
 test('gateAuthHeaders: bearer header only when a token exists', () => {
   assert.deepEqual(gateAuthHeaders('tok'), { Authorization: 'Bearer tok' });
   assert.deepEqual(gateAuthHeaders(''), {});
+});
+
+// The exfiltration guard (claudemm, PR #52 review): the fleet token must only
+// ever accompany requests to hosts a fleet daemon can live on. A caller-
+// influenced gateUrl outside those ranges gets NO Authorization header.
+test('isTrustedGateHost: fleet-plausible hosts only', () => {
+  for (const h of ['localhost', '127.0.0.1', '::1', '10.0.0.5', '172.16.0.2',
+    '172.31.255.1', '192.168.50.240', '100.97.140.13', '100.64.0.1', 'mini.local']) {
+    assert.equal(isTrustedGateHost(h), true, h);
+  }
+  for (const h of ['evil.example.com', '8.8.8.8', '172.15.0.1', '172.32.0.1',
+    '100.63.0.1', '100.128.0.1', '193.168.1.1', 'local.evil.com', '', undefined]) {
+    assert.equal(isTrustedGateHost(h), false, String(h));
+  }
+});
+
+test('gateAuthHeadersFor: NO bearer to off-allowlist or unparseable destinations', () => {
+  assert.deepEqual(gateAuthHeadersFor('https://evil.example.com/wake', 'tok'), {});
+  assert.deepEqual(gateAuthHeadersFor('http://8.8.8.8:8788', 'tok'), {});
+  assert.deepEqual(gateAuthHeadersFor('not a url', 'tok'), {});
+  assert.deepEqual(gateAuthHeadersFor('http://100.97.140.13:8788', 'tok'),
+    { Authorization: 'Bearer tok' });
+  assert.deepEqual(gateAuthHeadersFor('http://127.0.0.1:8788', 'tok'),
+    { Authorization: 'Bearer tok' });
+  assert.deepEqual(gateAuthHeadersFor('http://192.168.50.240:8788', ''), {});
 });
 
 // --- removeConsumedNotifications (pure) --------------------------------------
