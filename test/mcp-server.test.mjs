@@ -19,6 +19,8 @@ import {
   roomApiConfigured,
   removeConsumedNotifications,
   ackNotificationFile,
+  resolveGateToken,
+  gateAuthHeaders,
 } from '../src/mcp-server.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -152,6 +154,7 @@ test('roomApiConfigured: requires both API key and room', () => {
 
 import { writeFileSync, appendFileSync, readFileSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
+import { createServer } from 'node:http';
 
 function rpc(line) { return JSON.stringify(line) + '\n'; }
 
@@ -227,6 +230,57 @@ test('iak-mcp.mjs with room API config exposes low-latency room tools', async ()
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+// --- resolveGateToken --------------------------------------------------------
+
+test('resolveGateToken: reads the token file named by IAK_GATE_TOKEN_FILE', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'iak-gate-token-'));
+  const tokenFile = join(dir, 'gate.token');
+  try {
+    writeFileSync(tokenFile, 'file-secret-1\n');
+    assert.equal(resolveGateToken({ env: { IAK_GATE_TOKEN_FILE: tokenFile } }), 'file-secret-1');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('resolveGateToken: token file wins over IAK_GATE_TOKEN env', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'iak-gate-token-'));
+  const tokenFile = join(dir, 'gate.token');
+  try {
+    writeFileSync(tokenFile, 'file-secret-2\n');
+    assert.equal(
+      resolveGateToken({ env: { IAK_GATE_TOKEN_FILE: tokenFile, IAK_GATE_TOKEN: 'env-secret' } }),
+      'file-secret-2'
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('resolveGateToken: missing file falls back to IAK_GATE_TOKEN env', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'iak-gate-token-'));
+  try {
+    const env = { IAK_GATE_TOKEN_FILE: join(dir, 'does-not-exist'), IAK_GATE_TOKEN: 'env-secret' };
+    assert.equal(resolveGateToken({ env }), 'env-secret');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('resolveGateToken: no file and no env resolves to empty (open daemons keep working)', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'iak-gate-token-'));
+  try {
+    assert.equal(resolveGateToken({ env: { IAK_GATE_TOKEN_FILE: join(dir, 'does-not-exist') } }), '');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('gateAuthHeaders: bearer header only when a token exists', () => {
+  assert.deepEqual(gateAuthHeaders('tok'), { Authorization: 'Bearer tok' });
+  assert.deepEqual(gateAuthHeaders(''), {});
 });
 
 // --- removeConsumedNotifications (pure) --------------------------------------
@@ -324,8 +378,11 @@ test('ackNotificationFile: missing notification file is a no-op ack', () => {
 
 // --- end-to-end stdio regression: room_list_new → append → room_ack ---------
 
-function bootMcp(configPath) {
-  const child = spawn('node', [BIN, '--config', configPath], { stdio: ['pipe', 'pipe', 'pipe'] });
+function bootMcp(configPath, { env } = {}) {
+  const child = spawn('node', [BIN, '--config', configPath], {
+    stdio: ['pipe', 'pipe', 'pipe'],
+    env: env ? { ...process.env, ...env } : process.env,
+  });
   let buf = '';
   const waiters = new Map();
   child.stdout.on('data', (b) => {
@@ -386,6 +443,86 @@ test('iak-mcp.mjs REGRESSION: room_ack clears only what room_list_new returned',
     assert.equal(readFileSync(notifyFile, 'utf8'), '');
   } finally {
     await close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// --- end-to-end stdio regression: wake_remote gate auth ----------------------
+
+// A tiny stand-in for a remote IAK daemon whose auth_token is set: every
+// request must carry the exact bearer or it 401s, mirroring
+// startConfirmationsServer's gate.
+function bootFakeGate(requiredToken) {
+  const seen = [];
+  const server = createServer((req, res) => {
+    let body = '';
+    req.on('data', (c) => { body += c; });
+    req.on('end', () => {
+      seen.push({ path: req.url, auth: req.headers.authorization || null, body });
+      const authed = !requiredToken || req.headers.authorization === `Bearer ${requiredToken}`;
+      res.writeHead(authed ? 202 : 401, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify(authed ? { ok: true } : { ok: false, error: 'unauthorized' }));
+    });
+  });
+  return new Promise((resolvePromise) => {
+    server.listen(0, '127.0.0.1', () => {
+      resolvePromise({
+        url: `http://127.0.0.1:${server.address().port}`,
+        seen,
+        close: () => new Promise((r) => server.close(r)),
+      });
+    });
+  });
+}
+
+test('iak-mcp.mjs REGRESSION: wake_remote sends Authorization: Bearer when a gate token file exists', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'iak-mcp-test-'));
+  const cfgPath = join(dir, 'config.json');
+  const tokenFile = join(dir, 'gate.token');
+  writeFileSync(cfgPath, JSON.stringify({ tmux: { allow: [], default_session: 't' } }));
+  writeFileSync(tokenFile, 'gate-secret-1\n');
+  const gate = await bootFakeGate('gate-secret-1');
+  const { request, close } = bootMcp(cfgPath, { env: { IAK_GATE_TOKEN_FILE: tokenFile, IAK_GATE_TOKEN: '' } });
+  try {
+    const res = await request('tools/call', {
+      name: 'wake_remote',
+      arguments: { gateUrl: gate.url, text: 'check rooms' },
+    });
+    const text = res.result.content[0].text;
+    assert.match(text, /202/, `expected a 202 wake, got: ${text}`);
+    const wake = gate.seen.find((r) => r.path === '/wake');
+    assert.ok(wake, 'expected the gate to receive POST /wake');
+    assert.equal(wake.auth, 'Bearer gate-secret-1');
+    assert.equal(JSON.parse(wake.body).text, 'check rooms');
+  } finally {
+    await close();
+    await gate.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('iak-mcp.mjs: wake_remote stays unauthenticated when no gate token exists', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'iak-mcp-test-'));
+  const cfgPath = join(dir, 'config.json');
+  writeFileSync(cfgPath, JSON.stringify({ tmux: { allow: [], default_session: 't' } }));
+  const gate = await bootFakeGate(''); // open daemon — no token required
+  const { request, close } = bootMcp(cfgPath, {
+    // Point the file lookup at a path that cannot exist and clear the env
+    // fallback so the test is independent of the host's real fleet token.
+    env: { IAK_GATE_TOKEN_FILE: join(dir, 'no-such-token'), IAK_GATE_TOKEN: '' },
+  });
+  try {
+    const res = await request('tools/call', {
+      name: 'wake_remote',
+      arguments: { gateUrl: gate.url },
+    });
+    assert.match(res.result.content[0].text, /202/);
+    const wake = gate.seen.find((r) => r.path === '/wake');
+    assert.ok(wake, 'expected the gate to receive POST /wake');
+    assert.equal(wake.auth, null, 'open daemons must not receive a bearer header');
+  } finally {
+    await close();
+    await gate.close();
     rmSync(dir, { recursive: true, force: true });
   }
 });

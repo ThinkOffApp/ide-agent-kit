@@ -21,6 +21,7 @@
 
 import { execSync } from 'node:child_process';
 import { readFileSync, writeFileSync, renameSync, statSync } from 'node:fs';
+import { homedir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
@@ -99,6 +100,28 @@ export function configuredAgentSessions(config) {
   if (config?.tmux?.ide_session) sessions.add(config.tmux.ide_session);
   if (config?.tmux?.default_session) sessions.add(config.tmux.default_session);
   return [...sessions];
+}
+
+// Gate daemons (startConfirmationsServer / iak-mcp-daemon) enforce their
+// auth_token on EVERY endpoint, /wake included — a caller without the bearer
+// header gets 401 {"ok":false,"error":"unauthorized"} even for a plain nudge.
+// Resolve this machine's copy of the fleet token: the token file first
+// (~/.config/iak-gate.token, overridable via IAK_GATE_TOKEN_FILE), then the
+// IAK_GATE_TOKEN env var. Returns '' when neither exists so open daemons keep
+// working unauthenticated. Callers re-resolve per request rather than caching
+// at boot — a token rotation must not leave a long-lived MCP session sending
+// a stale credential (the poller stale-key incident shape).
+export function resolveGateToken({ env = process.env } = {}) {
+  const tokenFile = env.IAK_GATE_TOKEN_FILE || join(homedir(), '.config', 'iak-gate.token');
+  try {
+    const fromFile = readFileSync(tokenFile, 'utf8').trim();
+    if (fromFile) return fromFile;
+  } catch { /* no token file */ }
+  return typeof env.IAK_GATE_TOKEN === 'string' ? env.IAK_GATE_TOKEN.trim() : '';
+}
+
+export function gateAuthHeaders(token) {
+  return token ? { Authorization: `Bearer ${token}` } : {};
 }
 
 export function confirmationFromHandle(args = {}, config = {}) {
@@ -364,9 +387,17 @@ export async function runMcpServer({ configPath } = {}) {
   const daemonHost = confirmCfg.host || '127.0.0.1';
   const daemonPort = confirmCfg.port || 8788;
   const daemonBase = `http://${daemonHost === '0.0.0.0' ? '127.0.0.1' : daemonHost}:${daemonPort}`;
+  // The local daemon enforces the same bearer gate when its auth_token is
+  // set; our own config value is authoritative for it, with the fleet token
+  // as fallback.
+  const daemonAuthHeaders = () => gateAuthHeaders(confirmCfg.auth_token || resolveGateToken());
   let daemonAvailable = false;
   try {
-    const probe = await fetch(`${daemonBase}/intents`, { method: 'GET', signal: AbortSignal.timeout(500) });
+    const probe = await fetch(`${daemonBase}/intents`, {
+      method: 'GET',
+      headers: daemonAuthHeaders(),
+      signal: AbortSignal.timeout(500),
+    });
     daemonAvailable = probe.ok;
   } catch { /* not running */ }
 
@@ -473,7 +504,10 @@ export async function runMcpServer({ configPath } = {}) {
         'runs its configured wake script (typically scripts/claudemb-wake.sh, an osascript ' +
         'injector for the Claude desktop app) so the remote agent gets a "check rooms" prompt ' +
         'within ~500ms regardless of room-poll cadence. Use this for direct cross-machine ' +
-        'agent-to-agent coordination (e.g. claudemm has a question that needs claudemb).',
+        'agent-to-agent coordination (e.g. claudemm has a question that needs claudemb). ' +
+        'Token-protected daemons are handled automatically: the request carries ' +
+        'Authorization: Bearer <token> from ~/.config/iak-gate.token (or IAK_GATE_TOKEN_FILE / ' +
+        'IAK_GATE_TOKEN env) when one exists; without a token the request stays unauthenticated.',
       inputSchema: {
         type: 'object',
         properties: {
@@ -688,7 +722,7 @@ export async function runMcpServer({ configPath } = {}) {
           try {
             const res = await fetch(`${args.gateUrl}/wake`, {
               method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
+              headers: { 'Content-Type': 'application/json', ...gateAuthHeaders(resolveGateToken()) },
               body: JSON.stringify({ text }),
               signal: AbortSignal.timeout(5000),
             });
@@ -756,7 +790,7 @@ export async function runMcpServer({ configPath } = {}) {
           if (daemonAvailable) {
             const createRes = await fetch(`${daemonBase}/intent`, {
               method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
+              headers: { 'Content-Type': 'application/json', ...daemonAuthHeaders() },
               body: JSON.stringify({
                 prompt: args.prompt,
                 session: args.session,
@@ -772,7 +806,7 @@ export async function runMcpServer({ configPath } = {}) {
             while (Date.now() < deadline) {
               await new Promise(r => setTimeout(r, 1000));
               try {
-                const list = await (await fetch(`${daemonBase}/intents`)).json();
+                const list = await (await fetch(`${daemonBase}/intents`, { headers: daemonAuthHeaders() })).json();
                 const found = list.find((i) => i.id === id);
                 if (found && found.status === 'decided') {
                   return ok(JSON.stringify({ id, decision: found.decision }, null, 2));
