@@ -18,6 +18,7 @@
  */
 
 import { hostname } from 'node:os';
+import { execSync } from 'node:child_process';
 import { IntentClient, IAKAdapter, DesktopAdapter } from '../src/index.js';
 
 const baseUrl = process.env.INTENT_API_BASE || 'https://groupmind.one/api/v1';
@@ -32,17 +33,44 @@ if (!apiKey || !userId) {
   process.exit(1);
 }
 
+// The single most common misconfiguration (hit twice on 2026-07-31 alone,
+// including 27 silent days on one machine): the AGENT handle placed in
+// INTENT_USER_ID. The API accepts any string and silently creates a new
+// user document, so the daemon "works" while the real dashboard stays
+// stale. Warn loudly; do not exit, in case someone genuinely named their
+// user after an agent.
+if (userId.toLowerCase() === agentHandle.replace(/^@/, '').toLowerCase()) {
+  console.error(
+    `uik-daemon: WARNING - INTENT_USER_ID (${userId}) equals the agent handle. ` +
+    'INTENT_USER_ID must be the human user whose dashboard these heartbeats feed; ' +
+    'heartbeats are likely going to the wrong document.'
+  );
+}
+
 const client = new IntentClient({ baseUrl, apiKey, userId, deviceId });
 const iak = new IAKAdapter(client, { agentHandle });
 const desktop = new DesktopAdapter(client, { pollIntervalMs });
 
 desktop.start();
-await iak.publishStatus({ status: 'active', currentTask: null });
 
 // Re-publish agent status on the same interval as the desktop heartbeat,
 // otherwise the agent slot expires after its TTL while the device stays
 // fresh — caught dogfooding on 2026-04-08.
+// Optional honesty gate: when INTENT_AGENT_GATE_CMD is set, the agent
+// beat only publishes while that command exits 0 (e.g. `launchctl list
+// com.example.agent-supervisor`). Without it, a daemon on a timer reports
+// an agent as active forever, even when the agent process is long dead.
+const gateCmd = process.env.INTENT_AGENT_GATE_CMD || null;
+function gateOpen() {
+  if (!gateCmd) return true;
+  try { execSync(gateCmd, { stdio: 'ignore' }); return true; }
+  catch { return false; }
+}
+
+if (gateOpen()) await iak.publishStatus({ status: 'active', currentTask: null });
+
 const agentTimer = setInterval(() => {
+  if (!gateOpen()) return;
   iak.publishStatus({ status: 'active', currentTask: null }).catch(() => {});
 }, pollIntervalMs);
 
