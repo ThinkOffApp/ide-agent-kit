@@ -16,7 +16,7 @@ import { dirname } from 'node:path';
  * Ensure settings.hooks[event] contains a {type:'command', command} hook.
  * Mutates the given settings object. Returns true when something changed.
  */
-export function ensureHookCommand(settings, event, command, { timeout } = {}) {
+export function ensureHookCommand(settings, event, command, { timeout, matcher = '' } = {}) {
   if (!settings || typeof settings !== 'object' || Array.isArray(settings)) {
     throw new TypeError('settings must be a plain object');
   }
@@ -31,7 +31,11 @@ export function ensureHookCommand(settings, event, command, { timeout } = {}) {
   }
   const hook = { type: 'command', command };
   if (Number.isFinite(timeout)) hook.timeout = timeout;
-  entries.push({ matcher: '', hooks: [hook] });
+  // matcher scopes which tools trigger the hook. '' = all tools (default,
+  // for session-lifecycle events like SessionStart that have no tool). A tool
+  // name (e.g. "AskUserQuestion") means the hook only spawns for that tool,
+  // not on every tool call.
+  entries.push({ matcher, hooks: [hook] });
   return true;
 }
 
