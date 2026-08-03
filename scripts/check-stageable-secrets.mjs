@@ -20,6 +20,20 @@
 // rather than the filenames: whatever `git add -A` would actually stage, does
 // any of it look like a credential?
 //
+// WHAT A PASS DOES AND DOES NOT MEAN. This asks git what is stageable, and
+// git honours .git/info/exclude — which is machine-local and never committed.
+// So a PASS means "nothing dangerous is stageable ON THIS MACHINE RIGHT NOW".
+// It does NOT mean the repo's ignore rules are complete: a fresh clone, a new
+// user, or CI has none of your local excludes, and if .gitignore is still
+// missing the pattern then the same file is stageable there with nothing to
+// warn them.
+//
+// Those are two different claims and conflating them is how both of today's
+// leaks survived. Closing a hole with .git/info/exclude is the tourniquet;
+// the .gitignore change is the fix. This script cannot tell you whether you
+// did the second one. (Blind spot found by claudemm, who tested exactly this
+// rather than taking the script at its word.)
+//
 // Run: node scripts/check-stageable-secrets.mjs   (exit 1 on any finding)
 
 import { execFileSync } from 'node:child_process';
