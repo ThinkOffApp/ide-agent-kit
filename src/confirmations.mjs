@@ -1073,6 +1073,31 @@ export function startChatReplyPoller({ apiKey, room, intervalMs = 5000, log }) {
   const emit = log || ((msg) => process.stderr.write(`[iak-mcp] ${msg}\n`));
   const seen = new Set();
   let primed = false;
+  // A dropped decision has to be VISIBLE, not merely logged. On 2026-08-03
+  // petrus typed "/approve f2af1c66" from his tablet; the owner guard below
+  // rejected it because that device posts as "@petrus-boox" rather than
+  // "petrus", wrote one line to stderr, and left the intent pending. He saw
+  // no error, assumed the approval had landed, and moved on — the approval
+  // path failing in the one way it must never fail, silently. Every reject
+  // branch now answers in the room. Costs one request per rejected message,
+  // and `seen` guarantees that is once, not once per poll.
+  //
+  // No feedback loop: these replies never match the /approve|/deny regex
+  // below, which is anchored at the start of the message.
+  const reply = async (body) => {
+    try {
+      await fetch('https://groupmind.one/api/v1/messages', {
+        method: 'POST',
+        headers: { 'X-API-Key': apiKey, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ room, body }),
+      });
+    } catch (e) {
+      // Never let a failed reply break the poll loop: not telling someone
+      // their tap was rejected is bad, but dropping every later tap on the
+      // floor because one POST failed is worse.
+      emit(`reply failed: ${e.message}`);
+    }
+  };
   const poll = async () => {
     try {
       const url = `https://groupmind.one/api/v1/rooms/${encodeURIComponent(room)}/messages?limit=30`;
@@ -1095,6 +1120,11 @@ export function startChatReplyPoller({ apiKey, room, intervalMs = 5000, log }) {
         const sender = String(m.from || '').replace(/^@/, '').toLowerCase();
         if (sender !== 'petrus' && m.isHuman !== true) {
           emit(`${text} from ${m.from}: sender is not the owner — ignoring`);
+          await reply(
+            `\`${text}\` was NOT recorded — the intent is still pending. ` +
+            `Only the account owner can settle intents, and this arrived from ` +
+            `\`${m.from}\`, which is not a recognised owner identity.`
+          );
           continue;
         }
         const decision = match[1].toLowerCase();
@@ -1102,6 +1132,10 @@ export function startChatReplyPoller({ apiKey, room, intervalMs = 5000, log }) {
         const intent = getIntent(id);
         if (!intent) {
           emit(`/${decision} ${id} from ${m.from}: unknown intent, ignoring`);
+          await reply(
+            `\`/${decision} ${id}\` was NOT recorded — no intent with that id. ` +
+            `It has probably expired or been settled already.`
+          );
           continue;
         }
         const r = decideIntent(id, decision);
