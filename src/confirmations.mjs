@@ -1065,7 +1065,12 @@ export function composeAnnouncers(map) {
 //
 // Logs go to stderr only (stdout is the MCP stdio protocol channel — writing
 // there would corrupt it). Returns the interval handle so callers can stop it.
-export function startChatReplyPoller({ apiKey, room, intervalMs = 5000, log }) {
+// `owner` is the account handle decisions are accepted from. It also decides
+// who is worth ANSWERING when a decision is rejected: see `ownerish` below.
+// Defaulting it keeps existing callers behaving identically, but it is a
+// parameter rather than a literal because this ships as a product and the
+// owner is not always called petrus.
+export function startChatReplyPoller({ apiKey, room, intervalMs = 5000, log, owner = 'petrus' }) {
   if (!apiKey || !room) {
     process.stderr.write('[iak-mcp] chat-reply poller: missing apiKey or room — disabled\n');
     return null;
@@ -1073,6 +1078,35 @@ export function startChatReplyPoller({ apiKey, room, intervalMs = 5000, log }) {
   const emit = log || ((msg) => process.stderr.write(`[iak-mcp] ${msg}\n`));
   const seen = new Set();
   let primed = false;
+  // A dropped decision has to be VISIBLE, not merely logged. On 2026-08-03
+  // petrus typed "/approve f2af1c66" from his tablet; the owner guard below
+  // rejected it because that device posts as "@petrus-boox" rather than
+  // "petrus", wrote one line to stderr, and left the intent pending. He saw
+  // no error, assumed the approval had landed, and moved on — the approval
+  // path failing in the one way it must never fail, silently. Every reject
+  // branch now answers in the room. Costs one request per rejected message,
+  // and `seen` guarantees that is once, not once per poll.
+  //
+  // No feedback loop: these replies never match the /approve|/deny regex
+  // below, which is anchored at the start of the message.
+  //
+  // Backticks are stripped from interpolated handles: a handle is chosen by
+  // whoever registered it, and these strings put it inside a markdown code
+  // span, which one backtick would break out of.
+  const reply = async (body) => {
+    try {
+      await fetch('https://groupmind.one/api/v1/messages', {
+        method: 'POST',
+        headers: { 'X-API-Key': apiKey, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ room, body }),
+      });
+    } catch (e) {
+      // Never let a failed reply break the poll loop: not telling someone
+      // their tap was rejected is bad, but dropping every later tap on the
+      // floor because one POST failed is worse.
+      emit(`reply failed: ${e.message}`);
+    }
+  };
   const poll = async () => {
     try {
       const url = `https://groupmind.one/api/v1/rooms/${encodeURIComponent(room)}/messages?limit=30`;
@@ -1095,6 +1129,28 @@ export function startChatReplyPoller({ apiKey, room, intervalMs = 5000, log }) {
         const sender = String(m.from || '').replace(/^@/, '').toLowerCase();
         if (sender !== 'petrus' && m.isHuman !== true) {
           emit(`${text} from ${m.from}: sender is not the owner — ignoring`);
+          // Answer only senders who plausibly ARE the owner (`petrus`,
+          // `petrus-boox`, a future `petrus-watch`). claudeMB's review caught
+          // that replying to everything amplifies the very misbehaviour this
+          // guard was written for: a fleet agent once retried `/approve` in a
+          // loop, and answering each attempt would turn a silent log line into
+          // the daemon spamming the room — which is petrus's phone notification
+          // surface. Worse, a bot that retries on being told "not recorded"
+          // ping-pongs forever, and no `seen` set stops that because every
+          // round is a genuinely new message id.
+          //
+          // A human who tapped Approve needs to know it did not land. An agent
+          // emitting a spurious `/approve` does not; the log line was always
+          // the right answer for it.
+          const ownerish = sender === owner || sender.startsWith(`${owner}-`);
+          if (ownerish) {
+            await reply(
+              `\`${text}\` was NOT recorded — the intent is still pending. ` +
+              `Only the account owner can settle intents, and this arrived from ` +
+              `\`${String(m.from || '').replace(/`/g, '')}\`, which is not a ` +
+              `recognised owner identity.`
+            );
+          }
           continue;
         }
         const decision = match[1].toLowerCase();
@@ -1102,6 +1158,10 @@ export function startChatReplyPoller({ apiKey, room, intervalMs = 5000, log }) {
         const intent = getIntent(id);
         if (!intent) {
           emit(`/${decision} ${id} from ${m.from}: unknown intent, ignoring`);
+          await reply(
+            `\`/${decision} ${id}\` was NOT recorded — no intent with that id. ` +
+            `It has probably expired or been settled already.`
+          );
           continue;
         }
         const r = decideIntent(id, decision);
