@@ -11,6 +11,14 @@ data/*.json
 config/*.json
 config/*.bak*
 *.bak.*
+# ...and so do the .env variants, which config/*.json above does NOT cover
+# and the bare `.env` rule above does not either (that matches a file named
+# exactly ".env", not "grok.env"). Found on the MacBook 2026-08-03: an
+# unignored config/grok.env holding a live key, one `git add -A` away from
+# a PUBLIC repo - the same leak as 2026-07-09, through the sibling nobody
+# added a rule for.
+*.env
+config/*.env
 # Per-agent poller configs hold live API keys - never commit (leaked 2026-07-09)
 gemini-config.json
 gemini-config.json.bak*
