@@ -5,6 +5,7 @@ import { readFileSync, writeFileSync, appendFileSync, existsSync } from 'node:fs
 import { randomUUID } from 'node:crypto';
 import { createReceipt, appendReceipt } from './receipt.mjs';
 import { canSend, markSent } from './rate-limiter.mjs';
+import { resolveSelfHandle, isSelfSender } from './common/handles.mjs';
 
 // Ack-only messages are low-value and cause loops. Filter them out from automation posts.
 const ACK_ONLY_PATTERNS = [
@@ -245,7 +246,7 @@ export async function startRoomAutomation({ rooms, apiKey, handle, interval, con
   const seenFile = config?.automation?.seen_file || SEEN_FILE_DEFAULT;
   const receiptPath = config?.receipts?.path || './ide-agent-receipts.jsonl';
   const pollInterval = interval || config?.automation?.interval_sec || 30;
-  const selfHandle = (handle || config?.poller?.handle || '@unknown').replace('@', '');
+  const selfHandle = resolveSelfHandle({ explicit: handle, config });
   const cooldownMs = (config?.automation?.cooldown_sec || 5) * 1000;
 
   console.log(`Room automation started`);
@@ -284,9 +285,9 @@ export async function startRoomAutomation({ rooms, apiKey, handle, interval, con
         if (!m.id || seen.has(m.id)) continue;
         seen.add(m.id);
 
-        // Skip own messages
-        const sender = (m.user?.handle || m.from || m.sender || '').replace('@', '');
-        if (sender === selfHandle) continue;
+        // Skip own messages (case-insensitive; see src/common/handles.mjs)
+        const sender = m.user?.handle || m.from || m.sender || '';
+        if (isSelfSender(sender, selfHandle)) continue;
 
         // Attach room for rule matching
         m.room = room;

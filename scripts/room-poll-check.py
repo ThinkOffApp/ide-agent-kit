@@ -12,26 +12,54 @@ import sys
 from typing import Iterable, List, Set
 
 BASE_URL = os.getenv("IAK_BASE_URL", "https://antfarm.world/api/v1").rstrip("/")
-API_KEY = os.getenv("IAK_API_KEY") or os.getenv("ANTIGRAVITY_API_KEY", "")
-if not API_KEY:
-    # Fall back to the gitignored machine config so a bare restart of the
-    # poller still authenticates. On 2026-07-06 a restart without IAK_API_KEY
-    # printed NONE (exit 0) every poll for 5 hours - a total silent mute.
-    _cfg_path = os.getenv(
-        "IAK_CONFIG",
-        os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "config", "macbook.json"),
-    )
-    try:
-        with open(_cfg_path) as _f:
-            API_KEY = (json.load(_f).get("poller", {}) or {}).get("api_key", "") or ""
-    except Exception:
-        pass
+# The gitignored machine config is the fallback for both the API key and the
+# agent's own handle, so a bare restart still authenticates and still filters
+# self-posts. On 2026-07-06 a restart without IAK_API_KEY printed NONE
+# (exit 0) every poll for 5 hours - a total silent mute.
+_cfg_path = os.getenv(
+    "IAK_CONFIG",
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "config", "macbook.json"),
+)
+try:
+    with open(_cfg_path) as _f:
+        _POLLER_CFG = json.load(_f).get("poller", {}) or {}
+except Exception:
+    _POLLER_CFG = {}
+
+API_KEY = (
+    os.getenv("IAK_API_KEY")
+    or os.getenv("ANTIGRAVITY_API_KEY", "")
+    or _POLLER_CFG.get("api_key", "")
+    or ""
+)
 ROOMS = [r.strip() for r in os.getenv(
     "IAK_ROOMS", "thinkoff-development,feature-admin-planning,lattice-qcd"
 ).split(",") if r.strip()]
+
+
+def _handle_key(handle: str) -> str:
+    """Normalize a handle for comparison: strip, drop leading '@', lowercase."""
+    return str(handle or "").strip().lstrip("@").lower()
+
+
+# The agent's own handle(s), used to skip its own posts so they never re-enter
+# the wake pipeline. IAK_SELF_HANDLE env override first (IAK_SELF_HANDLES kept
+# as a legacy comma-list alias), then poller.handle from config. Comparison via
+# _handle_key is case-INSENSITIVE: GroupMind returns the handle's REGISTERED
+# casing in `from` (e.g. @claudeMB) while configs usually hold lowercase, and
+# that mismatch masked a broken self-filter - every post the agent made came
+# back as a "new message" and burned a wake turn.
 MY_HANDLES = tuple(
-    h.strip() for h in os.getenv("IAK_SELF_HANDLES", "@claudemm,claudemm").split(",") if h.strip()
+    h.strip()
+    for h in (
+        os.getenv("IAK_SELF_HANDLE")
+        or os.getenv("IAK_SELF_HANDLES")
+        or _POLLER_CFG.get("handle")
+        or "@claudemm"
+    ).split(",")
+    if h.strip()
 )
+_MY_HANDLE_KEYS = {_handle_key(h) for h in MY_HANDLES}
 OWNER_HANDLE = os.getenv("IAK_OWNER_HANDLE", "petrus").lower()
 TARGET_HANDLE = os.getenv("IAK_TARGET_HANDLE", "@claudemm")
 SEEN_FILE = os.getenv("IAK_SEEN_FILE", "/tmp/iak-seen-ids.txt")
@@ -92,9 +120,8 @@ def _passes_listen_filter(handle: str, author_handle: str, body: str) -> bool:
     if LISTEN_MODE == "humans":
         return not _is_bot(handle, author_handle)
     if LISTEN_MODE == "tagged":
-        my_short = {h.lower().lstrip("@") for h in MY_HANDLES}
         mentions = _extract_mentions(body)
-        return any(m in my_short for m in mentions)
+        return any(m in _MY_HANDLE_KEYS for m in mentions)
     if LISTEN_MODE == "owner":
         return OWNER_HANDLE in str(author_handle).lower() or OWNER_HANDLE in str(handle).lower()
     # Unknown mode, default to all
@@ -103,9 +130,8 @@ def _passes_listen_filter(handle: str, author_handle: str, body: str) -> bool:
 
 def _message_targets_me(body: str) -> bool:
     mentions = _extract_mentions(body)
-    my_short = {h.lower().lstrip("@") for h in MY_HANDLES}
     if mentions:
-        return any(m in my_short for m in mentions)
+        return any(m in _MY_HANDLE_KEYS for m in mentions)
     # If no explicit mentions, treat owner imperatives as potentially addressed to current agent.
     return True
 
@@ -181,8 +207,8 @@ def main() -> int:
 
             handle = str(msg.get("from", "?"))
             author_handle = str(msg.get("author", {}).get("handle", handle))
-            # Always skip own messages
-            if author_handle in MY_HANDLES or handle in MY_HANDLES:
+            # Always skip own messages (case-insensitive, '@' optional)
+            if _handle_key(author_handle) in _MY_HANDLE_KEYS or _handle_key(handle) in _MY_HANDLE_KEYS:
                 continue
 
             body = str(msg.get("body", ""))[:1000]

@@ -7,6 +7,7 @@ import { readFileSync, writeFileSync, appendFileSync, existsSync, unlinkSync } f
 import { randomUUID } from 'node:crypto';
 import { nudgeCommand } from '../utils.mjs';
 import { shouldSuppressNudge } from '../intent.mjs';
+import { resolveSelfHandle } from '../common/handles.mjs';
 
 /**
  * Room Poller — polls GroupMind rooms and notifies IDE agent of new messages.
@@ -45,7 +46,11 @@ const DM_SEEN_FILE_DEFAULT = '/tmp/iak-dm-seen-ids.txt';
 
 function normalizeHandle(handle) {
   if (typeof handle !== 'string') return '';
-  const trimmed = handle.trim();
+  // Lowercased for comparison: GroupMind returns the handle's REGISTERED
+  // casing in `from` fields (e.g. '@claudeMB') while configs usually hold
+  // '@claudemb'. Handles are case-insensitive identities; a case-sensitive
+  // compare let every self-post back into the wake pipeline.
+  const trimmed = handle.trim().toLowerCase();
   if (!trimmed) return '';
   return trimmed.startsWith('@') ? trimmed : `@${trimmed}`;
 }
@@ -154,7 +159,7 @@ export async function startRoomPoller({ rooms, apiKey, handle, interval, config,
   const nudgeMode = config?.poller?.nudge_mode || 'tmux';
   const nudgeCommandText = config?.poller?.nudge_command || '';
   const pollInterval = parsePositiveInt(interval || config?.poller?.interval_sec, 30);
-  const selfHandle = normalizeHandle(handle || config?.poller?.handle || '@unknown');
+  const selfHandle = normalizeHandle(resolveSelfHandle({ explicit: handle, config }));
   // The human owner's handle. Messages from the owner ALWAYS nudge, even in
   // emergency-only mode — a message from the user is itself the priority signal;
   // emergency-only is meant to mute agent/fleet chatter, not the user's own words.

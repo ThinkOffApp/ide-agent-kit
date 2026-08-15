@@ -25,8 +25,21 @@ PY
 
 CONFIG_API_KEY="$(read_json_value 'poller.api_key')"
 CONFIG_NUDGE_TEXT="$(read_json_value 'tmux.nudge_text')"
+CONFIG_HANDLE="$(read_json_value 'poller.handle')"
 
 API_KEY="${IAK_API_KEY:-${ANTIGRAVITY_API_KEY:-${CONFIG_API_KEY:-}}}"
+
+# Own-post filter identity: IAK_SELF_HANDLE env override, else poller.handle
+# from config. All comparisons are case-INSENSITIVE and accept a missing '@':
+# GroupMind returns the handle's REGISTERED casing in `from` (e.g. @claudeMB)
+# while configs usually hold lowercase, and that mismatch masked a missing
+# self-filter for months - every post the agent made re-entered its own wake
+# pipeline as a "new message" and burned a wake turn.
+SELF_HANDLE="${IAK_SELF_HANDLE:-${CONFIG_HANDLE:-@claudemb}}"
+SELF_HANDLE_LC="$(printf '%s' "$SELF_HANDLE" | tr '[:upper:]' '[:lower:]')"
+# wake-on-mention.sh skips mentions of IAK_SELF_HANDLE; export the resolved
+# value so that skip also works when only poller.handle was configured.
+export IAK_SELF_HANDLE="$SELF_HANDLE"
 ROOM="${ROOM:-thinkoff-development}"
 BASE_URL="${BASE_URL:-https://antfarm.world/api/v1}"
 POLL_INTERVAL="${POLL_INTERVAL:-15}"
@@ -118,6 +131,7 @@ if [[ ! -s "$LAST_WAKE_FILE" ]]; then
 fi
 
 echo "[claudemb] Polling $ROOM every ${POLL_INTERVAL}s (limit=$FETCH_LIMIT)"
+echo "[claudemb] Self handle: $SELF_HANDLE (own posts skipped, case-insensitive)"
 echo "[claudemb] Seen IDs file: $SEEN_IDS_FILE ($(wc -l < "$SEEN_IDS_FILE" | tr -d ' ') known)"
 echo "[claudemb] Wake target session (exact): $WAKE_SESSION"
 echo "[claudemb] Nudge text: $NUDGE_TEXT (cooldown=${WAKE_COOLDOWN_SEC}s)"
@@ -162,7 +176,7 @@ while true; do
             # asked to kill, 2026-07-02). Marked seen above so we don't
             # reconsider; just don't notify/wake on self-authored messages.
             case "$(printf '%s' "$msg_from" | tr '[:upper:]' '[:lower:]')" in
-                @claudemb|claudemb) continue ;;
+                "$SELF_HANDLE_LC"|"${SELF_HANDLE_LC#@}") continue ;;
             esac
             new_count=$((new_count + 1))
             body_preview="${msg_body:0:120}"
@@ -198,7 +212,7 @@ except Exception:
 
     # --- DM polling ---
     dm_response=$(curl -sS --connect-timeout "$HTTP_CONNECT_TIMEOUT_SEC" --max-time "$HTTP_TIMEOUT_SEC" -H "X-API-Key: $API_KEY" \
-        "$BASE_URL/messages?to=@claudeMB&limit=10" 2>&1) || {
+        "$BASE_URL/messages?to=$SELF_HANDLE&limit=10" 2>&1) || {
         echo "[$(date +%H:%M:%S)] DM fetch error: $dm_response"
     }
 
@@ -214,6 +228,13 @@ except Exception:
             # `--` terminates grep options; required for ids that begin with `-`.
             if ! grep -qF -- "$msg_id" "$DM_SEEN_IDS_FILE"; then
                 echo "$msg_id" >> "$DM_SEEN_IDS_FILE"
+                # Same own-post skip as the room loop: the DM endpoint echoes
+                # the agent's own sent/self DMs back, and each one would
+                # otherwise burn a wake turn. Marked seen above; just don't
+                # notify/wake on it.
+                case "$(printf '%s' "$msg_from" | tr '[:upper:]' '[:lower:]')" in
+                    "$SELF_HANDLE_LC"|"${SELF_HANDLE_LC#@}") continue ;;
+                esac
                 new_count=$((new_count + 1))
                 body_preview="${msg_body:0:120}"
                 echo "[$(date +%H:%M:%S)] DM   ${msg_from}: ${body_preview}"

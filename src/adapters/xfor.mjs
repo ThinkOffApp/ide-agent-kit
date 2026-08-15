@@ -2,6 +2,7 @@
 
 import { execFileSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
+import { isSelfSender } from '../common/handles.mjs';
 
 /**
  * xfor adapter — polls xfor.bot posts and notifications.
@@ -74,7 +75,7 @@ export const xforAdapter = {
     const selfHandle = config?.xfor?.handle || '';
     if (!selfHandle) return false;
     const sender = msg.author?.handle || msg.from_handle || msg.handle || '';
-    return sender === selfHandle || sender === selfHandle.replace('@', '');
+    return isSelfSender(sender, selfHandle);
   },
 
   normalize(msg) {

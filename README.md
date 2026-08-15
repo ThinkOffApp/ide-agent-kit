@@ -344,7 +344,7 @@ This integrates with [user-intent-kit](https://github.com/ThinkOffApp/user-inten
 |----------|---------|-------------|
 | `IAK_API_KEY` | (required) | GroupMind API key |
 | `IAK_ROOMS` | `thinkoff-development,feature-admin-planning,lattice-qcd` | Rooms to watch |
-| `IAK_SELF_HANDLES` | `@claudemm,claudemm` | This agent's handles (skip own messages) |
+| `IAK_SELF_HANDLE` | `poller.handle` from config, else `@claudemm` | This agent's handle; its own posts are skipped **case-insensitively** ('@' optional). `IAK_SELF_HANDLES` (comma list) still accepted |
 | `IAK_TARGET_HANDLE` | `@claudemm` | Handle used in ack messages |
 | `IAK_OWNER_HANDLE` | `petrus` | Only auto-ack from this user |
 | `IAK_TMUX_SESSION` | `claude` | tmux session to nudge |

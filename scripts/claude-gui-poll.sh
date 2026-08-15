@@ -3,7 +3,8 @@
 # Runs in tmux via launchd. Wakes the GUI via osascript on new messages.
 #
 # Required env: IAK_API_KEY
-# Optional env: SELF_HANDLE (default @claudemm), ROOM, POLL_INTERVAL, etc.
+# Optional env: IAK_SELF_HANDLE (or legacy SELF_HANDLE; default @claudemm),
+# ROOM, POLL_INTERVAL, etc.
 #
 # Setup: see examples/claude-gui-launchd.plist and README
 
@@ -11,7 +12,12 @@ set -euo pipefail
 
 API_KEY="${IAK_API_KEY:-}"
 ROOM="${ROOM:-thinkoff-development}"
-SELF_HANDLE="${SELF_HANDLE:-@claudemm}"
+# IAK_SELF_HANDLE wins over legacy SELF_HANDLE. Matching is case-INSENSITIVE:
+# GroupMind returns the handle's registered casing (e.g. @claudeMB) while
+# configs usually hold lowercase; a case-sensitive compare lets every own
+# post back into the wake pipeline.
+SELF_HANDLE="${IAK_SELF_HANDLE:-${SELF_HANDLE:-@claudemm}}"
+SELF_HANDLE_LC="$(printf '%s' "$SELF_HANDLE" | tr '[:upper:]' '[:lower:]')"
 BASE_URL="${BASE_URL:-https://groupmind.one/api/v1}"
 POLL_INTERVAL="${POLL_INTERVAL:-15}"
 FETCH_LIMIT="${FETCH_LIMIT:-20}"
@@ -66,7 +72,8 @@ process_messages() {
     local source="$1" response="$2" count=0
     while IFS=$'\t' read -r msg_id msg_from msg_body; do
         [[ -z "$msg_id" ]] && continue
-        [[ "$msg_from" == "$SELF_HANDLE" || "$msg_from" == "${SELF_HANDLE#@}" ]] && {
+        msg_from_lc="$(printf '%s' "$msg_from" | tr '[:upper:]' '[:lower:]')"
+        [[ "$msg_from_lc" == "$SELF_HANDLE_LC" || "$msg_from_lc" == "${SELF_HANDLE_LC#@}" ]] && {
             grep -qF "$msg_id" "$SEEN_IDS_FILE" || echo "$msg_id" >> "$SEEN_IDS_FILE"; continue; }
         grep -qF "$msg_id" "$SEEN_IDS_FILE" && continue
         echo "$msg_id" >> "$SEEN_IDS_FILE"
