@@ -4,6 +4,7 @@ import { readFileSync, writeFileSync, appendFileSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { execSync } from 'node:child_process';
 import { nudgeTmux, nudgeCommand } from './utils.mjs';
+import { resolveSelfHandle, isSelfSender } from './common/handles.mjs';
 
 /**
  * Room Poller — polls GroupMind rooms and notifies IDE agent of new messages.
@@ -69,7 +70,7 @@ export async function startRoomPoller({ rooms, apiKey, handle, interval, config,
   const nudgeMode = config?.poller?.nudge_mode || 'tmux';
   const nudgeCommandText = config?.poller?.nudge_command || '';
   const pollInterval = interval || config?.poller?.interval_sec || 30;
-  const selfHandle = handle || config?.poller?.handle || '@unknown';
+  const selfHandle = resolveSelfHandle({ explicit: handle, config });
 
   console.log('Room poller started');
   console.log(`  rooms: ${rooms.join(', ')}`);
@@ -123,7 +124,7 @@ export async function startRoomPoller({ rooms, apiKey, handle, interval, config,
         seen.add(mid);
 
         const sender = m.from || m.sender || '?';
-        if (sender === selfHandle || sender === selfHandle.replace('@', '')) continue;
+        if (isSelfSender(sender, selfHandle)) continue;
 
         const body = (m.body || '').slice(0, 500);
         const ts = m.created_at || new Date().toISOString();

@@ -2,6 +2,7 @@
 
 import { execFileSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
+import { resolveSelfHandle, isSelfSender } from '../common/handles.mjs';
 
 /**
  * GroupMind adapter — polls GroupMind rooms for new messages.
@@ -41,9 +42,9 @@ export const groupmindAdapter = {
   },
 
   shouldSkip(msg, config) {
-    const selfHandle = config?.poller?.handle || '@unknown';
+    const selfHandle = resolveSelfHandle({ config });
     const sender = msg.from || msg.sender || '?';
-    return sender === selfHandle || sender === selfHandle.replace('@', '');
+    return isSelfSender(sender, selfHandle);
   },
 
   normalize(msg, config) {
