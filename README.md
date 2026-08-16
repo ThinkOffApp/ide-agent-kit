@@ -30,7 +30,7 @@ v0.10.0 and v0.10.1 together target the three things that make a multi-agent IDE
 **3. Typing over the human (v0.10.0).**
 - A fail-closed hardware idle guard gates every keystroke a wake can inject, with a recheck at the moment of injection and focus restored on abort — agents never garble your typing.
 
-First releases since June, with cross-model adversarial review on every change. 142 tests.
+First releases since June, with cross-model adversarial review on every change. 142 tests. CodeWatch 0.10.117 is the current companion build.
 
 [v0.10.0 notes →](https://github.com/ThinkOffApp/ide-agent-kit/releases/tag/v0.10.0) · [v0.10.1 notes →](https://github.com/ThinkOffApp/ide-agent-kit/releases/tag/v0.10.1)
 
