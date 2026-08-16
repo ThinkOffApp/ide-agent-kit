@@ -23,8 +23,29 @@ log(){ echo "[$(date '+%F %T')] $*" | tee -a "$LOG"; }
 [ -s "$SECRET_FILE" ] || { head -c 999 /dev/urandom | base64 | tr -dc 'A-Za-z0-9_-' | head -c 32 > "$SECRET_FILE"; chmod 600 "$SECRET_FILE"; }
 SECRET=$(cat "$SECRET_FILE")
 KEY=$(python3 -c "import json;print(json.load(open('$CONFIG'))['poller']['api_key'])")
+SELF=$(python3 -c "import json;c=json.load(open('$CONFIG'));print(c.get('poller',{}).get('handle','@claudemb'))")
 
-start_receiver(){ pgrep -f "webhook-wake.mjs" >/dev/null || { WEBHOOK_WAKE_SECRET="$SECRET" /usr/local/bin/node "$RECEIVER" >>/tmp/webhook-wake.log 2>&1 & log "receiver started"; }; }
+# Match OUR receiver by PORT, not a bare pgrep on the script name: the codex
+# supervisor runs the SAME webhook-wake.mjs on a different port, so a name-only
+# pgrep saw codex's receiver and skipped starting ours EVERY loop for months -
+# tunnel + registration live, but forwarding to a dead 8790. Check the port.
+receiver_running(){
+  local pid
+  for pid in $(lsof -nP -iTCP:$PORT -sTCP:LISTEN -t 2>/dev/null); do
+    ps -o command= -p "$pid" 2>/dev/null | grep -q "webhook-wake.mjs" && return 0
+  done
+  return 1
+}
+start_receiver(){
+  receiver_running && return 0
+  NODE_BIN="$(command -v node || echo /usr/local/bin/node)"
+  WEBHOOK_WAKE_SECRET="$SECRET" \
+  WEBHOOK_WAKE_PORT="$PORT" \
+  WEBHOOK_WAKE_SELF="$SELF" \
+    "$NODE_BIN" "$RECEIVER" >>/tmp/webhook-wake.log 2>&1 &
+  sleep 1
+  receiver_running && log "receiver started on $PORT" || log "receiver FAILED to start on $PORT"
+}
 
 start_tunnel(){ pkill -f "cloudflared tunnel --url http://127.0.0.1:$PORT" 2>/dev/null; sleep 1; : > "$CF_LOG"; /opt/homebrew/bin/cloudflared tunnel --url "http://127.0.0.1:$PORT" --no-autoupdate >>"$CF_LOG" 2>&1 & log "cloudflared started"; }
 
