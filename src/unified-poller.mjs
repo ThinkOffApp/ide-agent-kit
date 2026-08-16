@@ -3,6 +3,7 @@
 import { loadSeenIds, saveSeenIds } from './common/seen-ids.mjs';
 import { nudgeTmux, writeNotification } from './common/notify.mjs';
 import { appendEvents } from './common/event-queue.mjs';
+import { resolveSelfHandle } from './common/handles.mjs';
 import { appendFileSync } from 'node:fs';
 
 /**
@@ -124,6 +125,11 @@ export class UnifiedPoller {
    */
   async start() {
     console.log(`${this.adapter.name} poller started`);
+    // Print the RESOLVED self handle so a two-agent machine can spot a shared
+    // IAK_SELF_HANDLE at a glance (review caveat on #59): if two pollers on
+    // one host print the same handle here, one of them is filtering the
+    // other's posts and the wrong agent goes deaf.
+    console.log(`  self handle: ${resolveSelfHandle({ config: this.config })} (own posts skipped, case-insensitive)`);
     console.log(`  interval: ${this.interval}s`);
     console.log(`  seen file: ${this.seenFile}`);
     console.log(`  queue: ${this.queuePath}`);
