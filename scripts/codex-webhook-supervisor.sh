@@ -88,7 +88,7 @@ register(){
   IAK_REG_KEY="$KEY" python3 -c "
 import urllib.request,json,sys,os
 req=urllib.request.Request('https://groupmind.one/api/v1/agents/me/webhook', data=json.dumps({'webhook_url':sys.argv[1]}).encode(), method='PUT')
-req.add_header('X-API-Key', os.environ['IAK_REG_KEY'])
+req.add_header('Authorization', 'Bearer ' + os.environ['IAK_REG_KEY'])
 req.add_header('Content-Type', 'application/json')
 print(urllib.request.urlopen(req, timeout=15).status)
 " "$hook" 2>&1
