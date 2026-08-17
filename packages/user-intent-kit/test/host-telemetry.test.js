@@ -10,11 +10,14 @@ import { collectHostTelemetry } from '../src/host-telemetry.js';
  * suite happens to expose, so on a Mac the Linux thermal path would never run
  * and "tests pass" would say nothing about the Pi.
  */
-function sources({ platform = 'linux', load = [1.8, 1.7, 1.6], cpuCount = 4, zones = {} } = {}) {
+function sources({ platform = 'linux', load = [1.8, 1.7, 1.6], cpuCount = 4, zones = {},
+                   totalMem = 16e9, freeMem = 4e9 } = {}) {
   return {
     platform: () => platform,
     loadavg: () => load,
     cpuCount: () => cpuCount,
+    totalMemBytes: () => totalMem,
+    freeMemBytes: () => freeMem,
     listThermalZones: () => Object.keys(zones),
     readThermalZone: (zone) => {
       const value = zones[zone];
@@ -152,4 +155,38 @@ test('never throws, whatever the sensors do', () => {
 
 test('works against the real machine without arguments', () => {
   assert.doesNotThrow(() => collectHostTelemetry());
+});
+
+// --- memory ---
+
+test('publishes installed and free memory in GB', () => {
+  const host = collectHostTelemetry({ sources: sources({ totalMem: 25.8e9, freeMem: 1.2e9 }) });
+  assert.equal(host.mem_total_gb, 25.8);
+  assert.equal(host.mem_free_gb, 1.2);
+});
+
+test('publishes no used-percentage, which macOS free memory cannot support', () => {
+  const host = collectHostTelemetry({ sources: sources() });
+  assert.ok(!('mem_used_pct' in host), 'derived a usage figure from an unreliable free count');
+});
+
+test('zero free memory is a real reading, not a missing one', () => {
+  const host = collectHostTelemetry({ sources: sources({ freeMem: 0 }) });
+  assert.equal(host.mem_free_gb, 0);
+});
+
+test('omits memory when the host cannot report it', () => {
+  const blind = sources();
+  blind.totalMemBytes = () => undefined;
+  blind.freeMemBytes = () => undefined;
+  const host = collectHostTelemetry({ sources: blind });
+  assert.ok(!('mem_total_gb' in host));
+  assert.ok(!('mem_free_gb' in host));
+  assert.ok('load_1m' in host, 'a missing memory reading must not suppress load');
+});
+
+test('memory survives a hostile sensor without throwing', () => {
+  const hostile = sources();
+  hostile.totalMemBytes = () => { throw new Error('boom'); };
+  assert.doesNotThrow(() => collectHostTelemetry({ sources: hostile }));
 });

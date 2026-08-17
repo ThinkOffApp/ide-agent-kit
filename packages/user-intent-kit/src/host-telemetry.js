@@ -17,7 +17,7 @@
  */
 
 import { readFileSync, readdirSync } from 'node:fs';
-import { cpus, loadavg, platform } from 'node:os';
+import { cpus, freemem, loadavg, platform, totalmem } from 'node:os';
 
 /** Plausible CPU die temperatures. Outside this, assume the sensor lied. */
 const TEMP_MIN_C = 1;
@@ -26,10 +26,15 @@ const TEMP_MAX_C = 150;
 const THERMAL_ROOT = '/sys/class/thermal';
 
 /** Real sensor reads. Swapped out wholesale in tests. */
+/** Bytes per GB, base 10 — matching the units already published by the fleet. */
+const BYTES_PER_GB = 1e9;
+
 export const defaultSources = {
   platform: () => platform(),
   loadavg: () => loadavg(),
   cpuCount: () => cpus()?.length,
+  totalMemBytes: () => totalmem(),
+  freeMemBytes: () => freemem(),
   listThermalZones: () => readdirSync(THERMAL_ROOT).filter((z) => z.startsWith('thermal_zone')),
   readThermalZone: (zone) => readFileSync(`${THERMAL_ROOT}/${zone}/temp`, 'utf8'),
 };
@@ -58,6 +63,32 @@ function readLoad(sources) {
   if (Number.isFinite(count) && count > 0) {
     out.cpu_count = count;
     out.load_pct = Math.round((oneMinute / count) * 100);
+  }
+  return out;
+}
+
+/**
+ * Installed and free memory, in GB (1e9 bytes, the unit the fleet already
+ * publishes — a MacBook with 128 GiB reports 137.4).
+ *
+ * Deliberately no used-percentage. On macOS `freemem()` counts only genuinely
+ * free pages and excludes the cache, which the OS will hand back on demand, so
+ * a percentage derived from it reads as 95% used on a machine that is not
+ * short of memory at all. Free and total are facts; the percentage would be an
+ * alarm the numbers do not support.
+ *
+ * @returns {{mem_total_gb?: number, mem_free_gb?: number}}
+ */
+function readMemory(sources) {
+  const out = {};
+  const total = sources.totalMemBytes?.();
+  const free = sources.freeMemBytes?.();
+
+  if (Number.isFinite(total) && total > 0) {
+    out.mem_total_gb = Math.round((total / BYTES_PER_GB) * 10) / 10;
+  }
+  if (Number.isFinite(free) && free >= 0) {
+    out.mem_free_gb = Math.round((free / BYTES_PER_GB) * 10) / 10;
   }
   return out;
 }
@@ -115,6 +146,12 @@ export function collectHostTelemetry({ machine, sources = defaultSources } = {})
     Object.assign(host, readLoad(sources));
   } catch {
     // Load is best-effort like everything else here.
+  }
+
+  try {
+    Object.assign(host, readMemory(sources));
+  } catch {
+    // Memory is best-effort too; publish whatever else we managed to read.
   }
 
   try {
