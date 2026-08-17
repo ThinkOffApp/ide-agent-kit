@@ -9,6 +9,11 @@
  *
  * Nothing here throws: telemetry is decoration on the heartbeat, so a failed
  * sensor read must never take the agent offline.
+ *
+ * The platform reads are injectable (`sources`) so the contract can be tested
+ * on any machine. Without that, a suite running on macOS never exercises the
+ * Linux thermal path at all, and "the tests pass" would mean only that they
+ * passed on whichever box happened to run them.
  */
 
 import { readFileSync, readdirSync } from 'node:fs';
@@ -17,6 +22,17 @@ import { cpus, loadavg, platform } from 'node:os';
 /** Plausible CPU die temperatures. Outside this, assume the sensor lied. */
 const TEMP_MIN_C = 1;
 const TEMP_MAX_C = 150;
+
+const THERMAL_ROOT = '/sys/class/thermal';
+
+/** Real sensor reads. Swapped out wholesale in tests. */
+export const defaultSources = {
+  platform: () => platform(),
+  loadavg: () => loadavg(),
+  cpuCount: () => cpus()?.length,
+  listThermalZones: () => readdirSync(THERMAL_ROOT).filter((z) => z.startsWith('thermal_zone')),
+  readThermalZone: (zone) => readFileSync(`${THERMAL_ROOT}/${zone}/temp`, 'utf8'),
+};
 
 /**
  * CPU load, normalised so devices of different sizes are comparable.
@@ -28,15 +44,17 @@ const TEMP_MAX_C = 150;
  *
  * @returns {{load_1m?: number, load_pct?: number, cpu_count?: number}}
  */
-function readLoad() {
-  const count = cpus()?.length;
-  const [oneMinute] = loadavg();
-
+function readLoad(sources) {
   // Windows has no load average; Node reports [0, 0, 0] there. That is an
   // absent sensor, not an idle machine, so report nothing at all.
-  if (platform() === 'win32' || !Number.isFinite(oneMinute)) return {};
+  if (sources.platform() === 'win32') return {};
+
+  const [oneMinute] = sources.loadavg() || [];
+  if (!Number.isFinite(oneMinute)) return {};
 
   const out = { load_1m: Math.round(oneMinute * 100) / 100 };
+
+  const count = sources.cpuCount();
   if (Number.isFinite(count) && count > 0) {
     out.cpu_count = count;
     out.load_pct = Math.round((oneMinute / count) * 100);
@@ -53,19 +71,18 @@ function readLoad() {
  *
  * @returns {number|undefined} degrees Celsius
  */
-function readLinuxTempC() {
-  let hottest;
+function readLinuxTempC(sources) {
   let zones;
   try {
-    zones = readdirSync('/sys/class/thermal').filter((z) => z.startsWith('thermal_zone'));
+    zones = sources.listThermalZones();
   } catch {
     return undefined;
   }
 
-  for (const zone of zones) {
+  let hottest;
+  for (const zone of zones || []) {
     try {
-      const milli = Number(readFileSync(`/sys/class/thermal/${zone}/temp`, 'utf8').trim());
-      const celsius = milli / 1000;
+      const celsius = Number(String(sources.readThermalZone(zone)).trim()) / 1000;
       if (celsius >= TEMP_MIN_C && celsius <= TEMP_MAX_C) {
         if (hottest === undefined || celsius > hottest) hottest = celsius;
       }
@@ -87,25 +104,26 @@ function readLinuxTempC() {
  *
  * @param {object} [opts]
  * @param {string} [opts.machine] - stable device name (e.g. "mac-mini")
+ * @param {object} [opts.sources] - injectable sensor reads, for tests
  * @returns {object} only the fields that were readable
  */
-export function collectHostTelemetry({ machine } = {}) {
+export function collectHostTelemetry({ machine, sources = defaultSources } = {}) {
   const host = {};
   if (machine) host.machine = machine;
 
   try {
-    Object.assign(host, readLoad());
+    Object.assign(host, readLoad(sources));
   } catch {
     // Load is best-effort like everything else here.
   }
 
-  if (platform() === 'linux') {
-    try {
-      const tempC = readLinuxTempC();
+  try {
+    if (sources.platform() === 'linux') {
+      const tempC = readLinuxTempC(sources);
       if (tempC !== undefined) host.temp_c = tempC;
-    } catch {
-      // No thermal zones exposed; publish without a temperature.
     }
+  } catch {
+    // No thermal zones exposed; publish without a temperature.
   }
 
   return host;
