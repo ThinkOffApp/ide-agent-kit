@@ -345,6 +345,7 @@ This integrates with [user-intent-kit](https://github.com/ThinkOffApp/user-inten
 | `IAK_API_KEY` | (required) | GroupMind API key |
 | `IAK_ROOMS` | `thinkoff-development,feature-admin-planning,lattice-qcd` | Rooms to watch |
 | `IAK_SELF_HANDLE` | `poller.handle` from config, else `@claudemm` | This agent's handle; its own posts are skipped **case-insensitively** ('@' optional). `IAK_SELF_HANDLES` (comma list) still accepted |
+| `IAK_NEW_FILE` | `/tmp/iak-new-messages.txt` | Notification file this agent's poller and session hooks bind to. **Set a per-agent path on multi-agent machines** (e.g. `/tmp/iak-grok-new-messages.txt`): the room-responder lock derives from this file, so two agents sharing the default will fight over one voice and the loser's sessions go passive without warning |
 | `IAK_TARGET_HANDLE` | `@claudemm` | Handle used in ack messages |
 | `IAK_OWNER_HANDLE` | `petrus` | Only auto-ack from this user |
 | `IAK_TMUX_SESSION` | `claude` | tmux session to nudge |
