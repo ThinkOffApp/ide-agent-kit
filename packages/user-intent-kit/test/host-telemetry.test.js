@@ -11,13 +11,14 @@ import { collectHostTelemetry } from '../src/host-telemetry.js';
  * and "tests pass" would say nothing about the Pi.
  */
 function sources({ platform = 'linux', load = [1.8, 1.7, 1.6], cpuCount = 4, zones = {},
-                   totalMem = 16e9, freeMem = 4e9, commands = {} } = {}) {
+                   totalMem = 16e9, freeMem = 4e9, availMem = 12e9, commands = {} } = {}) {
   return {
     platform: () => platform,
     loadavg: () => load,
     cpuCount: () => cpuCount,
     totalMemBytes: () => totalMem,
     freeMemBytes: () => freeMem,
+    availableMemBytes: () => availMem,
     run: (cmd, args) => {
       const key = `${cmd} ${(args || []).join(' ')}`;
       return (commands && commands[key]) || '';
@@ -229,4 +230,32 @@ test('omits hardware and network when the commands fail', () => {
   assert.ok(!('hw' in host), 'invented a hardware description');
   assert.ok(!('network' in host), 'guessed a network medium');
   assert.ok(!('lan_ip' in host));
+});
+
+// --- available memory: the figure that decides whether a model fits ---
+
+test('publishes available memory alongside free, not instead of it', () => {
+  const host = collectHostTelemetry({ sources: sources({ freeMem: 1.3e9, availMem: 17.8e9 }) });
+  assert.equal(host.mem_free_gb, 1.3);
+  assert.equal(host.mem_available_gb, 17.8);
+});
+
+test('available is what a model-fits decision must use', () => {
+  // A real Mac: 1.3 GB free, ~18 GB available. Deciding on free would refuse a
+  // model the machine can hold comfortably.
+  const host = collectHostTelemetry({ sources: sources({ totalMem: 25.8e9, freeMem: 1.3e9, availMem: 17.8e9 }) });
+  assert.ok(host.mem_available_gb > host.mem_free_gb * 10, 'the gap is the whole point');
+});
+
+test('omits available when the OS will not say', () => {
+  const blind = sources();
+  blind.availableMemBytes = () => undefined;
+  const host = collectHostTelemetry({ sources: blind });
+  assert.ok(!('mem_available_gb' in host), 'guessed an availability figure');
+  assert.ok('mem_total_gb' in host, 'and did not lose the rest');
+});
+
+test('zero available is a real reading', () => {
+  const host = collectHostTelemetry({ sources: sources({ availMem: 0 }) });
+  assert.equal(host.mem_available_gb, 0);
 });
