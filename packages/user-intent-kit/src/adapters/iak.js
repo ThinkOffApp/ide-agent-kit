@@ -1,34 +1,44 @@
 // SPDX-License-Identifier: AGPL-3.0
 
+import { collectHostTelemetry } from '../host-telemetry.js';
+
 /**
  * IAK Adapter - integrates user-intent-kit with IDE Agent Kit.
  *
- * Publishes: active agent, current task, tmux session status.
+ * Publishes: active agent, current task, tmux session status, host vitals.
  * Subscribes: user availability (suppress nudges during meetings).
  */
 export class IAKAdapter {
   #client;
   #agentHandle;
+  #machine;
 
   /**
    * @param {import('../client.js').IntentClient} client
    * @param {object} opts
    * @param {string} opts.agentHandle - e.g. "@claudemm"
+   * @param {string} [opts.machine] - stable device name published in host vitals
    */
-  constructor(client, { agentHandle }) {
+  constructor(client, { agentHandle, machine }) {
     this.#client = client;
     this.#agentHandle = agentHandle;
+    this.#machine = machine;
   }
 
   /**
    * Publish current agent status to intent state.
    * Call this on each room poll cycle.
+   *
+   * `host` carries the machine's vitals as an object. It was previously a bare
+   * string on some publishers, which gave the dashboard nowhere to put a
+   * temperature or a load figure.
    */
   async publishStatus({ status = 'active', currentTask = null }) {
     const name = this.#agentHandle.replace(/^@/, '');
     await this.#client.patchAgent(name, {
       status,
       last_task: currentTask,
+      host: collectHostTelemetry({ machine: this.#machine }),
     });
   }
 

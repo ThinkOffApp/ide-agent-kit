@@ -48,7 +48,7 @@ if (userId.toLowerCase() === agentHandle.replace(/^@/, '').toLowerCase()) {
 }
 
 const client = new IntentClient({ baseUrl, apiKey, userId, deviceId });
-const iak = new IAKAdapter(client, { agentHandle });
+const iak = new IAKAdapter(client, { agentHandle, machine: deviceId });
 const desktop = new DesktopAdapter(client, { pollIntervalMs });
 
 desktop.start();
