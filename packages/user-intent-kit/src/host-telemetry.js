@@ -226,12 +226,16 @@ function readLinuxTempC(sources) {
  *
  * @param {object} [opts]
  * @param {string} [opts.machine] - stable device name (e.g. "mac-mini")
+ * @param {string} [opts.kind] - role the fleet knows this box by ("car-pi",
+ *   "mac-mini"); the Pi already publishes this, so Macs use the same word
+ *   rather than inventing a second vocabulary for the same idea
  * @param {object} [opts.sources] - injectable sensor reads, for tests
  * @returns {object} only the fields that were readable
  */
-export function collectHostTelemetry({ machine, sources = defaultSources } = {}) {
+export function collectHostTelemetry({ machine, kind, sources = defaultSources } = {}) {
   const host = {};
   if (machine) host.machine = machine;
+  if (kind) host.kind = kind;
 
   try {
     Object.assign(host, readLoad(sources));
