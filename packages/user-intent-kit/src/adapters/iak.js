@@ -17,12 +17,16 @@ export class IAKAdapter {
    * @param {import('../client.js').IntentClient} client
    * @param {object} opts
    * @param {string} opts.agentHandle - e.g. "@claudemm"
-   * @param {string} [opts.machine] - stable device name published in host vitals
+   * @param {string} [opts.machine] - stable device name published in host
+   *   vitals. Defaults to the client's configured deviceId, so callers that
+   *   predate host vitals keep naming their machine: `host` replaces the
+   *   stored value wholesale, so publishing it without a name would overwrite
+   *   a known hostname with anonymous load readings.
    */
   constructor(client, { agentHandle, machine }) {
     this.#client = client;
     this.#agentHandle = agentHandle;
-    this.#machine = machine;
+    this.#machine = machine ?? client?.deviceId ?? undefined;
   }
 
   /**
