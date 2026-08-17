@@ -11,13 +11,17 @@ import { collectHostTelemetry } from '../src/host-telemetry.js';
  * and "tests pass" would say nothing about the Pi.
  */
 function sources({ platform = 'linux', load = [1.8, 1.7, 1.6], cpuCount = 4, zones = {},
-                   totalMem = 16e9, freeMem = 4e9 } = {}) {
+                   totalMem = 16e9, freeMem = 4e9, commands = {} } = {}) {
   return {
     platform: () => platform,
     loadavg: () => load,
     cpuCount: () => cpuCount,
     totalMemBytes: () => totalMem,
     freeMemBytes: () => freeMem,
+    run: (cmd, args) => {
+      const key = `${cmd} ${(args || []).join(' ')}`;
+      return (commands && commands[key]) || '';
+    },
     listThermalZones: () => Object.keys(zones),
     readThermalZone: (zone) => {
       const value = zones[zone];
@@ -189,4 +193,40 @@ test('memory survives a hostile sensor without throwing', () => {
   const hostile = sources();
   hostile.totalMemBytes = () => { throw new Error('boom'); };
   assert.doesNotThrow(() => collectHostTelemetry({ sources: hostile }));
+});
+
+// --- hardware + network ---
+
+test('describes Mac hardware from the OS, not from guesswork', () => {
+  const host = collectHostTelemetry({ sources: sources({ platform: 'darwin', commands: {
+    '/usr/sbin/sysctl -n machdep.cpu.brand_string': 'Apple M4',
+    '/usr/sbin/sysctl -n hw.model': 'Mac16,10',
+  }})});
+  assert.equal(host.hw, 'Apple M4 (Mac16,10)');
+});
+
+test('reports a wired Mac as ethernet, not wifi', () => {
+  const host = collectHostTelemetry({ sources: sources({ platform: 'darwin', commands: {
+    '/sbin/route -n get default': '   interface: en0',
+    '/usr/sbin/ipconfig getifaddr en0': '192.168.50.241',
+    '/usr/sbin/networksetup -listallhardwareports': 'Hardware Port: Wi-Fi\nDevice: en1\n',
+  }})});
+  assert.equal(host.network, 'ethernet');
+  assert.equal(host.lan_ip, '192.168.50.241');
+});
+
+test('reports a Mac on the wifi device as wifi', () => {
+  const host = collectHostTelemetry({ sources: sources({ platform: 'darwin', commands: {
+    '/sbin/route -n get default': '   interface: en1',
+    '/usr/sbin/ipconfig getifaddr en1': '192.168.50.99',
+    '/usr/sbin/networksetup -listallhardwareports': 'Hardware Port: Wi-Fi\nDevice: en1\n',
+  }})});
+  assert.equal(host.network, 'wifi');
+});
+
+test('omits hardware and network when the commands fail', () => {
+  const host = collectHostTelemetry({ sources: sources({ platform: 'darwin', commands: {} })});
+  assert.ok(!('hw' in host), 'invented a hardware description');
+  assert.ok(!('network' in host), 'guessed a network medium');
+  assert.ok(!('lan_ip' in host));
 });

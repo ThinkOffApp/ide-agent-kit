@@ -16,6 +16,7 @@
  * passed on whichever box happened to run them.
  */
 
+import { execFileSync } from 'node:child_process';
 import { readFileSync, readdirSync } from 'node:fs';
 import { cpus, freemem, loadavg, platform, totalmem } from 'node:os';
 
@@ -25,9 +26,25 @@ const TEMP_MAX_C = 150;
 
 const THERMAL_ROOT = '/sys/class/thermal';
 
-/** Real sensor reads. Swapped out wholesale in tests. */
 /** Bytes per GB, base 10 — matching the units already published by the fleet. */
 const BYTES_PER_GB = 1e9;
+
+/**
+ * Run a command for a fact we cannot get from Node. Arguments are passed as
+ * argv, never interpolated into a shell string, and a failure is just an
+ * absent field.
+ */
+function run(cmd, args) {
+  try {
+    return execFileSync(cmd, args, {
+      encoding: 'utf8',
+      timeout: 2000,
+      stdio: ['ignore', 'pipe', 'ignore'],
+    }).trim();
+  } catch {
+    return '';
+  }
+}
 
 export const defaultSources = {
   platform: () => platform(),
@@ -35,6 +52,7 @@ export const defaultSources = {
   cpuCount: () => cpus()?.length,
   totalMemBytes: () => totalmem(),
   freeMemBytes: () => freemem(),
+  run,
   listThermalZones: () => readdirSync(THERMAL_ROOT).filter((z) => z.startsWith('thermal_zone')),
   readThermalZone: (zone) => readFileSync(`${THERMAL_ROOT}/${zone}/temp`, 'utf8'),
 };
@@ -89,6 +107,79 @@ function readMemory(sources) {
   }
   if (Number.isFinite(free) && free >= 0) {
     out.mem_free_gb = Math.round((free / BYTES_PER_GB) * 10) / 10;
+  }
+  return out;
+}
+
+/**
+ * Hardware description never changes while the process runs, so it is read
+ * once — but keyed by the sources object rather than module-global, or the
+ * first caller's answer would be served to every later one regardless of what
+ * it asked. (A module-level cache also made the function untestable: injected
+ * sources were ignored once the real machine had populated it.)
+ */
+const hardwareCache = new WeakMap();
+
+/**
+ * What this machine is, in the words its own OS uses — "Apple M4 (Mac16,10)",
+ * "Raspberry Pi 5 Model B". Purely descriptive; the dashboard shows it so a
+ * card is identifiable without knowing the hostname convention.
+ */
+function readHardware(sources) {
+  if (hardwareCache.has(sources)) return hardwareCache.get(sources);
+
+  let hw = '';
+  if (sources.platform() === 'darwin') {
+    const chip = sources.run('/usr/sbin/sysctl', ['-n', 'machdep.cpu.brand_string']);
+    const model = sources.run('/usr/sbin/sysctl', ['-n', 'hw.model']);
+    hw = chip && model ? `${chip} (${model})` : chip || model;
+  } else if (sources.platform() === 'linux') {
+    // The Pi names itself here; \0-terminated, hence the trim.
+    try {
+      hw = readFileSync('/proc/device-tree/model', 'utf8').replace(/\0/g, '').trim();
+    } catch {
+      hw = '';
+    }
+  }
+  hardwareCache.set(sources, hw);
+  return hw;
+}
+
+/**
+ * Which way this host reaches the network, and at what address.
+ *
+ * Reported as the medium ("wifi" / "ethernet") plus the LAN address, so a
+ * card shows how a machine is attached — the Pi is deliberately never on the
+ * house wifi, and seeing that at a glance matters.
+ *
+ * No SSID: on current macOS that needs location permission, and a field that
+ * works on one machine and silently fails on another is worse than no field.
+ */
+function readNetwork(sources) {
+  const out = {};
+  const os = sources.platform();
+
+  if (os === 'darwin') {
+    const iface = (sources.run('/sbin/route', ['-n', 'get', 'default']).match(/interface:\s*(\S+)/) || [])[1];
+    if (!iface) return out;
+    const ip = sources.run('/usr/sbin/ipconfig', ['getifaddr', iface]);
+    if (ip) out.lan_ip = ip;
+    // The Wi-Fi port maps to one device (often en1); anything else is wired.
+    const ports = sources.run('/usr/sbin/networksetup', ['-listallhardwareports']);
+    const wifiDev = (ports.match(/Hardware Port:\s*Wi-Fi\s*\nDevice:\s*(\S+)/) || [])[1];
+    out.network = iface === wifiDev ? 'wifi' : 'ethernet';
+  } else if (os === 'linux') {
+    const iface = (sources.run('/sbin/ip', ['route', 'show', 'default']).match(/dev\s+(\S+)/) || [])[1];
+    if (!iface) return out;
+    const addr = sources.run('/sbin/ip', ['-4', '-o', 'addr', 'show', iface]);
+    const ip = (addr.match(/inet\s+([\d.]+)/) || [])[1];
+    if (ip) out.lan_ip = ip;
+    try {
+      readdirSync(`/sys/class/net/${iface}/wireless`);
+      out.network = 'wifi';
+    } catch {
+      out.network = 'ethernet';
+    }
   }
   return out;
 }
@@ -161,6 +252,19 @@ export function collectHostTelemetry({ machine, sources = defaultSources } = {})
     }
   } catch {
     // No thermal zones exposed; publish without a temperature.
+  }
+
+  try {
+    const hw = readHardware(sources);
+    if (hw) host.hw = hw;
+  } catch {
+    // Descriptive only; never worth failing a heartbeat over.
+  }
+
+  try {
+    Object.assign(host, readNetwork(sources));
+  } catch {
+    // Same: an unknown link is published as no link, not a wrong one.
   }
 
   return host;
