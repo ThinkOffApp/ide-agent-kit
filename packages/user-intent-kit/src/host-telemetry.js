@@ -52,6 +52,23 @@ export const defaultSources = {
   cpuCount: () => cpus()?.length,
   totalMemBytes: () => totalmem(),
   freeMemBytes: () => freemem(),
+  // The OS's own view of what a new process could actually get. macOS reports
+  // it as a percentage; Linux exposes MemAvailable directly.
+  availableMemBytes: () => {
+    if (platform() === 'darwin') {
+      const pct = Number((run('/usr/bin/memory_pressure', []).match(/free percentage:\s*(\d+)%/) || [])[1]);
+      return Number.isFinite(pct) ? (totalmem() * pct) / 100 : undefined;
+    }
+    if (platform() === 'linux') {
+      try {
+        const kb = Number((readFileSync('/proc/meminfo', 'utf8').match(/MemAvailable:\s*(\d+)\s*kB/) || [])[1]);
+        return Number.isFinite(kb) ? kb * 1024 : undefined;
+      } catch {
+        return undefined;
+      }
+    }
+    return undefined;
+  },
   run,
   listThermalZones: () => readdirSync(THERMAL_ROOT).filter((z) => z.startsWith('thermal_zone')),
   readThermalZone: (zone) => readFileSync(`${THERMAL_ROOT}/${zone}/temp`, 'utf8'),
@@ -107,6 +124,16 @@ function readMemory(sources) {
   }
   if (Number.isFinite(free) && free >= 0) {
     out.mem_free_gb = Math.round((free / BYTES_PER_GB) * 10) / 10;
+  }
+
+  // What a new process could actually claim, which on macOS is nothing like
+  // `mem_free_gb`: this Mac reports 1.3 GB free and ~17 GB available, because
+  // the rest is cache the OS hands back on demand. Anything deciding whether a
+  // model fits must use this figure — free memory would say no on a machine
+  // with plenty.
+  const avail = sources.availableMemBytes?.();
+  if (Number.isFinite(avail) && avail >= 0) {
+    out.mem_available_gb = Math.round((avail / BYTES_PER_GB) * 10) / 10;
   }
   return out;
 }
