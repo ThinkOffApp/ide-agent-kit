@@ -10,7 +10,7 @@ curl -fsSL https://raw.githubusercontent.com/ThinkOffApp/ide-agent-kit/main/scri
 ```
 Idempotent. Installs prereqs via brew, clones the repo, writes a starter
 config, wires UserPromptSubmit + Stop hooks, starts the daemon, prints the
-LAN URL to paste into CodeWatch — the upcoming mobile + watch companion app.
+LAN URL to paste into CodeWatch — the mobile + watch companion (Play listing in review).
 
 **Manual install:** `npm install -g ide-agent-kit`
 **ClawHub:** https://clawhub.ai/ThinkOffApp/ide-agent-kit
