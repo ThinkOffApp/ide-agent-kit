@@ -2,6 +2,7 @@
 
 import { execSync } from 'node:child_process';
 import { platform } from 'node:os';
+import { collectHostTelemetry } from '../host-telemetry.js';
 
 /**
  * Desktop Adapter - detects active window and context on macOS.
@@ -13,6 +14,8 @@ import { platform } from 'node:os';
 export class DesktopAdapter {
   #client;
   #pollTimer;
+  #machine;
+  #kind;
   #pollIntervalMs;
 
   /**
@@ -20,8 +23,10 @@ export class DesktopAdapter {
    * @param {object} [opts]
    * @param {number} [opts.pollIntervalMs=30000] - How often to publish state
    */
-  constructor(client, { pollIntervalMs = 30000 } = {}) {
+  constructor(client, { pollIntervalMs = 30000, machine, kind } = {}) {
     this.#client = client;
+    this.#machine = machine ?? client?.deviceId ?? undefined;
+    this.#kind = kind;
     this.#pollIntervalMs = pollIntervalMs;
     this.#pollTimer = null;
   }
@@ -57,9 +62,13 @@ export class DesktopAdapter {
   }
 
   #detectState() {
+    // Vitals ride along with the desktop card so a machine's row shows what it
+    // is and how it is doing, the same fields the Pi publishes — otherwise a
+    // Mac appears in the fleet as a name and nothing else.
     const state = {
       screen_active: true,
       context: 'active',
+      ...collectHostTelemetry({ machine: this.#machine, kind: this.#kind }),
     };
 
     try {
