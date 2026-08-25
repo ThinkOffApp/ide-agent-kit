@@ -50,5 +50,8 @@
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",
     "user-intent-kit": "file:packages/user-intent-kit"
+  },
+  "overrides": {
+    "fast-uri": "4.1.2"
   }
 }
