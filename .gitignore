@@ -9,34 +9,17 @@ data/*.json
 
 # Local machine configs hold live API keys - never commit
 config/*.json
+!config/*.example.json
 config/*.bak*
 *.bak.*
-# ...and so do the .env variants, which config/*.json above does NOT cover
-# and the bare `.env` rule above does not either (that matches a file named
-# exactly ".env", not "grok.env"). Found on the MacBook 2026-08-03: an
-# unignored config/grok.env holding a live key, one `git add -A` away from
-# a PUBLIC repo - the same leak as 2026-07-09, through the sibling nobody
-# added a rule for.
 *.env
 config/*.env
-# Per-agent poller configs hold live API keys - never commit (leaked 2026-07-09)
 gemini-config.json
 gemini-config.json.bak*
 scripts/__pycache__/
-
-# Backup copies of edited files. The `*.bak.*` rule above requires a dot
-# AFTER "bak", so it matches "foo.bak.1" and silently does NOT match a plain
-# "foo.bak" outside config/. Found 2026-08-03: 14 such files sitting untracked
-# in a clone of this PUBLIC repo, one `git add -A` from being published. The
-# cp-before-edit habit is a good one; it just needs the ignore rules to match
-# the names it actually produces.
 *.bak
 *.bak_*
 *-bak
 *-bak.*
-
-# Run logs. `*.log` above does not cover them, because start-all writes .out.
-# A log is a plausible place for a key to land: the file that prompted this
-# was logs/start-all.out on the Mini, which contained a live xfb_ agent key.
 logs/
 *.out
