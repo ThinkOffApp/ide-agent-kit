@@ -6,6 +6,7 @@ import { join } from 'node:path';
 
 import {
   buildLinearEvent,
+  pollOnce,
   readLinearToken,
   startLinearPoller
 } from '../src/team-relay/linear-poller.mjs';
@@ -44,11 +45,10 @@ describe('linear poller', () => {
     assert.equal(buildLinearEvent(touched).kind, 'linear.issue.updated');
   });
 
-  it('falls back through assignee, creator, then unknown', () => {
-    assert.equal(buildLinearEvent(issue()).actor.login, 'Petrus');
-    assert.equal(buildLinearEvent(issue({ assignee: null })).actor.login, 'claudemm');
+  it('falls back to unknown when a created issue has no creator', () => {
+    assert.equal(buildLinearEvent(issue()).actor.login, 'claudemm');
     assert.equal(
-      buildLinearEvent(issue({ assignee: null, creator: null })).actor.login,
+      buildLinearEvent(issue({ creator: null })).actor.login,
       'unknown'
     );
   });
@@ -67,6 +67,51 @@ describe('linear poller', () => {
     const f = join(dir, 'linear.token');
     writeFileSync(f, '  lin_api_example  \n');
     assert.equal(readLinearToken(f), 'lin_api_example');
+  });
+
+  it('reports an update actor as unknown rather than blaming the assignee', () => {
+    // The assignee is not who made the change. Attributing an edit to whoever
+    // happens to be assigned is the exact "who did what" error this feed exists
+    // to avoid, so an update says unknown and puts the names in the payload.
+    const touched = issue({ updatedAt: '2026-08-27T07:00:00.000Z' });
+    const e = buildLinearEvent(touched);
+    assert.equal(e.kind, 'linear.issue.updated');
+    assert.equal(e.actor.login, 'unknown');
+    assert.equal(e.payload.assignee, 'Petrus');
+    assert.equal(e.payload.creator, 'claudemm');
+  });
+
+  it('credits the creator on a created issue, where it is genuinely the actor', () => {
+    const e = buildLinearEvent(issue({ assignee: { displayName: 'Someone Else' } }));
+    assert.equal(e.kind, 'linear.issue.created');
+    assert.equal(e.actor.login, 'claudemm');
+  });
+
+  it('leaves the cursor unmoved when the consumer throws, so the issue retries', async () => {
+    // Losing an update silently is worse than emitting it twice.
+    const since = '2026-08-27T05:00:00.000Z';
+    const nodes = [issue({ updatedAt: '2026-08-27T06:00:00.000Z' })];
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = async () => ({
+      ok: true,
+      json: async () => ({ data: { issues: { nodes } } })
+    });
+    try {
+      await assert.rejects(
+        () => pollOnce('tok', since, () => { throw new Error('consumer down'); }),
+        /consumer down/
+      );
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it('is wired into `iak serve`, not just exported', async () => {
+    // A poller nothing calls emits nothing. Assert the CLI actually starts it.
+    const { readFileSync } = await import('node:fs');
+    const cli = readFileSync(new URL('../bin/cli.mjs', import.meta.url), 'utf8');
+    assert.match(cli, /import \{ startLinearPoller \}/);
+    assert.match(cli, /startLinearPoller\(/);
   });
 
   it('starts disabled instead of throwing when unconfigured', () => {

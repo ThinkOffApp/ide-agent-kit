@@ -77,15 +77,29 @@ const ISSUES_QUERY = `
  * has no created/updated event split on this query, and comparing the two
  * timestamps is more reliable than remembering which ids we have seen: a state
  * store can be lost, but the issue's own timestamps cannot.
+ *
+ * On actor.login, which is deliberately narrow (found by @codexmb reviewing
+ * PR #69): for a CREATED issue the creator really is the actor. For an UPDATED
+ * one we do not know who made the change. The assignee is a tempting stand-in
+ * and is wrong: an issue assigned to Petrus and edited by an agent would be
+ * attributed to Petrus, and "who did what" is the whole reason this feed
+ * exists. Linear's issue history would carry the real actor, but it comes back
+ * empty for issues created through an API token, so it cannot be relied on.
+ *
+ * So an update reports 'unknown' rather than a plausible lie. The assignee and
+ * creator still travel in the payload, where they are labelled as what they
+ * actually are.
  */
 export function buildLinearEvent(issue) {
   const isNew = issue.createdAt === issue.updatedAt;
+  const creator = issue.creator?.displayName || null;
+  const assignee = issue.assignee?.displayName || null;
   return {
     trace_id: randomUUID(),
     source: 'linear',
     kind: isNew ? 'linear.issue.created' : 'linear.issue.updated',
     timestamp: issue.updatedAt,
-    actor: { login: issue.assignee?.displayName || issue.creator?.displayName || 'unknown' },
+    actor: { login: isNew ? creator || 'unknown' : 'unknown' },
     refs: {
       issue_url: issue.url,
       issue_identifier: issue.identifier,
@@ -95,7 +109,9 @@ export function buildLinearEvent(issue) {
       title: (issue.title || '').slice(0, 300),
       state: issue.state?.name,
       state_type: issue.state?.type,
-      priority: issue.priority
+      priority: issue.priority,
+      assignee,
+      creator
     }
   };
 }

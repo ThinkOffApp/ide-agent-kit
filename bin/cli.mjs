@@ -14,6 +14,7 @@ import { tailReceipts } from '../src/team-relay/receipt.mjs';
 import { startWebhookServer } from '../src/team-relay/webhook-server.mjs';
 import { emitJson } from '../src/team-relay/emit.mjs';
 import { startRoomPoller, checkRoomMessages } from '../src/team-relay/room-poller.mjs';
+import { startLinearPoller } from '../src/team-relay/linear-poller.mjs';
 import { memoryList, memoryGet, memorySet, memoryAppend, memoryDelete, memorySearch } from '../src/team-relay/memory.mjs';
 import { moltbookPost, moltbookFeed } from '../src/team-relay/moltbook.mjs';
 import { startRoomAutomation } from '../src/team-relay/room-automation.mjs';
@@ -268,9 +269,14 @@ async function main() {
   if (command === 'serve') {
     const opts = parseKV(args, 'serve');
     const config = loadConfig(opts.config);
-    startWebhookServer(config, (event) => {
+    const onEvent = (event) => {
       console.log(`Event queued: ${event.kind} (${event.trace_id})`);
-    });
+    };
+    startWebhookServer(config, onEvent);
+    // Linear issues ride the same callback as GitHub events. Disabled by
+    // default: with no token file the poller logs and returns a no-op handle,
+    // so installs without Linear are unaffected.
+    startLinearPoller(config.linear || {}, onEvent);
     return;
   }
 
