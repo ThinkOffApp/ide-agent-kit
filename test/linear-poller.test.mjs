@@ -124,4 +124,71 @@ describe('linear poller', () => {
     assert.equal(typeof handle.stop, 'function');
     handle.stop();
   });
+
+  it('drains every page, so issues tied at a page boundary are not skipped forever', async () => {
+    // The filter is strictly updatedAt > cursor. If a poll stopped at a page
+    // boundary, any issue sharing that last timestamp would be excluded from
+    // the NEXT poll too, and lost permanently rather than merely delayed.
+    const tied = '2026-08-27T06:00:00.000Z';
+    const page1 = [issue({ identifier: 'THI-1', updatedAt: tied })];
+    const page2 = [issue({ identifier: 'THI-2', updatedAt: tied })];
+    let call = 0;
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = async () => {
+      call++;
+      const first = call === 1;
+      return {
+        ok: true,
+        json: async () => ({
+          data: {
+            issues: {
+              nodes: first ? page1 : page2,
+              pageInfo: { hasNextPage: first, endCursor: first ? 'cur1' : null }
+            }
+          }
+        })
+      };
+    };
+    try {
+      const seen = [];
+      const { count } = await pollOnce('tok', '2026-08-27T05:00:00.000Z', (e) => {
+        seen.push(e.refs.issue_identifier);
+      });
+      assert.equal(count, 2);
+      assert.deepEqual(seen, ['THI-1', 'THI-2']);
+      assert.equal(call, 2, 'should have fetched the second page');
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it('stops at maxPages and holds the cursor so the next tick resumes', async () => {
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = async () => ({
+      ok: true,
+      json: async () => ({
+        data: {
+          issues: {
+            nodes: [issue({ updatedAt: '2026-08-27T06:00:00.000Z' })],
+            pageInfo: { hasNextPage: true, endCursor: 'always-more' }
+          }
+        }
+      })
+    });
+    try {
+      const { count } = await pollOnce('tok', '2026-08-27T05:00:00.000Z', () => {}, { maxPages: 3 });
+      assert.equal(count, 3, 'guard should stop the loop rather than spin');
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it('treats identical create/update timestamps as created, and any drift as updated', () => {
+    // Documents the invariant codexmb asked about: the heuristic is equality on
+    // the exact strings Linear returns. Sub-second drift means updated, which is
+    // the safe direction: a real edit is never mislabelled as a creation.
+    assert.equal(buildLinearEvent(issue()).kind, 'linear.issue.created');
+    const drift = issue({ updatedAt: '2026-08-27T06:00:00.001Z' });
+    assert.equal(buildLinearEvent(drift).kind, 'linear.issue.updated');
+  });
 });

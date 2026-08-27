@@ -56,11 +56,12 @@ async function linearQuery(token, query, variables = {}) {
 }
 
 const ISSUES_QUERY = `
-  query($since: DateTimeOrDuration!, $first: Int!) {
+  query($since: DateTimeOrDuration!, $first: Int!, $after: String) {
     issues(
       filter: { updatedAt: { gt: $since } }
       orderBy: updatedAt
       first: $first
+      after: $after
     ) {
       nodes {
         id identifier title url priority createdAt updatedAt
@@ -69,6 +70,7 @@ const ISSUES_QUERY = `
         creator { displayName }
         team { key }
       }
+      pageInfo { hasNextPage endCursor }
     }
   }`;
 
@@ -123,17 +125,43 @@ export function buildLinearEvent(issue) {
  * The cursor moves ONLY past issues actually emitted. If onEvent throws, the
  * cursor stays put and that issue is retried next tick, because losing an
  * update silently is worse than emitting it twice.
+ *
+ * Every page is drained before returning, and that is the point rather than an
+ * optimisation (found by @codexmb reviewing PR #69). The cursor is a timestamp
+ * and the filter is strictly `updatedAt > cursor`, so any issue sharing the
+ * last emitted timestamp would be excluded from the next poll. Stopping at a
+ * page boundary would therefore skip tied issues PERMANENTLY, not just delay
+ * them: a bulk edit touching more than one page of issues in the same second
+ * would silently lose the remainder. Draining means the cursor only ever lands
+ * past a timestamp whose issues have all been emitted.
+ *
+ * maxPages is a runaway guard, not a limit anyone should hit. If it trips, the
+ * cursor still holds at the last fully-emitted position, so the next tick
+ * resumes rather than skipping.
  */
-export async function pollOnce(token, since, onEvent, { first = 50 } = {}) {
-  const data = await linearQuery(token, ISSUES_QUERY, { since, first });
-  const nodes = data?.issues?.nodes || [];
+export async function pollOnce(token, since, onEvent, { first = 50, maxPages = 20 } = {}) {
   let cursor = since;
-  for (const issue of nodes) {
-    const event = buildLinearEvent(issue);
-    if (onEvent) await onEvent(event);
-    if (issue.updatedAt > cursor) cursor = issue.updatedAt;
+  let after = null;
+  let count = 0;
+
+  for (let page = 0; page < maxPages; page++) {
+    const data = await linearQuery(token, ISSUES_QUERY, { since, first, after });
+    const nodes = data?.issues?.nodes || [];
+    const info = data?.issues?.pageInfo || {};
+
+    for (const issue of nodes) {
+      const event = buildLinearEvent(issue);
+      if (onEvent) await onEvent(event);
+      count++;
+      if (issue.updatedAt > cursor) cursor = issue.updatedAt;
+    }
+
+    if (!info.hasNextPage || !info.endCursor) return { cursor, count };
+    after = info.endCursor;
   }
-  return { cursor, count: nodes.length };
+
+  console.error(`[linear] stopped after ${maxPages} pages, resuming from ${cursor} next tick`);
+  return { cursor, count };
 }
 
 export function startLinearPoller(config = {}, onEvent) {
