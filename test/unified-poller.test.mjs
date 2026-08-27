@@ -141,3 +141,40 @@ describe('common/event-queue', () => {
     assert.equal(typeof appendEvents, 'function');
   });
 });
+
+describe('groupmind reply targets', () => {
+  // A reply's meaning lives in its target (Aug 27 2026: "spec this" was
+  // interpreted by guess because every agent surface dropped reply_to).
+  const target = { id: 'aaa', from: '@claudeMB', body: 'the AgentOS fleet message', created_at: '2026-08-27T08:06:00Z' };
+  const reply = { id: 'bbb', from: 'petrus', body: 'Great! Please spec this.', reply_to: 'aaa', created_at: '2026-08-27T08:41:00Z', _room: 'thinkoff-development' };
+
+  it('normalize carries reply_to and resolved reply_target', () => {
+    const withTarget = { ...reply, _replyTarget: { from: target.from, body: target.body } };
+    const ev = groupmindAdapter.normalize(withTarget, { poller: { handle: '@test' } });
+    assert.equal(ev.payload.reply_to, 'aaa');
+    assert.equal(ev.payload.reply_target.from, '@claudeMB');
+  });
+
+  it('formatLine shows the resolved reply target', () => {
+    const withTarget = { ...reply, _replyTarget: { from: target.from, body: target.body } };
+    const ev = groupmindAdapter.normalize(withTarget, { poller: { handle: '@test' } });
+    const line = groupmindAdapter.formatLine(ev);
+    assert.ok(line.includes('in reply to @claudeMB'), line);
+    assert.ok(line.includes('the AgentOS fleet message'), line);
+  });
+
+  it('formatLine marks an unresolved reply as a reply, never freestanding', () => {
+    const ev = groupmindAdapter.normalize(reply, { poller: { handle: '@test' } });
+    const line = groupmindAdapter.formatLine(ev);
+    assert.ok(line.includes('a reply'), line);
+    assert.ok(line.includes('bbb') === false, 'target id, not own id');
+    assert.ok(line.includes('aaa'), line);
+  });
+
+  it('non-replies keep the plain single-line format', () => {
+    const ev = groupmindAdapter.normalize(target, { poller: { handle: '@test' } });
+    const line = groupmindAdapter.formatLine(ev);
+    assert.ok(!line.includes('reply'), line);
+    assert.ok(!line.includes('\n'), line);
+  });
+});
