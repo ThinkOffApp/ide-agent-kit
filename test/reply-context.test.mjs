@@ -9,6 +9,7 @@ describe('reply-context (shared by both pollers)', () => {
     assert.equal(replyIdOf('abc'), 'abc');
     assert.equal(replyIdOf({ id: 'abc', from: 'x' }), 'abc');
     assert.equal(replyIdOf({ id: 123 }), '123');
+    assert.equal(typeof replyIdOf({ id: 123 }), 'string');
     assert.equal(replyIdOf(null), null);
     assert.equal(replyIdOf(undefined), null);
     assert.equal(replyIdOf(''), null);

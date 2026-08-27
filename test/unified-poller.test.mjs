@@ -177,6 +177,9 @@ describe('groupmind reply targets', () => {
   it('handles the OBJECT form of reply_to (server stores what clients POST)', () => {
     const objReply = { ...reply, reply_to: { id: 'aaa', from: '@claudeMB', body: 'the AgentOS fleet message' } };
     const ev = groupmindAdapter.normalize(objReply, { poller: { handle: '@test' } });
+    // Ported from #71 (claudemm): object-form input must yield the id as a
+    // STRING, so no consumer ever branches on the wire format.
+    assert.equal(typeof ev.payload.reply_to, 'string');
     assert.equal(ev.payload.reply_to, 'aaa');
     assert.equal(ev.payload.reply_target.from, '@claudeMB');
     const line = groupmindAdapter.formatLine(ev);
