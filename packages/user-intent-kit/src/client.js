@@ -32,6 +32,11 @@ export class IntentClient {
     this.#heartbeatTimer = null;
   }
 
+  /** Device slot this client writes to, or null for a read-only client. */
+  get deviceId() {
+    return this.#deviceId;
+  }
+
   // --- Profile (static layer) ---
 
   async getProfile() {

@@ -289,7 +289,57 @@ Current: **v0.2.2** (2026-04-08). See [CHANGELOG.md](CHANGELOG.md) for the per-r
 Highlights since v0.1.0:
 - **v0.2.0**: added `bin/uik-daemon.js`, the persistent background daemon that publishes device and agent heartbeats. Exposed as the `uik-daemon` npm bin and runnable via `npx uik-daemon`.
 - **v0.2.1**: daemon docs in README (`Running as a daemon`). Fixed silent-exit in `examples/iak-integration.js` so the demo no longer terminates when its `setInterval` is unref'd.
+- **v0.2.3**: `uik-daemon` warns at startup when `INTENT_USER_ID` equals the agent handle (the most common misconfiguration — heartbeats silently feed a nonexistent user's dashboard), and gains `INTENT_AGENT_GATE_CMD` so an agent's beat can be gated on its real supervisor process. launchd install documented.
 - **v0.2.2**: `uik-daemon` now re-publishes agent status on the same `POLL_INTERVAL_MS` cadence as the desktop adapter heartbeat. Before this fix the agent slot would expire after its TTL even though the device slot stayed fresh. Caught while dogfooding on the Mac mini.
+
+## Running uik-daemon under launchd (macOS)
+
+The daemon must run continuously: presence entries expire after their TTL
+(90 s for devices), so a stopped daemon means a stale dashboard within two
+minutes. Install it as a LaunchAgent:
+
+```xml
+<!-- ~/Library/LaunchAgents/com.example.uik-daemon.plist -->
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.example.uik-daemon</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/usr/local/bin/node</string>
+    <string>/path/to/ide-agent-kit/packages/user-intent-kit/bin/uik-daemon.js</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>INTENT_API_KEY</key><string>xfb_…</string>
+    <key>INTENT_USER_ID</key><string>your-user-id</string>
+    <key>INTENT_AGENT_HANDLE</key><string>@your-agent</string>
+    <key>INTENT_DEVICE_ID</key><string>macbook</string>
+  </dict>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>StandardOutPath</key><string>/tmp/uik-daemon.log</string>
+  <key>StandardErrorPath</key><string>/tmp/uik-daemon.log</string>
+</dict>
+</plist>
+```
+
+```sh
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.example.uik-daemon.plist
+launchctl list | grep uik   # verify
+```
+
+**INTENT_USER_ID is the human user whose dashboard the heartbeats feed — not
+the agent's handle.** The API silently creates a document for any user string,
+so the swapped form appears to work while the real dashboard stays stale (this
+exact mistake ran silently for 27 days on one machine). The daemon now warns at
+startup when the two match.
+
+**INTENT_AGENT_GATE_CMD** (optional): a shell command; when set, the agent beat
+publishes only while the command exits 0. Use it to tie an agent's presence to
+its actual supervisor process instead of a bare timer, e.g.
+`INTENT_AGENT_GATE_CMD="launchctl list com.example.agent-supervisor"`.
 
 ## License
 

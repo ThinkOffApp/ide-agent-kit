@@ -504,9 +504,13 @@ export async function runMcpServer({ configPath } = {}) {
         name: 'request_confirmation',
         description:
           'Ask the user for an Approve / Deny decision. Posts the prompt to the configured ' +
-          'channels (GroupMind room, Codewatch notification) and BLOCKS until the user decides ' +
-          'or the timeout expires. Returns {decision: "approve"|"deny"} on decide, ' +
-          '{status: "timeout", id} on timeout. Use the id to follow up via approve_intent / deny_intent.',
+          'channels (GroupMind room, Codewatch notification). By default BLOCKS until the user ' +
+          'decides or the timeout expires, returning {decision: "approve"|"deny"} or ' +
+          '{status: "timeout", id}. Pass wait:false to post the request and return ' +
+          '{status: "pending", id} immediately, then poll list_intents for the decision. ' +
+          'Prefer wait:false when running under a harness that kills idle turns: a human ' +
+          'deciding from a watch takes minutes, and a blocking call loses that race. ' +
+          'Use the id to follow up via approve_intent / deny_intent either way.',
         inputSchema: {
           type: 'object',
           properties: {
@@ -517,7 +521,12 @@ export async function runMcpServer({ configPath } = {}) {
               items: { type: 'string', enum: ['groupmind', 'codewatch'] },
               description: 'Which channels to post to. Default: all configured channels.',
             },
-            timeoutSec: { type: 'number', description: 'How long to wait for a decision before returning timeout. Default 600 (10 min).', default: 600 },
+            timeoutSec: { type: 'number', description: 'How long to wait for a decision before returning timeout. Default 600 (10 min). Ignored when wait is false.', default: 600 },
+            wait: {
+              type: 'boolean',
+              description: 'Block until decided (default true). false posts the request and returns {status:"pending", id} at once, so a harness idle-watchdog cannot kill the turn while a human walks to their phone.',
+              default: true,
+            },
             fromHandle: {
               type: 'string',
               description: 'Originating agent handle for attribution, e.g. @CodexMB. Defaults to poller.handle from config.',
@@ -749,6 +758,12 @@ export async function runMcpServer({ configPath } = {}) {
           if (!confirmEnabled && !daemonAvailable) return err('request_confirmation: confirmations not configured. Set mcp.confirmations.room (+ poller.api_key) and/or codewatch_gate_url.');
           if (!args.prompt) return err('request_confirmation: prompt is required');
           const timeoutSec = Math.max(1, Math.min(86400, args.timeoutSec || 600));
+          // Blocking is the default so existing callers are unaffected. But a
+          // decision from a watch takes minutes by design, and every harness we
+          // attach to kills idle turns (Omnigent at 600s, which is exactly this
+          // tool's default timeout — the two raced and the watchdog always won).
+          // wait:false posts the request and hands the id straight back.
+          const wait = args.wait !== false;
 
           // Daemon mode: forward to the running iak-mcp-daemon so the intent
           // is in the SHARED registry that CodeWatch and the chat-reply
@@ -767,6 +782,7 @@ export async function runMcpServer({ configPath } = {}) {
             const created = await createRes.json();
             if (!created.ok) return err(`daemon createIntent: ${created.error}`);
             const id = created.id;
+            if (!wait) return ok(JSON.stringify({ id, status: 'pending' }, null, 2));
             // Poll for decision.
             const deadline = Date.now() + timeoutSec * 1000;
             while (Date.now() < deadline) {
@@ -795,6 +811,7 @@ export async function runMcpServer({ configPath } = {}) {
             receiptsPath: config?.receipts?.path,
             fromHandle: confirmationFromHandle(args, config),
           });
+          if (!wait) return ok(JSON.stringify({ id, status: 'pending' }, null, 2));
           const result = await waitForDecision(id, { timeoutMs: timeoutSec * 1000 });
           if (result.status === 'decided') {
             return ok(JSON.stringify({ id, decision: result.decision }, null, 2));

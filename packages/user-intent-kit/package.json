@@ -16,7 +16,7 @@
     "./adapters/browser": "./src/adapters/browser.js"
   },
   "scripts": {
-    "test": "node --test test/client.test.js",
+    "test": "node --test test/*.test.js",
     "daemon": "node bin/uik-daemon.js"
   },
   "keywords": [

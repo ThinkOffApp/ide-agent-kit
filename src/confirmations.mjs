@@ -1065,11 +1065,20 @@ export function composeAnnouncers(map) {
 //
 // Logs go to stderr only (stdout is the MCP stdio protocol channel — writing
 // there would corrupt it). Returns the interval handle so callers can stop it.
-export function startChatReplyPoller({ apiKey, room, intervalMs = 5000, log }) {
+// `owners` is an EXPLICIT list of handles allowed to settle intents. It is a
+// list of exact names, deliberately not a prefix match: an agent can register
+// any handle it likes, so `petrus-*` would let a fleet agent call itself
+// "petrus-helper" and inherit approval authority — which is the precise attack
+// this guard was written to stop.
+export function startChatReplyPoller({ apiKey, room, intervalMs = 5000, log, owners = ['petrus'] }) {
   if (!apiKey || !room) {
     process.stderr.write('[iak-mcp] chat-reply poller: missing apiKey or room — disabled\n');
     return null;
   }
+  const ownerSet = new Set(
+    (Array.isArray(owners) && owners.length ? owners : ['petrus'])
+      .map((o) => String(o).replace(/^@/, '').toLowerCase())
+  );
   const emit = log || ((msg) => process.stderr.write(`[iak-mcp] ${msg}\n`));
   const seen = new Set();
   let primed = false;
@@ -1092,8 +1101,13 @@ export function startChatReplyPoller({ apiKey, room, intervalMs = 5000, log }) {
         // which this poller happily executed — any agent could approve any
         // gated command. Agent senders carry a handle ("@ether", "hermes");
         // the owner posts as plain "petrus" (CodeWatch button taps included).
+        // 2026-08-03: this used to compare against the literal "petrus", so a
+        // decision from petrus's own tablet ("@petrus-boox") was dropped in
+        // silence — he tapped Approve on camera and nothing happened. Owner
+        // identities are now configured, because a person is not one handle:
+        // they are a laptop, a tablet and a watch.
         const sender = String(m.from || '').replace(/^@/, '').toLowerCase();
-        if (sender !== 'petrus' && m.isHuman !== true) {
+        if (!ownerSet.has(sender) && m.isHuman !== true) {
           emit(`${text} from ${m.from}: sender is not the owner — ignoring`);
           continue;
         }
