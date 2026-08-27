@@ -9,6 +9,7 @@ import {
   waitForDecision,
   listIntents,
   startConfirmationsServer,
+  startChatReplyPoller,
   composeAnnouncers,
   _resetForTests,
 } from '../src/confirmations.mjs';
@@ -196,4 +197,92 @@ test('HTTP auth gate rejects missing/wrong bearer token when configured', async 
   } finally {
     srv.close();
   }
+});
+
+
+// --- owner allowlist (ported from the Mini fork, reviewed by codexmb) --------
+//
+// The guard decides WHOSE approvals count, so it is tested behaviourally:
+// mocked room fetches drive the real poll loop and we watch which senders
+// get to settle a real intent.
+
+test('chat-reply poller: exact owners settle, lookalikes and agents do not', async () => {
+  _resetForTests();
+  const shortId = await createIntent({ prompt: 'test intent', announce: async () => {} });
+
+  const batches = [
+    { messages: [] }, // priming pass
+    { messages: [
+      // an agent that named itself to LOOK like an owner: must be rejected
+      { id: 'm1', from: '@petrus-helper', body: `/approve ${shortId}`, isHuman: false },
+      // a genuine configured owner surface: must settle
+      { id: 'm2', from: '@petrus-boox', body: `/approve ${shortId}`, isHuman: false },
+    ] },
+  ];
+  let call = 0;
+  const posts = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (url, opts) => {
+    if (opts && opts.method === 'POST') { posts.push(JSON.parse(opts.body)); return { ok: true, json: async () => ({}) }; }
+    const batch = batches[Math.min(call++, batches.length - 1)];
+    return { ok: true, json: async () => batch };
+  };
+  const lines = [];
+  const handle = startChatReplyPoller({
+    apiKey: 'k', room: 'r', intervalMs: 10,
+    owners: ['petrus', 'petrus-boox'],
+    log: (m) => lines.push(m),
+  });
+  try {
+    await new Promise((r) => setTimeout(r, 120));
+  } finally {
+    clearInterval(handle);
+    globalThis.fetch = originalFetch;
+  }
+
+  const joined = lines.join('\n');
+  // the lookalike was refused BEFORE any settle attempt
+  assert.match(joined, /petrus-helper.*not the owner/i);
+  // the real owner surface settled the intent
+  const settled = listIntents().find((i) => i.id === shortId);
+  assert.equal(settled.status, 'decided');
+  assert.equal(settled.decision, 'approve');
+  // and the lookalike got NO settle: decision came from the m2 pass only
+  assert.match(joined, new RegExp(`/approve ${shortId} from @petrus-boox: settled`));
+});
+
+test('chat-reply poller: prefix similarity earns a visible reply, never authority', async () => {
+  _resetForTests();
+  const intentId = await createIntent({ prompt: 'second intent', announce: async () => {} });
+  const batches = [
+    { messages: [] },
+    { messages: [
+      { id: 'p1', from: '@petrus-watch2', body: `/approve ${intentId}`, isHuman: false },
+    ] },
+  ];
+  let call = 0;
+  const posts = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (url, opts) => {
+    if (opts && opts.method === 'POST') { posts.push(JSON.parse(opts.body)); return { ok: true, json: async () => ({}) }; }
+    const batch = batches[Math.min(call++, batches.length - 1)];
+    return { ok: true, json: async () => batch };
+  };
+  const handle = startChatReplyPoller({
+    apiKey: 'k', room: 'r', intervalMs: 10,
+    owners: ['petrus'],
+    log: () => {},
+  });
+  try {
+    await new Promise((r) => setTimeout(r, 120));
+  } finally {
+    clearInterval(handle);
+    globalThis.fetch = originalFetch;
+  }
+  // still pending: the prefix lookalike had no authority
+  const still = listIntents().find((i) => i.id === intentId);
+  assert.equal(still.status, 'pending');
+  // but because it LOOKS like an owner surface, a visible rejection was posted
+  assert.equal(posts.length, 1);
+  assert.match(posts[0].body, /NOT recorded/);
 });

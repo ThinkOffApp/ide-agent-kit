@@ -461,7 +461,11 @@ export async function runMcpServer({ configPath } = {}) {
     // never settles the intent. Only start when this process holds the intents
     // (groupmind channel configured + serving in-process, not forwarding).
     if (announcerMap.groupmind) {
-      startChatReplyPoller({ apiKey: config.poller.api_key, room: confirmCfg.room });
+      startChatReplyPoller({
+        apiKey: config.poller.api_key,
+        room: confirmCfg.room,
+        owners: confirmCfg.owners || ['petrus', 'petrus-boox'],
+      });
       process.stderr.write(
         `[iak-mcp] chat-reply poller: watching room "${confirmCfg.room}" every 5s\n`
       );
