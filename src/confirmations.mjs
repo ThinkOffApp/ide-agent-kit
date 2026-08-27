@@ -1140,13 +1140,14 @@ export function startChatReplyPoller({ apiKey, room, intervalMs = 5000, log, own
         // gated command. Agent senders carry a handle ("@ether", "hermes");
         // the owner posts as plain "petrus" (CodeWatch button taps included).
         const sender = String(m.from || '').replace(/^@/, '').toLowerCase();
-        // Authorization: exact membership in the owners set. The isHuman path
-        // stays (codexmb 2026-08-27: it is SERVER-derived — set only when the
-        // caller authenticated as a session user, never mintable via an agent
-        // key). Residual, accepted knowingly: any human MEMBER of the room
-        // could settle. Today the owner is the only human in the room; if that
-        // changes, intersect this with ownerSet.
-        if (!ownerSet.has(sender) && m.isHuman !== true) {
+        // Authorization: exact membership in the owners set, nothing else.
+        // isHuman is server-derived and cannot be minted via an agent key,
+        // but it only proves the sender is A human, not THE owner — any other
+        // human member of the room would have inherited settle authority
+        // through it (codexmb's merge-blocking finding on this PR). A human
+        // whose tap is refused is told so visibly below; adding their handle
+        // to owners is the fix, silence never is.
+        if (!ownerSet.has(sender)) {
           emit(`${text} from ${m.from}: sender is not the owner — ignoring`);
           // Answer only senders who plausibly ARE the owner (`petrus`,
           // `petrus-boox`, a future `petrus-watch`). claudeMB's review caught
@@ -1163,7 +1164,11 @@ export function startChatReplyPoller({ apiKey, room, intervalMs = 5000, log, own
           // the right answer for it.
           // "Plausibly the owner" for reply purposes only — NEVER for
           // authorization: prefix-matching authority is the petrus-helper hole.
-          const ownerish = [...ownerSet].some((o) => sender === o || sender.startsWith(`${o}-`));
+          // Reply visibly to anyone who might actually be at a screen: a
+          // sender that RESEMBLES an owner surface, or any server-verified
+          // human. Agents emitting spurious /approve get the log line only.
+          const ownerish = m.isHuman === true
+            || [...ownerSet].some((o) => sender === o || sender.startsWith(`${o}-`));
           if (ownerish) {
             await reply(
               `\`${text}\` was NOT recorded — the intent is still pending. ` +

@@ -286,3 +286,41 @@ test('chat-reply poller: prefix similarity earns a visible reply, never authorit
   assert.equal(posts.length, 1);
   assert.match(posts[0].body, /NOT recorded/);
 });
+
+
+test('chat-reply poller: a human who is not a listed owner cannot settle, and is told visibly', async () => {
+  // codexmb's merge-blocking finding on #76: isHuman proves A human, not THE
+  // owner. An unlisted human must be refused — and must SEE the refusal,
+  // because a person who tapped Approve and hears nothing assumes it landed.
+  _resetForTests();
+  const intentId = await createIntent({ prompt: 'guarded', announce: async () => {} });
+  const batches = [
+    { messages: [] },
+    { messages: [
+      { id: 'h1', from: 'marina', body: `/approve ${intentId}`, isHuman: true },
+    ] },
+  ];
+  let call = 0;
+  const posts = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (url, opts) => {
+    if (opts && opts.method === 'POST') { posts.push(JSON.parse(opts.body)); return { ok: true, json: async () => ({}) }; }
+    const batch = batches[Math.min(call++, batches.length - 1)];
+    return { ok: true, json: async () => batch };
+  };
+  const handle = startChatReplyPoller({
+    apiKey: 'k', room: 'r', intervalMs: 10,
+    owners: ['petrus'],
+    log: () => {},
+  });
+  try {
+    await new Promise((r) => setTimeout(r, 120));
+  } finally {
+    clearInterval(handle);
+    globalThis.fetch = originalFetch;
+  }
+  const still = listIntents().find((i) => i.id === intentId);
+  assert.equal(still.status, 'pending', 'unlisted human must not settle');
+  assert.equal(posts.length, 1, 'and must be told visibly');
+  assert.match(posts[0].body, /NOT recorded/);
+});
