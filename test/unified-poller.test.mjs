@@ -195,3 +195,20 @@ describe('groupmind reply targets', () => {
     assert.ok(!line.includes('\n'), line);
   });
 });
+
+describe('groupmind attachment surfacing', () => {
+  // 2026-07-19: a posted screenshot never reached the agent (bodies-only
+  // extraction) and petrus was asked to re-post it. Never again.
+  it('normalize appends image/audio/file labels to the body', () => {
+    const base = { id: 'x', from: 'petrus', created_at: '2026-08-27T09:00:00Z', _room: 'r' };
+    const cfg = { poller: { handle: '@test' } };
+    const img = groupmindAdapter.normalize({ ...base, body: 'look', image_url: 'https://x/i.jpg' }, cfg);
+    assert.ok(img.payload.body.includes('[IMAGE ATTACHED: https://x/i.jpg]'), img.payload.body);
+    const aud = groupmindAdapter.normalize({ ...base, body: 'listen', audio_url: 'https://x/a.ogg' }, cfg);
+    assert.ok(aud.payload.body.includes('[AUDIO ATTACHED: https://x/a.ogg]'), aud.payload.body);
+    const fil = groupmindAdapter.normalize({ ...base, body: 'take', file_url: 'https://x/f.bin', file_name: 'f.bin' }, cfg);
+    assert.ok(fil.payload.body.includes('[FILE ATTACHED: f.bin]'), fil.payload.body);
+    const plain = groupmindAdapter.normalize({ ...base, body: 'no extras' }, cfg);
+    assert.ok(!plain.payload.body.includes('ATTACHED'), plain.payload.body);
+  });
+});

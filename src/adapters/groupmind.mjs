@@ -54,7 +54,13 @@ export const groupmindAdapter = {
 
   normalize(msg, config) {
     const sender = msg.from || msg.sender || '?';
-    const body = (msg.body || '').slice(0, 500);
+    let body = (msg.body || '').slice(0, 500);
+    // Surface every attachment kind. 2026-07-19: petrus posted a screenshot
+    // that never reached the agent (bodies-only extraction) and got asked to
+    // re-post it - an attachment must never be invisible.
+    if (msg.image_url) body += ` [IMAGE ATTACHED: ${msg.image_url}]`;
+    if (msg.audio_url) body += ` [AUDIO ATTACHED: ${msg.audio_url}]`;
+    if (msg.file_url) body += ` [FILE ATTACHED: ${msg.file_name || msg.file_url}]`;
     const ts = msg.created_at || new Date().toISOString();
     const room = msg._room || '';
 
