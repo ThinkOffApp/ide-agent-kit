@@ -3,6 +3,7 @@
 import { execFileSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { resolveSelfHandle, isSelfSender } from '../common/handles.mjs';
+import { replyIdOf, embeddedTargetOf, resolveReplyTargets, replyAnnotation } from '../common/reply-context.mjs';
 
 /**
  * GroupMind adapter — polls GroupMind rooms for new messages.
@@ -31,14 +32,8 @@ export const groupmindAdapter = {
         // reply_to id survives but means nothing to a reader of the line.
         // (Aug 27 2026: petrus's "spec this" reply was interpreted by guess
         // because every agent-facing surface dropped the reply target.)
-        const byId = new Map(msgs.map((m) => [m.id, m]));
-        for (const m of msgs) {
-          m._room = room;
-          if (m.reply_to && byId.has(m.reply_to)) {
-            const t = byId.get(m.reply_to);
-            m._replyTarget = { from: t.from || t.sender || '?', body: (t.body || '').slice(0, 120) };
-          }
-        }
+        resolveReplyTargets(msgs);
+        for (const m of msgs) m._room = room;
         all.push(...msgs);
       } catch (e) {
         console.error(`  groupmind fetch ${room} failed: ${e.message}`);
@@ -75,8 +70,10 @@ export const groupmindAdapter = {
         body,
         room,
         // A reply's meaning lives in its target - carry it, never drop it.
-        reply_to: msg.reply_to || null,
-        reply_target: msg._replyTarget || null
+        // Shape-normalised here too, not only in fetch(): normalize() must
+        // stay correct for callers that hand it a raw message directly.
+        reply_to: replyIdOf(msg.reply_to),
+        reply_target: msg._replyTarget || embeddedTargetOf(msg.reply_to)
       }
     };
   },
@@ -87,16 +84,8 @@ export const groupmindAdapter = {
     const room = event.room || '';
     const body = (event.payload?.body || '').replace(/\n/g, ' ').slice(0, 200);
     const line = `[${ts}] [${room}] ${sender}: ${body}`;
-    const t = event.payload?.reply_target;
-    if (t) {
-      const snippet = (t.body || '').replace(/\n/g, ' ').slice(0, 100);
-      return `${line}\n    ⤷ in reply to ${t.from}: "${snippet}"`;
-    }
-    if (event.payload?.reply_to) {
-      // Target not in the fetch window - still say it IS a reply so nobody
-      // interprets it as a freestanding statement.
-      return `${line}\n    ⤷ a reply (target ${event.payload.reply_to} not in recent window)`;
-    }
-    return line;
+    // Single physical line - the notification-file contract is one entry per
+    // line (room_ack counts lines; codexmb reproduced overcounting on #70).
+    return line + replyAnnotation(event.payload?.reply_to, event.payload?.reply_target);
   }
 };
