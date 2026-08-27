@@ -34,10 +34,22 @@ export const groupmindAdapter = {
         const byId = new Map(msgs.map((m) => [m.id, m]));
         for (const m of msgs) {
           m._room = room;
-          if (m.reply_to && byId.has(m.reply_to)) {
-            const t = byId.get(m.reply_to);
+          // reply_to is POLYMORPHIC: some clients POST a bare id string, others
+          // the object form { id, from, body } the server also stores verbatim.
+          // The object form used to miss the Map lookup and print
+          // "[object Object]" in agent-facing lines — the richest form of the
+          // data produced the worst output. Normalise before resolving.
+          const rt = m.reply_to;
+          const rtId = rt && typeof rt === 'object' ? rt.id : rt;
+          if (rtId && byId.has(rtId)) {
+            const t = byId.get(rtId);
             m._replyTarget = { from: t.from || t.sender || '?', body: (t.body || '').slice(0, 120) };
+          } else if (rt && typeof rt === 'object' && (rt.from || rt.body)) {
+            // Target outside the fetch window, but the object form carries it
+            // inline — use what the sender gave us.
+            m._replyTarget = { from: rt.from || '?', body: (rt.body || '').slice(0, 120) };
           }
+          if (rtId) m._replyToId = rtId;
         }
         all.push(...msgs);
       } catch (e) {
@@ -75,7 +87,11 @@ export const groupmindAdapter = {
         body,
         room,
         // A reply's meaning lives in its target - carry it, never drop it.
-        reply_to: msg.reply_to || null,
+        // Always the id string whatever shape arrived on the wire, so
+        // consumers never branch on client format.
+        reply_to: msg._replyToId
+          || (typeof msg.reply_to === 'object' ? (msg.reply_to?.id || null) : msg.reply_to)
+          || null,
         reply_target: msg._replyTarget || null
       }
     };
@@ -87,15 +103,19 @@ export const groupmindAdapter = {
     const room = event.room || '';
     const body = (event.payload?.body || '').replace(/\n/g, ' ').slice(0, 200);
     const line = `[${ts}] [${room}] ${sender}: ${body}`;
+    // ONE physical line, always. The notification file's readers split on
+    // newlines (and room_ack can clear the file mid-write), so a two-line
+    // entry became two half-events — one of them a freestanding "⤷" fragment.
+    // Found in review of #70 after merge; the annotation now rides inline.
     const t = event.payload?.reply_target;
     if (t) {
       const snippet = (t.body || '').replace(/\n/g, ' ').slice(0, 100);
-      return `${line}\n    ⤷ in reply to ${t.from}: "${snippet}"`;
+      return `${line}  ⤷ in reply to ${t.from}: "${snippet}"`;
     }
     if (event.payload?.reply_to) {
-      // Target not in the fetch window - still say it IS a reply so nobody
+      // Target not in the fetch window — still say it IS a reply so nobody
       // interprets it as a freestanding statement.
-      return `${line}\n    ⤷ a reply (target ${event.payload.reply_to} not in recent window)`;
+      return `${line}  ⤷ a reply (target ${event.payload.reply_to} not in recent window)`;
     }
     return line;
   }

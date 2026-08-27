@@ -161,6 +161,7 @@ describe('groupmind reply targets', () => {
     const line = groupmindAdapter.formatLine(ev);
     assert.ok(line.includes('in reply to @claudeMB'), line);
     assert.ok(line.includes('the AgentOS fleet message'), line);
+    assert.ok(!line.includes('\n'), 'single line: ' + JSON.stringify(line));
   });
 
   it('formatLine marks an unresolved reply as a reply, never freestanding', () => {
@@ -176,5 +177,45 @@ describe('groupmind reply targets', () => {
     const line = groupmindAdapter.formatLine(ev);
     assert.ok(!line.includes('reply'), line);
     assert.ok(!line.includes('\n'), line);
+  });
+});
+
+describe('groupmind reply_to polymorphism and single-line format', () => {
+  // reply_to arrives as a bare id string OR as { id, from, body } depending on
+  // the client. Found reviewing #70 (merged before the fix): the object form
+  // printed "[object Object]". And formatLine must stay ONE physical line —
+  // notification readers split on newlines, so a two-line entry became two
+  // half-events.
+  it('object-form reply_to resolves and payload carries the id string', () => {
+    const reply = { id: 'bbb', from: 'petrus', body: 'spec this', created_at: '2026-08-27T08:41:00Z',
+      reply_to: { id: 'aaa', from: '@claudeMB', body: 'the AgentOS fleet message' },
+      _replyTarget: { from: '@claudeMB', body: 'the AgentOS fleet message' }, _replyToId: 'aaa' };
+    const ev = groupmindAdapter.normalize(reply, { poller: { handle: '@test' } });
+    assert.equal(ev.payload.reply_to, 'aaa');
+    const line = groupmindAdapter.formatLine(ev);
+    assert.ok(!line.includes('[object Object]'), line);
+    assert.ok(!line.includes('\n'), 'must be one physical line: ' + JSON.stringify(line));
+    assert.ok(line.includes('in reply to @claudeMB'), line);
+  });
+
+  it('object-form outside the window never prints [object Object] and stays one line', () => {
+    const reply = { id: 'bbb', from: 'petrus', body: 'spec this', created_at: '2026-08-27T08:41:00Z',
+      reply_to: { id: 'zzz' }, _replyToId: 'zzz' };
+    const ev = groupmindAdapter.normalize(reply, { poller: { handle: '@test' } });
+    assert.equal(ev.payload.reply_to, 'zzz');
+    const line = groupmindAdapter.formatLine(ev);
+    assert.ok(!line.includes('[object Object]'), line);
+    assert.ok(!line.includes('\n'), line);
+    assert.ok(line.includes('zzz'), line);
+  });
+
+  it('string-form reply with resolved target is one line with the annotation inline', () => {
+    const reply = { id: 'bbb', from: 'petrus', body: 'Great! Please spec this.', created_at: '2026-08-27T08:41:00Z',
+      reply_to: 'aaa', _replyToId: 'aaa',
+      _replyTarget: { from: '@claudeMB', body: 'the AgentOS fleet message' } };
+    const ev = groupmindAdapter.normalize(reply, { poller: { handle: '@test' } });
+    const line = groupmindAdapter.formatLine(ev);
+    assert.ok(!line.includes('\n'), line);
+    assert.ok(line.includes('in reply to @claudeMB'), line);
   });
 });
