@@ -86,6 +86,9 @@ if (!apiKey) {
 } else {
   startChatReplyPoller({
     apiKey, room, intervalMs: 5000,
+    // Owner identities that may settle intents. A person is not one handle:
+    // petrus posts from a web session, a tablet and (soon) a watch.
+    owners: cc.owners,
     log: (msg) => console.log(`[iak-mcp-daemon] ${msg}`),
   });
   console.log(`[iak-mcp-daemon] chat-reply poller watching room "${room}" every 5s`);
