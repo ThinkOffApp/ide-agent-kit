@@ -8,6 +8,7 @@ import { randomUUID } from 'node:crypto';
 import { nudgeCommand } from '../utils.mjs';
 import { shouldSuppressNudge } from '../intent.mjs';
 import { resolveSelfHandle } from '../common/handles.mjs';
+import { resolveReplyTargets, replyAnnotation } from '../common/reply-context.mjs';
 
 /**
  * Room Poller — polls GroupMind rooms and notifies IDE agent of new messages.
@@ -254,6 +255,7 @@ export async function startRoomPoller({ rooms, apiKey, handle, interval, config,
     const newMessages = [];
     for (const room of rooms) {
       const msgs = await fetchRoomMessages(room, apiKey);
+      resolveReplyTargets(msgs);
       for (const m of msgs) {
         const mid = m.id;
         if (!mid || seen.has(mid)) continue;
@@ -278,7 +280,12 @@ export async function startRoomPoller({ rooms, apiKey, handle, interval, config,
           timestamp: ts,
           room,
           actor: { login: sender },
-          payload: { body, room },
+          payload: {
+            body,
+            room,
+            reply_to: m._replyToId || null,
+            reply_target: m._replyTarget || null
+          },
           intent: null,
           memory_context: null,
           enrichment_errors: []
@@ -287,7 +294,8 @@ export async function startRoomPoller({ rooms, apiKey, handle, interval, config,
         appendFileSync(queuePath, JSON.stringify(event) + '\n');
 
         // Collect for notification file
-        const line = `[${ts.slice(0, 19)}] [${room}] ${sender}: ${body.replace(/\n/g, ' ').slice(0, 200)}`;
+        const line = `[${ts.slice(0, 19)}] [${room}] ${sender}: ${body.replace(/\n/g, ' ').slice(0, 200)}`
+          + replyAnnotation(m._replyToId, m._replyTarget);
         newMessages.push(line);
         newCount++;
 
