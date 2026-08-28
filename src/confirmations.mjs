@@ -1068,13 +1068,29 @@ export function composeAnnouncers(map) {
 // `owner` is the account handle decisions are accepted from. It also decides
 // who is worth ANSWERING when a decision is rejected: see `ownerish` below.
 // Defaulting it keeps existing callers behaving identically, but it is a
-// parameter rather than a literal because this ships as a product and the
-// owner is not always called petrus.
-export function startChatReplyPoller({ apiKey, room, intervalMs = 5000, log, owner = 'petrus' }) {
+// `owners` is an EXPLICIT list of exact handles allowed to settle intents,
+// deliberately not a prefix match: an agent can register any handle it likes,
+// so `petrus-*` would let a fleet agent call itself "petrus-helper" and inherit
+// approval authority — the precise attack this guard exists to stop. A list
+// rather than one name because a person is not one handle: they are a laptop,
+// a tablet and a watch (2026-08-03: a decision from the owner's own tablet,
+// "@petrus-boox", was dropped in silence because this compared against the
+// literal "petrus" — he tapped Approve on camera and nothing happened).
+// Ported from the Mini's field-hardened fork (branch mini-local-fork-rescue),
+// security-reviewed by codexmb 2026-08-27; `owner` kept as an alias so
+// existing call sites keep working.
+export function startChatReplyPoller({ apiKey, room, intervalMs = 5000, log, owners, owner = 'petrus' }) {
   if (!apiKey || !room) {
     process.stderr.write('[iak-mcp] chat-reply poller: missing apiKey or room — disabled\n');
     return null;
   }
+  const ownerSet = new Set(
+    // An array — INCLUDING an explicitly empty one — is authoritative: [] is
+    // the lockdown config where nobody settles from chat. Only an absent /
+    // non-array value falls back to the legacy single `owner`.
+    (Array.isArray(owners) ? owners : [owner])
+      .map((o) => String(o).replace(/^@/, '').toLowerCase())
+  );
   const emit = log || ((msg) => process.stderr.write(`[iak-mcp] ${msg}\n`));
   const seen = new Set();
   let primed = false;
@@ -1127,7 +1143,14 @@ export function startChatReplyPoller({ apiKey, room, intervalMs = 5000, log, own
         // gated command. Agent senders carry a handle ("@ether", "hermes");
         // the owner posts as plain "petrus" (CodeWatch button taps included).
         const sender = String(m.from || '').replace(/^@/, '').toLowerCase();
-        if (sender !== 'petrus' && m.isHuman !== true) {
+        // Authorization: exact membership in the owners set, nothing else.
+        // isHuman is server-derived and cannot be minted via an agent key,
+        // but it only proves the sender is A human, not THE owner — any other
+        // human member of the room would have inherited settle authority
+        // through it (codexmb's merge-blocking finding on this PR). A human
+        // whose tap is refused is told so visibly below; adding their handle
+        // to owners is the fix, silence never is.
+        if (!ownerSet.has(sender)) {
           emit(`${text} from ${m.from}: sender is not the owner — ignoring`);
           // Answer only senders who plausibly ARE the owner (`petrus`,
           // `petrus-boox`, a future `petrus-watch`). claudeMB's review caught
@@ -1142,7 +1165,13 @@ export function startChatReplyPoller({ apiKey, room, intervalMs = 5000, log, own
           // A human who tapped Approve needs to know it did not land. An agent
           // emitting a spurious `/approve` does not; the log line was always
           // the right answer for it.
-          const ownerish = sender === owner || sender.startsWith(`${owner}-`);
+          // "Plausibly the owner" for reply purposes only — NEVER for
+          // authorization: prefix-matching authority is the petrus-helper hole.
+          // Reply visibly to anyone who might actually be at a screen: a
+          // sender that RESEMBLES an owner surface, or any server-verified
+          // human. Agents emitting spurious /approve get the log line only.
+          const ownerish = m.isHuman === true
+            || [...ownerSet].some((o) => sender === o || sender.startsWith(`${o}-`));
           if (ownerish) {
             await reply(
               `\`${text}\` was NOT recorded — the intent is still pending. ` +

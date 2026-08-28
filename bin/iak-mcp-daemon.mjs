@@ -86,6 +86,11 @@ if (!apiKey) {
 } else {
   startChatReplyPoller({
     apiKey, room, intervalMs: 5000,
+    // Exact owner identities allowed to settle intents (config, with the
+    // fleet's known surfaces as the default). Every surface the owner taps
+    // from must be listed — an unlisted one gets a VISIBLE rejection reply,
+    // never silence.
+    owners: config?.mcp?.confirmations?.owners || ['petrus', 'petrus-boox'],
     log: (msg) => console.log(`[iak-mcp-daemon] ${msg}`),
   });
   console.log(`[iak-mcp-daemon] chat-reply poller watching room "${room}" every 5s`);
