@@ -126,3 +126,33 @@ Approval replay; direct allocator invocation without intent; interrupted swap
 at every journal phase; tampered artifact; two allocators racing for one host;
 insufficient headroom rejection; lifecycle retirement leaving no orphan
 handles.
+
+## Generalization (added after hermes's review, 2026-08-28)
+
+- **Runtime abstraction:** GGUF+llama.cpp is ONE backend, not the model. The
+  catalog's `required_runtime` names a backend adapter (llama.cpp @ rev,
+  vLLM, whisper.cpp, …); when no adapter builds for a target, the fit answer
+  is "no runtime", a first-class rejection, not a crash.
+- **Per-type health probes:** "real answer" generalizes to per-type checks —
+  chat answers a question, ASR transcribes a known clip, embeddings return a
+  vector with sane cosine to a fixture. Service models (ASR, embeddings) get
+  probes and endpoints but NOT room handles; "every model becomes an agent"
+  is scoped to chat-capable models only.
+- **Transient double-disk:** the fit formula gains a disk term covering the
+  download-alongside-serving window; boxes that cannot hold double weights do
+  a stop-then-download swap with the longer downtime stated in the plan the
+  human approves.
+- **Migration is a first-class op:** `migrate(model, from, to)` = two
+  coordinated allocate/retire runs under one intent and one journal, with the
+  double-load window and the cutover order explicit. The single-box `allocate`
+  cannot express it and must not pretend to.
+- **v1 constraint stated:** one primary model per box, handles repoint as a
+  set. Multi-tenant serving breaks the swap primitive, not just scheduling —
+  it stays out of v1 and the open question is retitled accordingly.
+- **The gate is a dependency:** the approval gate is a named component with a
+  version and an interface the allocator links against, not ambient
+  infrastructure asserted in prose.
+
+Invariants that survived both reviews, kept verbatim: build only outside the
+serving dir; rollback script emitted before the swap runs; verification by
+real answer content, never HTTP status.
