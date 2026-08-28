@@ -1,11 +1,17 @@
-# AgentOS — dynamic hardware→model→agent allocation
+# CodeWatch Fleet — dynamic hardware→model→agent allocation
+
+**Naming (decided 2026-08-28):** the product name is **CodeWatch Fleet** —
+CodeWatch is the store-facing brand and the surface where Fleet's device
+tiles, model status, and swap approvals appear. In code and paths this is the
+`fleet/` module of the IAK repo. The earlier working name "AgentOS" is retired:
+the term became a crowded product category (Fiserv agentOS et al.) during 2026.
 
 **Status:** draft v2 for review (v1 died with a scratchpad wipe on 2026-08-27;
 this one lives in the repo). **Issue:** THI-31.
 
 ## The idea
 
-You own a set of machines. AgentOS keeps each of them running the model that
+You own a set of machines. CodeWatch Fleet keeps each of them running the model that
 best fits its hardware and your workflows, exposes every model as an agent in
 your rooms, and lets the agents themselves propose better arrangements — with
 a human approval gate between proposal and execution.
