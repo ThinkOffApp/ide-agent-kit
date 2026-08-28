@@ -156,3 +156,17 @@ handles.
 Invariants that survived both reviews, kept verbatim: build only outside the
 serving dir; rollback script emitted before the swap runs; verification by
 real answer content, never HTTP status.
+
+## Additions from claudeMB's review (2026-08-28, both from the owner's own asks)
+
+- **Measured performance feeds placement:** on each new platform the allocator
+  runs a standard bench (fixed prompt set, measured gen and prompt t/s) and
+  stores the numbers in the catalog entry for that box+model+quant. Ranking is
+  by measurement, never by parameter count or vendor claims. The human still
+  picks; the catalog now argues with data. (The non-goal is narrowed: what
+  stays out of v1 is automatic *selection*, not measurement.)
+- **Model-release watch:** a watch component monitors model releases and files
+  upgrade proposals through the same proposal-then-gate loop as any other
+  reallocation — a proposal carries the release facts, the fit check against
+  current inventory, and the bench plan. (The ChonkE/unsloth watches this week
+  were the manual prototype.)
