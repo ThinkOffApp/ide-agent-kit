@@ -268,7 +268,12 @@ export async function startRoomPoller({ rooms, apiKey, handle, interval, config,
         if (normalizedSender === ownerHandle) hasOwnerMessage = true;
         if ((m.body || '').toLowerCase().includes(mentionNeedle)) hasMention = true;
 
-        const body = (m.body || '').slice(0, 500);
+        let body = (m.body || '').slice(0, 500);
+        // Surface attachments (2026-07-19 lost-screenshot lesson): an
+        // image/audio/file must never be invisible to the agent.
+        if (m.image_url) body += ` [IMAGE ATTACHED: ${m.image_url}]`;
+        if (m.audio_url) body += ` [AUDIO ATTACHED: ${m.audio_url}]`;
+        if (m.file_url) body += ` [FILE ATTACHED: ${m.file_name || m.file_url}]`;
         const ts = m.created_at || new Date().toISOString();
 
         // Write to structured queue
