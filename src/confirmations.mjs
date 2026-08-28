@@ -1085,7 +1085,10 @@ export function startChatReplyPoller({ apiKey, room, intervalMs = 5000, log, own
     return null;
   }
   const ownerSet = new Set(
-    (Array.isArray(owners) && owners.length ? owners : [owner])
+    // An array — INCLUDING an explicitly empty one — is authoritative: [] is
+    // the lockdown config where nobody settles from chat. Only an absent /
+    // non-array value falls back to the legacy single `owner`.
+    (Array.isArray(owners) ? owners : [owner])
       .map((o) => String(o).replace(/^@/, '').toLowerCase())
   );
   const emit = log || ((msg) => process.stderr.write(`[iak-mcp] ${msg}\n`));

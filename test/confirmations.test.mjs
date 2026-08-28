@@ -324,3 +324,41 @@ test('chat-reply poller: a human who is not a listed owner cannot settle, and is
   assert.equal(posts.length, 1, 'and must be told visibly');
   assert.match(posts[0].body, /NOT recorded/);
 });
+
+test('chat-reply poller: an explicitly empty owners list is lockdown — even the legacy owner cannot settle', async () => {
+  // codexmb's follow-up finding on #76: `owners.length ? owners : [owner]`
+  // silently replaced a deliberate [] (nobody settles from chat) with the
+  // legacy petrus fallback. An empty array must be authoritative.
+  _resetForTests();
+  const intentId = await createIntent({ prompt: 'locked', announce: async () => {} });
+  const batches = [
+    { messages: [] },
+    { messages: [
+      { id: 'l1', from: 'petrus', body: `/approve ${intentId}`, isHuman: true },
+    ] },
+  ];
+  let call = 0;
+  const posts = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (url, opts) => {
+    if (opts && opts.method === 'POST') { posts.push(JSON.parse(opts.body)); return { ok: true, json: async () => ({}) }; }
+    const batch = batches[Math.min(call++, batches.length - 1)];
+    return { ok: true, json: async () => batch };
+  };
+  const handle = startChatReplyPoller({
+    apiKey: 'k', room: 'r', intervalMs: 10,
+    owners: [],
+    log: () => {},
+  });
+  try {
+    await new Promise((r) => setTimeout(r, 120));
+  } finally {
+    clearInterval(handle);
+    globalThis.fetch = originalFetch;
+  }
+  const still = listIntents().find((i) => i.id === intentId);
+  assert.equal(still.status, 'pending', 'lockdown means nobody settles, petrus included');
+  // isHuman sender still gets the visible refusal so the lockdown is discoverable
+  assert.equal(posts.length, 1);
+  assert.match(posts[0].body, /NOT recorded/);
+});
