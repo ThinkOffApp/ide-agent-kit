@@ -85,3 +85,44 @@ No autonomous swaps: proposals are free, execution is gated.
 2. Where the allocator runs: on the target box vs from a coordinator.
 3. Multi-tenant boxes (serve + bench windows) — encode claudeMB's "agreed
    windows" rule as a first-class lease?
+
+---
+
+## Hardening (added after codexmb's adversarial review, 2026-08-28)
+
+### Approval as an enforceable protocol, not an assertion
+An allocation intent is a single immutable document: `{plan_digest, requester,
+target_host, allowed_ops, expires_at, nonce}`. The gate signs THAT digest; the
+allocator refuses any plan whose digest, host, or ops differ from the approved
+one, refuses expired or reused nonces, and refuses direct invocation (no
+approved intent on file = no run). Replayed or stale approvals are the attack
+this kills.
+
+### Supply-chain boundary
+Every artifact is pinned: HF repo at a specific revision (commit hash, not
+branch), per-shard SHA-256 recorded in the plan BEFORE approval so the human
+approves specific bytes, runtime source pinned to a commit (a named PR branch
+resolves to its head SHA at plan time), build inputs constrained to that tree.
+Verification failure = hard abort with the mismatch published; never
+retry-with-whatever-downloads.
+
+### Swap as a journaled transaction
+Each phase (stop, start, verify, repoint handle A, repoint handle B, bridge
+restart) writes intent + outcome to a durable journal before and after
+execution. Crash recovery replays the journal to a consistent state; every
+phase is idempotent; a host lease prevents concurrent allocators. Rollback is
+generated as the journal's inverse, so partial repoints and mixed live state
+restore too — keeping the old weights is necessary but not sufficient.
+
+### Fit as a contract
+`fit = (weights_resident + kv_bytes(ctx, gguf_metadata) + compute_buffers +
+resident_processes + margin) vs (vram_carve + gtt_usable)` — every term
+observed or computed, none guessed; margin explicit (default 10%); the
+rejection result reproduces the arithmetic so a "no" can be audited. The
+qualitative yes/no/tight of v1 is replaced by this formula's output.
+
+### Acceptance tests (must exist before the allocator touches a live box)
+Approval replay; direct allocator invocation without intent; interrupted swap
+at every journal phase; tampered artifact; two allocators racing for one host;
+insufficient headroom rejection; lifecycle retirement leaving no orphan
+handles.
