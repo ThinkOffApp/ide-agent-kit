@@ -18,6 +18,11 @@
  *                        devices view (mac-mini, car-pi, linux-server).
  *                        Without it a row renders with a blank type,
  *                        which is how the M5 first appeared (2026-08-29).
+ *   INTENT_DEVICE_PUBLISH default: 1 - set to 0 on a SECONDARY daemon (a
+ *                        second agent's presence beat on the same machine)
+ *                        so exactly one daemon owns the device row; two
+ *                        writers race and the row flickers, which is how
+ *                        the MacBook "disappeared" (2026-08-29).
  *   POLL_INTERVAL_MS     default: 30000
  */
 
@@ -31,6 +36,7 @@ const userId = process.env.INTENT_USER_ID;
 const agentHandle = process.env.INTENT_AGENT_HANDLE || '@agent';
 const deviceId = process.env.INTENT_DEVICE_ID || hostname();
 const deviceKind = process.env.INTENT_DEVICE_KIND || undefined;
+const publishDevice = process.env.INTENT_DEVICE_PUBLISH !== '0';
 const pollIntervalMs = Number(process.env.POLL_INTERVAL_MS || 30000);
 
 if (!apiKey || !userId) {
@@ -56,7 +62,7 @@ const client = new IntentClient({ baseUrl, apiKey, userId, deviceId });
 const iak = new IAKAdapter(client, { agentHandle, machine: deviceId });
 const desktop = new DesktopAdapter(client, { pollIntervalMs, machine: deviceId, kind: deviceKind });
 
-desktop.start();
+if (publishDevice) desktop.start();
 
 // Re-publish agent status on the same interval as the desktop heartbeat,
 // otherwise the agent slot expires after its TTL while the device stays
