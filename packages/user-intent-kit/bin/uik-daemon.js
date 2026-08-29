@@ -14,6 +14,10 @@
  *   INTENT_USER_ID     required
  *   INTENT_AGENT_HANDLE  default: @agent
  *   INTENT_DEVICE_ID     default: hostname
+ *   INTENT_DEVICE_KIND   default: unset - the row's type label in the
+ *                        devices view (mac-mini, car-pi, linux-server).
+ *                        Without it a row renders with a blank type,
+ *                        which is how the M5 first appeared (2026-08-29).
  *   POLL_INTERVAL_MS     default: 30000
  */
 
@@ -26,6 +30,7 @@ const apiKey = process.env.INTENT_API_KEY;
 const userId = process.env.INTENT_USER_ID;
 const agentHandle = process.env.INTENT_AGENT_HANDLE || '@agent';
 const deviceId = process.env.INTENT_DEVICE_ID || hostname();
+const deviceKind = process.env.INTENT_DEVICE_KIND || undefined;
 const pollIntervalMs = Number(process.env.POLL_INTERVAL_MS || 30000);
 
 if (!apiKey || !userId) {
@@ -49,7 +54,7 @@ if (userId.toLowerCase() === agentHandle.replace(/^@/, '').toLowerCase()) {
 
 const client = new IntentClient({ baseUrl, apiKey, userId, deviceId });
 const iak = new IAKAdapter(client, { agentHandle, machine: deviceId });
-const desktop = new DesktopAdapter(client, { pollIntervalMs });
+const desktop = new DesktopAdapter(client, { pollIntervalMs, machine: deviceId, kind: deviceKind });
 
 desktop.start();
 
