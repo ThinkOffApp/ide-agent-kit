@@ -1,0 +1,119 @@
+{
+  "$comment": [
+    "Shared dictation vocabulary for every surface that turns Petrus's speech",
+    "into text: CodeWatch on the phone and watch, CarWatch in the car.",
+    "",
+    "TWO KINDS OF ENTRY, AND THE DIFFERENCE MATTERS.",
+    "",
+    "'terms' only BIAS a recogniser toward words it would otherwise not expect.",
+    "They cannot corrupt anything: at worst they are ignored. Add freely.",
+    "",
+    "'corrections' REWRITE what was heard, so a wrong one silently changes",
+    "meaning - worse than the mishearing it replaces. Every correction must be",
+    "either impossible as ordinary speech ('speeds to text') or guarded by",
+    "context ('eating' only before a fuel word). Ordinary English words are",
+    "deliberately NOT corrected: 'warehouse' stays 'warehouse' even though it",
+    "is how 'Wear OS' came out on 2026-08-27, because a listener talking about",
+    "an actual warehouse must not be rewritten. Bias handles those instead.",
+    "",
+    "Every entry cites the real instance that earned it. No speculative rules."
+  ],
+  "version": 1,
+  "terms": {
+    "products": [
+      "CarWatch",
+      "CodeWatch",
+      "ClawWatch",
+      "WhereWatch",
+      "GroupMind",
+      "ThinkOff",
+      "CodeWatch Fleet",
+      "IDE Agent Kit",
+      "Wear OS"
+    ],
+    "car": [
+      "E10",
+      "E5",
+      "petrol",
+      "gasoline",
+      "fuel tank",
+      "tyre pressure",
+      "kPa",
+      "AdBlue",
+      "hybrid battery",
+      "OBD",
+      "ELM327",
+      "coolant",
+      "rpm",
+      "odometer",
+      "Mercedes me",
+      "E-Class",
+      "MBUX"
+    ],
+    "machines_and_models": [
+      "Raspberry Pi",
+      "Bosgame",
+      "Strix Halo",
+      "gguf",
+      "llama.cpp",
+      "Vulkan",
+      "ROCm",
+      "quant",
+      "Qwen",
+      "Gemma",
+      "Ornith",
+      "GLM",
+      "Flash-Next",
+      "whisper",
+      "piper"
+    ],
+    "fleet_handles": [
+      "claudemm",
+      "claudeMB",
+      "codexmb",
+      "qwenm5",
+      "eclass",
+      "hermes",
+      "vadelma",
+      "puolukka"
+    ]
+  },
+  "corrections": [
+    {
+      "pattern": "\\b(speeds|speech|piece|peace) to text\\b",
+      "replacement": "speech to text",
+      "flags": "i",
+      "why": "Heard as 'speeds to text' and 'piece to text' on 2026-08-29. No other reading exists."
+    },
+    {
+      "pattern": "\\be[- ]?ten\\b",
+      "replacement": "E10",
+      "flags": "i",
+      "why": "Fuel grade spelled out; already deployed on the car (CarWatch d68ef7c)."
+    },
+    {
+      "pattern": "\\beating\\b(?=\\s+(gas|gasoline|petrol|fuel))",
+      "replacement": "E10",
+      "flags": "i",
+      "why": "'Can I fill up with eating gas' on camera, 2026-08-28. Context-guarded: only before a fuel word."
+    },
+    {
+      "pattern": "\\bcode watch\\b",
+      "replacement": "CodeWatch",
+      "flags": "i",
+      "why": "Spacing only, no meaning change. 'cold watch' is deliberately NOT corrected: it is ambiguous between CarWatch and CodeWatch, so bias terms handle that one."
+    },
+    {
+      "pattern": "\\bcar watch\\b",
+      "replacement": "CarWatch",
+      "flags": "i",
+      "why": "Spacing only, no meaning change: the product is one word. Dictation splits it routinely."
+    },
+    {
+      "pattern": "\\bgroup mind\\b",
+      "replacement": "GroupMind",
+      "flags": "i",
+      "why": "Spacing only, no meaning change: the product is one word. Dictation splits it routinely."
+    }
+  ]
+}

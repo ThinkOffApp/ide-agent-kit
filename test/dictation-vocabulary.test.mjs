@@ -6,7 +6,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 
-const vocab = JSON.parse(readFileSync(new URL('../data/dictation-vocabulary.json', import.meta.url)));
+const vocab = JSON.parse(readFileSync(new URL('../packages/user-intent-kit/data/dictation-vocabulary.json', import.meta.url)));
 
 const apply = (text) => vocab.corrections.reduce(
   (s, c) => s.replace(new RegExp(c.pattern, c.flags.includes('g') ? c.flags : c.flags + 'g'), c.replacement),
