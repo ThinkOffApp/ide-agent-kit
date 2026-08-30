@@ -610,8 +610,31 @@ export function startConfirmationsServer({
       return;
     }
     if (req.method === 'GET' && url.pathname === '/intents') {
+      // ?status=pending narrows the list. Without it the queue returns every
+      // intent ever created, decided ones included, so the phone shows a list
+      // that only grows - petrus re-taps items that settled hours ago because
+      // they are still sitting there looking open. On 2026-08-30 one of those
+      // re-taps was an echo of a migration fix that had already run; executing
+      // it again would have killed a healthy rsync mid-copy.
+      //
+      // Unknown values return an error rather than silently listing everything:
+      // a filter that quietly does nothing is how this went unnoticed.
+      const want = url.searchParams.get('status');
+      let out = listIntents();
+      if (want !== null) {
+        const allowed = new Set(['pending', 'decided']);
+        if (!allowed.has(want)) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({
+            ok: false,
+            error: `unknown status '${want}' - use one of: ${[...allowed].join(', ')}`,
+          }));
+          return;
+        }
+        out = out.filter((i) => i.status === want);
+      }
       res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify(listIntents()));
+      res.end(JSON.stringify(out));
       return;
     }
     if (req.method === 'POST' && url.pathname === '/actions/request') {
