@@ -53,6 +53,7 @@
   },
   "overrides": {
     "fast-uri": "4.1.2",
-    "hono": "4.12.34"
+    "hono": "4.12.34",
+    "ip-address": "10.3.1"
   }
 }
