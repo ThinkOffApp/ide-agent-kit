@@ -362,3 +362,40 @@ test('chat-reply poller: an explicitly empty owners list is lockdown — even th
   assert.equal(posts.length, 1);
   assert.match(posts[0].body, /NOT recorded/);
 });
+
+test('chat-reply poller: an unknown intent id gets a log line, never a "NOT recorded" reply', async () => {
+  // Two machines run this poller against the same room, each with its own
+  // intent store. The one holding the intent settles it; every other one sees
+  // an id it never created. Replying there tells the owner a working approval
+  // failed — which is exactly what happened to petrus on 2026-08-30, twice,
+  // and made him re-tap an approval that had already been recorded.
+  _resetForTests();
+  const batches = [
+    { messages: [] },
+    { messages: [
+      { id: 'u1', from: 'petrus', body: '/approve deadbeef', isHuman: true },
+    ] },
+  ];
+  let call = 0;
+  const posts = [];
+  const logs = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (url, opts) => {
+    if (opts && opts.method === 'POST') { posts.push(JSON.parse(opts.body)); return { ok: true, json: async () => ({}) }; }
+    const batch = batches[Math.min(call++, batches.length - 1)];
+    return { ok: true, json: async () => batch };
+  };
+  const handle = startChatReplyPoller({
+    apiKey: 'k', room: 'r', intervalMs: 10,
+    owners: ['petrus'],
+    log: (line) => logs.push(String(line)),
+  });
+  try {
+    await new Promise((r) => setTimeout(r, 120));
+  } finally {
+    clearInterval(handle);
+    globalThis.fetch = originalFetch;
+  }
+  assert.equal(posts.length, 0, 'an id this poller does not hold must not be declared missing to the owner');
+  assert.ok(logs.some((l) => /unknown intent here/.test(l)), 'but it must still be logged locally');
+});

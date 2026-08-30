@@ -1186,11 +1186,25 @@ export function startChatReplyPoller({ apiKey, room, intervalMs = 5000, log, own
         const id = match[2];
         const intent = getIntent(id);
         if (!intent) {
-          emit(`/${decision} ${id} from ${m.from}: unknown intent, ignoring`);
-          await reply(
-            `\`/${decision} ${id}\` was NOT recorded — no intent with that id. ` +
-            `It has probably expired or been settled already.`
-          );
+          // Log, but do NOT tell the owner it failed. More than one machine
+          // runs this poller against the same room, and each keeps its OWN
+          // intent store, so "unknown to me" does not mean unknown — the
+          // poller that owns the intent settles it while every other poller
+          // sees an id it has never heard of.
+          //
+          // 2026-08-30: petrus tapped Approve on 84967c40 and b69eaa2c. Both
+          // were recorded and settled (decision=approve, seconds after the
+          // tap) by the poller holding them, while a second poller posted
+          // "was NOT recorded — no intent with that id" for each. He re-tapped
+          // b69eaa2c because of that message and was told the same thing
+          // again. A false failure is worse than silence: it makes a working
+          // approval look broken and sends the owner round the loop.
+          //
+          // The genuinely-stale case loses its notice, which is the cheaper
+          // error: nothing happens, and the pending list still shows the
+          // truth. Restore a reply here only once a poller can tell "expired"
+          // apart from "belongs to another poller".
+          emit(`/${decision} ${id} from ${m.from}: unknown intent here, staying silent (another poller may own it)`);
           continue;
         }
         const r = decideIntent(id, decision);
