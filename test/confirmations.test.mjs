@@ -399,3 +399,34 @@ test('chat-reply poller: an unknown intent id gets a log line, never a "NOT reco
   assert.equal(posts.length, 0, 'an id this poller does not hold must not be declared missing to the owner');
   assert.ok(logs.some((l) => /unknown intent here/.test(l)), 'but it must still be logged locally');
 });
+
+test('GET /intents?status=pending returns only open intents, and rejects unknown values', async () => {
+  // The queue used to return every intent ever created regardless of the
+  // status asked for, so petrus's phone showed a list that only grew and he
+  // re-tapped things that had settled hours earlier. On 2026-08-30 one such
+  // re-tap was an echo of a migration fix that had already run - executing it
+  // again would have killed a healthy rsync mid-copy.
+  _resetForTests();
+  const openId = await createIntent({ prompt: 'still open', announce: async () => {} });
+  const doneId = await createIntent({ prompt: 'already settled', announce: async () => {} });
+  decideIntent(doneId, 'approve');
+
+  const server = startConfirmationsServer({ port: 0, host: '127.0.0.1' });
+  await new Promise((r) => server.listening ? r() : server.once('listening', r));
+  const base = `http://127.0.0.1:${server.address().port}`;
+  try {
+    const all = await (await fetch(`${base}/intents`)).json();
+    assert.equal(all.length, 2, 'no filter still returns everything');
+
+    const pending = await (await fetch(`${base}/intents?status=pending`)).json();
+    assert.deepEqual(pending.map((i) => i.id), [openId], 'only the open one');
+
+    const decided = await (await fetch(`${base}/intents?status=decided`)).json();
+    assert.deepEqual(decided.map((i) => i.id), [doneId]);
+
+    const bad = await fetch(`${base}/intents?status=banana`);
+    assert.equal(bad.status, 400, 'an unknown filter must fail loudly, not list everything');
+  } finally {
+    server.close();
+  }
+});
