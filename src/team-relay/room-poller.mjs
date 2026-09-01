@@ -151,8 +151,26 @@ export function checkRoomMessages(config) {
   }
 }
 
+const HEARTBEAT_FILE_DEFAULT = '/tmp/iak-poller.heartbeat';
+
+// The poller's liveness signal for everything that must not act while it is
+// down: the GUI nudge (a nudge with no seen-state re-answers every open
+// mention) and the supervisor's one-time alert. A crash-looping launchd job
+// leaves no other trace a script can read (issue #86). This is the module the
+// CLI actually runs - src/room-poller.mjs is the unimported legacy copy
+// (codex review of PR #87 caught the heartbeat landing there first).
+export function writeHeartbeat(path) {
+  try {
+    writeFileSync(path, new Date().toISOString() + '\n');
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 export async function startRoomPoller({ rooms, apiKey, handle, interval, config, sessionOpt }) {
   const seenFile = config?.poller?.seen_file || SEEN_FILE_DEFAULT;
+  const heartbeatFile = config?.poller?.heartbeat_file || HEARTBEAT_FILE_DEFAULT;
   const notifyFile = config?.poller?.notification_file || NOTIFY_FILE_DEFAULT;
   const queuePath = config?.queue?.path || './ide-agent-queue.jsonl';
   const session = sessionOpt || config?.tmux?.ide_session || config?.tmux?.default_session || 'claude';
@@ -202,6 +220,7 @@ export async function startRoomPoller({ rooms, apiKey, handle, interval, config,
     console.log(`  nudge command: ${nudgeCommandText || '(missing)'}`);
   }
   console.log(`  seen file: ${seenFile}`);
+  console.log(`  heartbeat: ${heartbeatFile}`);
   if (dmEnabled) {
     console.log(`  direct messages: enabled`);
     console.log(`    dm handle: ${dmHandle}`);
@@ -248,6 +267,7 @@ export async function startRoomPoller({ rooms, apiKey, handle, interval, config,
     if (roomPollInFlight) return;
     roomPollInFlight = true;
     try {
+    writeHeartbeat(heartbeatFile);
     let newCount = 0;
     let hasOwnerMessage = false;
     let hasMention = false;

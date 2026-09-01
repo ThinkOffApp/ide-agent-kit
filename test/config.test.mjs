@@ -5,7 +5,7 @@ import { strict as assert } from 'node:assert';
 import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { loadConfig } from '../src/config.mjs';
+import { loadConfig, resolveSecretFiles } from '../src/config.mjs';
 
 const tempPaths = [];
 
@@ -104,5 +104,48 @@ describe('config', () => {
     assert.equal(cfg.intent.userId, 'u');
     assert.equal(cfg.memory_api.token, 't');
     assert.equal(cfg.moltbook.accounts[0].name, 'claudemm');
+  });
+});
+
+describe('secret file references (issue #86)', () => {
+  let dir;
+  afterEach(() => { if (dir) rmSync(dir, { recursive: true, force: true }); dir = null; });
+
+  it('reads poller.api_key_file into poller.api_key, trimmed', () => {
+    dir = mkdtempSync(join(tmpdir(), 'iak-secret-'));
+    writeFileSync(join(dir, 'key.txt'), '  xfb_secret_from_file\n');
+    writeFileSync(join(dir, 'c.json'), JSON.stringify({ poller: { rooms: 'r', handle: '@x', api_key_file: join(dir, 'key.txt') } }));
+    const cfg = loadConfig(join(dir, 'c.json'));
+    assert.equal(cfg.poller.api_key, 'xfb_secret_from_file');
+  });
+
+  it('covers dm_poller, xfor and intent too', () => {
+    dir = mkdtempSync(join(tmpdir(), 'iak-secret-'));
+    writeFileSync(join(dir, 'k'), 'K1');
+    const cfg = loadConfig(join(dir, 'c.json'));
+    assert.equal(cfg.poller.api_key, '');
+    writeFileSync(join(dir, 'c.json'), JSON.stringify({
+      dm_poller: { api_key_file: join(dir, 'k') },
+      xfor: { api_key_file: join(dir, 'k') },
+      intent: { api_key_file: join(dir, 'k') }
+    }));
+    const c2 = loadConfig(join(dir, 'c.json'));
+    assert.equal(c2.dm_poller.api_key, 'K1');
+    assert.equal(c2.xfor.api_key, 'K1');
+    assert.equal(c2.intent.apiKey, 'K1');
+  });
+
+  it('an inline key wins over the file, and a missing file names its path', () => {
+    dir = mkdtempSync(join(tmpdir(), 'iak-secret-'));
+    writeFileSync(join(dir, 'k'), 'FILEKEY');
+    const both = resolveSecretFiles({ poller: { api_key: 'INLINE', api_key_file: join(dir, 'k') } });
+    assert.equal(both.poller.api_key, 'INLINE');
+    // legacy camelCase spelling is inline too (codex review of PR #87)
+    const legacy = resolveSecretFiles({ poller: { apiKey: 'LEGACY', api_key_file: join(dir, 'k') } });
+    assert.equal(legacy.poller.apiKey, 'LEGACY');
+    assert.equal(legacy.poller.api_key, undefined);
+    assert.throws(() => resolveSecretFiles({ poller: { api_key_file: join(dir, 'nope') } }), /secret file not found: .*nope/);
+    writeFileSync(join(dir, 'empty'), '\n');
+    assert.throws(() => resolveSecretFiles({ poller: { api_key_file: join(dir, 'empty') } }), /secret file is empty/);
   });
 });
