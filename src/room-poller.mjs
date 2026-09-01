@@ -20,20 +20,6 @@ import { resolveSelfHandle, isSelfSender } from './common/handles.mjs';
 
 const SEEN_FILE_DEFAULT = '/tmp/iak-seen-ids.txt';
 const NOTIFY_FILE_DEFAULT = '/tmp/iak-new-messages.txt';
-const HEARTBEAT_FILE_DEFAULT = '/tmp/iak-poller.heartbeat';
-
-// The poller's liveness signal for everything that must not act while it is
-// down: the GUI nudge (a nudge with no seen-state re-answers every open
-// mention) and the supervisor's one-time alert. A crash-looping launchd job
-// leaves no other trace a script can read (issue #86).
-export function writeHeartbeat(path) {
-  try {
-    writeFileSync(path, new Date().toISOString() + '\n');
-    return true;
-  } catch {
-    return false;
-  }
-}
 
 function loadSeenIds(path) {
   try {
@@ -77,7 +63,6 @@ export function checkRoomMessages(config) {
 
 export async function startRoomPoller({ rooms, apiKey, handle, interval, config, sessionOpt }) {
   const seenFile = config?.poller?.seen_file || SEEN_FILE_DEFAULT;
-  const heartbeatFile = config?.poller?.heartbeat_file || HEARTBEAT_FILE_DEFAULT;
   const notifyFile = config?.poller?.notification_file || NOTIFY_FILE_DEFAULT;
   const queuePath = config?.queue?.path || './ide-agent-queue.jsonl';
   const session = sessionOpt || config?.tmux?.ide_session || config?.tmux?.default_session || 'claude';
@@ -111,7 +96,6 @@ export async function startRoomPoller({ rooms, apiKey, handle, interval, config,
     console.warn('  ⚠️  wakes will silently do nothing. Set the command or switch modes.');
   }
   console.log(`  seen file: ${seenFile}`);
-  console.log(`  heartbeat: ${heartbeatFile}`);
   console.log(`  queue: ${queuePath}`);
   console.log('  auto-ack: disabled (real replies only)');
 
@@ -130,7 +114,6 @@ export async function startRoomPoller({ rooms, apiKey, handle, interval, config,
   }
 
   async function poll() {
-    writeHeartbeat(heartbeatFile);
     let newCount = 0;
     const newMessages = [];
     for (const room of rooms) {
