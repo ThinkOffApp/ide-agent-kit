@@ -23,6 +23,12 @@ PORT=8791
 INTERVAL=30
 CF_LOG=/tmp/codex-cloudflared-webhook.log
 LOG=/tmp/codex-webhook-supervisor.log
+# The room poller's heartbeat (poller.heartbeat_file in the IAK config). The
+# nudge refuses to type while it is stale, and the health alert below posts
+# once when it goes stale and once when it returns (issue #86).
+POLLER_HEARTBEAT="${IAK_POLLER_HEARTBEAT:-/tmp/iak-poller.heartbeat}"
+POLLER_ERR_LOG="${IAK_POLLER_ERR_LOG:-/tmp/codexmb.poller.err}"
+HEALTH_ALERT="$HOME/ide-agent-kit/scripts/poller-health-alert.mjs"
 
 log(){ echo "[$(date '+%F %T')] $*" | tee -a "$LOG"; }
 
@@ -58,6 +64,7 @@ start_receiver(){
     WEBHOOK_WAKE_LOG="/tmp/codex-webhook-wake.log" \
     IAK_CODEX_APP_NAME="ChatGPT" \
     IAK_NUDGE_TEXT="check rooms [codex]" \
+    IAK_POLLER_HEARTBEAT="$POLLER_HEARTBEAT" \
       "$NODE_BIN" "$RECEIVER" >>/tmp/codex-webhook-wake.log 2>&1 &
       sleep 1
       if kill -0 $! 2>/dev/null; then log "receiver started"; else log "receiver FAILED to start"; fi
@@ -108,9 +115,18 @@ URL=$(get_url)
 # (the PUT is idempotent).
 REREGISTER_EVERY="${REREGISTER_EVERY:-30}"
 LOOPS=0
+poller_health(){
+  [ -f "$HEALTH_ALERT" ] || return 0
+  # Key via environment only (same rule as register()).
+  IAK_ALERT_KEY="$KEY" IAK_POLLER_HEARTBEAT="$POLLER_HEARTBEAT" IAK_POLLER_ERR_LOG="$POLLER_ERR_LOG" \
+  IAK_ALERT_LABEL="@codexmb room poller" \
+    "$(command -v node || echo /usr/local/bin/node)" "$HEALTH_ALERT" >>"$LOG" 2>&1 || true
+}
+
 while true; do
   sleep "$INTERVAL"
   start_receiver
+  poller_health
   if ! pgrep -f "cloudflared tunnel --url http://127.0.0.1:$PORT" >/dev/null; then
     log "cloudflared died; restarting"
     start_tunnel

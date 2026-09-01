@@ -32,7 +32,8 @@
       "feature-admin-planning",
       "lattice-qcd"
     ],
-    "api_key": "antfarm_xxx",
+    "api_key_file": "/Users/you/.iak/codexmb_api_key.txt",
+  "heartbeat_file": "/tmp/iak-poller.heartbeat",
     "handle": "@CodexMB",
     "interval_sec": 60,
     "nudge_mode": "command",

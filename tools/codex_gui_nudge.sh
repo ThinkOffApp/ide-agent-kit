@@ -3,6 +3,26 @@
 # Never type over the human (petrus 2026-07-13: "tmux should not write if i
 # am writing!"). Skip this nudge cycle unless the machine is human-idle.
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# Never nudge while the room poller is down. Without its seen-file the app
+# reads the recent window cold and answers every mention that still looks
+# open: three nudges produced five identical reviews on 2026-09-01 while the
+# poller crash-looped under launchd (issue #86). The poller touches a
+# heartbeat every cycle; stale or missing = down. Set IAK_POLLER_HEARTBEAT=off
+# only for a setup that has no poller at all.
+POLLER_HEARTBEAT="${IAK_POLLER_HEARTBEAT:-/tmp/iak-poller.heartbeat}"
+POLLER_MAX_AGE="${IAK_POLLER_MAX_AGE_SEC:-180}"
+NUDGE_LOG_EARLY="${IAK_CODEX_NUDGE_LOG:-/tmp/codex_gui_nudge.log}"
+if [ "$POLLER_HEARTBEAT" != "off" ]; then
+    if [ ! -f "$POLLER_HEARTBEAT" ]; then
+        printf '[%s] codex_gui_nudge: ABORT poller down (no heartbeat at %s) - not nudging\n' "$(date -u +%FT%TZ)" "$POLLER_HEARTBEAT" >>"$NUDGE_LOG_EARLY"
+        exit 1
+    fi
+    HB_AGE=$(( $(date +%s) - $(stat -f %m "$POLLER_HEARTBEAT" 2>/dev/null || stat -c %Y "$POLLER_HEARTBEAT" 2>/dev/null || echo 0) ))
+    if [ "$HB_AGE" -gt "$POLLER_MAX_AGE" ]; then
+        printf '[%s] codex_gui_nudge: ABORT poller down (heartbeat %ss old, max %ss) - not nudging\n' "$(date -u +%FT%TZ)" "$HB_AGE" "$POLLER_MAX_AGE" >>"$NUDGE_LOG_EARLY"
+        exit 1
+    fi
+fi
 # WAIT for an idle window rather than skipping: by the time this script runs
 # the poller has marked the message seen, so skipping would consume it
 # undelivered. Exit 1 on timeout so the caller's failure path applies.
