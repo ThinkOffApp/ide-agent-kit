@@ -140,6 +140,10 @@ describe('secret file references (issue #86)', () => {
     writeFileSync(join(dir, 'k'), 'FILEKEY');
     const both = resolveSecretFiles({ poller: { api_key: 'INLINE', api_key_file: join(dir, 'k') } });
     assert.equal(both.poller.api_key, 'INLINE');
+    // legacy camelCase spelling is inline too (codex review of PR #87)
+    const legacy = resolveSecretFiles({ poller: { apiKey: 'LEGACY', api_key_file: join(dir, 'k') } });
+    assert.equal(legacy.poller.apiKey, 'LEGACY');
+    assert.equal(legacy.poller.api_key, undefined);
     assert.throws(() => resolveSecretFiles({ poller: { api_key_file: join(dir, 'nope') } }), /secret file not found: .*nope/);
     writeFileSync(join(dir, 'empty'), '\n');
     assert.throws(() => resolveSecretFiles({ poller: { api_key_file: join(dir, 'empty') } }), /secret file is empty/);

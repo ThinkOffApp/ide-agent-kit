@@ -105,7 +105,11 @@ export function resolveSecretFiles(cfg, fields = SECRET_FILE_FIELDS) {
     if (!block || typeof block !== 'object') continue;
     const fileKey = `${key === 'apiKey' ? 'api_key' : key}_file`;
     const file = block[fileKey];
-    if (!file || block[key]) continue;
+    // Either spelling counts as an inline value: the CLI still honours the
+    // legacy camelCase `apiKey`, so a file must not overrule it either
+    // (codex review of PR #87).
+    const inline = block[key] || block.api_key || block.apiKey;
+    if (!file || inline) continue;
     block[key] = readSecretFile(file);
   }
   return cfg;
