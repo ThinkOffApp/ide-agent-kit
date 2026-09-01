@@ -113,3 +113,20 @@ test('the poller the CLI actually runs writes the heartbeat on every poll', asyn
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test('poller-health-alert gives up on a stalled POST within the timeout and keeps no state', async () => {
+  const dir = mkdtempSync(path.join(tmpdir(), 'iak-alert-stall-'));
+  let hits = 0;
+  const server = createServer((req) => { hits++; req.on('data', () => {}); /* never answer */ });
+  await new Promise((r) => server.listen(0, '127.0.0.1', r));
+  const base = `http://127.0.0.1:${server.address().port}`;
+  try {
+    const state = path.join(dir, 'state');
+    const env = { ...process.env, IAK_ALERT_KEY: 'k1', IAK_POLLER_HEARTBEAT: path.join(dir, 'none'), IAK_ALERT_STATE: state, IAK_ALERT_BASE: base, IAK_ALERT_ROOM: 'r', IAK_ALERT_TIMEOUT_MS: '300' };
+    const t0 = Date.now();
+    await assert.rejects(execFileP('node', [alert], { encoding: 'utf8', env }), (e) => /post failed, will retry next loop/.test(e.stderr));
+    assert.ok(Date.now() - t0 < 5000, 'returned promptly, not hung on the socket');
+    assert.equal(hits, 1);
+    assert.ok(!existsSync(state), 'no state file after a failed post, so the next loop retries');
+  } finally { server.closeAllConnections?.(); server.close(); rmSync(dir, { recursive: true, force: true }); }
+});
