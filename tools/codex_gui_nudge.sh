@@ -17,7 +17,16 @@ if [ "$POLLER_HEARTBEAT" != "off" ]; then
         printf '[%s] codex_gui_nudge: ABORT poller down (no heartbeat at %s) - not nudging\n' "$(date -u +%FT%TZ)" "$POLLER_HEARTBEAT" >>"$NUDGE_LOG_EARLY"
         exit 1
     fi
-    HB_AGE=$(( $(date +%s) - $(stat -f %m "$POLLER_HEARTBEAT" 2>/dev/null || stat -c %Y "$POLLER_HEARTBEAT" 2>/dev/null || echo 0) ))
+    # GNU stat: -c %Y is the mtime; its -f is filesystem mode and prints a mount
+    # point (codex review of PR #87). BSD/macOS stat has no -c, so it falls
+    # through to -f %m. Anything non-numeric fails closed: no nudge.
+    HB_MTIME=$(stat -c %Y "$POLLER_HEARTBEAT" 2>/dev/null || stat -f %m "$POLLER_HEARTBEAT" 2>/dev/null || echo "")
+    case "$HB_MTIME" in
+        ''|*[!0-9]*)
+            printf '[%s] codex_gui_nudge: ABORT poller heartbeat mtime unreadable (%s) - not nudging\n' "$(date -u +%FT%TZ)" "${HB_MTIME:-empty}" >>"$NUDGE_LOG_EARLY"
+            exit 1 ;;
+    esac
+    HB_AGE=$(( $(date +%s) - HB_MTIME ))
     if [ "$HB_AGE" -gt "$POLLER_MAX_AGE" ]; then
         printf '[%s] codex_gui_nudge: ABORT poller down (heartbeat %ss old, max %ss) - not nudging\n' "$(date -u +%FT%TZ)" "$HB_AGE" "$POLLER_MAX_AGE" >>"$NUDGE_LOG_EARLY"
         exit 1
