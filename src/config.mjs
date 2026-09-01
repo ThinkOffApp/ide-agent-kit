@@ -2,6 +2,7 @@
 
 import { readFileSync, existsSync } from 'node:fs';
 import { resolve } from 'node:path';
+import { homedir } from 'node:os';
 
 const DEFAULT_CONFIG = {
   listen: { host: '127.0.0.1', port: 8787 },
@@ -75,11 +76,46 @@ const DEFAULT_CONFIG = {
   }
 };
 
+// Secrets may be given as `<name>_file` instead of inline: the file's trimmed
+// contents become `<name>`. A file reference is the safer default for a key
+// (it never lands in a config that gets pasted into a room), and codex.json was
+// written that way - which the CLI silently did not read, so its poller
+// crash-looped 1134 times behind launchd KeepAlive (issue #86, 2026-09-01).
+// An inline value wins when both are present; a missing file is an error with
+// the path in it, never a silent empty key.
+const SECRET_FILE_FIELDS = [
+  ['poller', 'api_key'],
+  ['dm_poller', 'api_key'],
+  ['xfor', 'api_key'],
+  ['intent', 'apiKey'],
+  ['degradation_watch', 'api_key']
+];
+
+export function readSecretFile(path) {
+  const expanded = path.startsWith('~/') ? resolve(homedir(), path.slice(2)) : resolve(path);
+  if (!existsSync(expanded)) throw new Error(`secret file not found: ${expanded}`);
+  const value = readFileSync(expanded, 'utf8').trim();
+  if (!value) throw new Error(`secret file is empty: ${expanded}`);
+  return value;
+}
+
+export function resolveSecretFiles(cfg, fields = SECRET_FILE_FIELDS) {
+  for (const [section, key] of fields) {
+    const block = cfg?.[section];
+    if (!block || typeof block !== 'object') continue;
+    const fileKey = `${key === 'apiKey' ? 'api_key' : key}_file`;
+    const file = block[fileKey];
+    if (!file || block[key]) continue;
+    block[key] = readSecretFile(file);
+  }
+  return cfg;
+}
+
 export function loadConfig(configPath) {
   const p = resolve(configPath || 'ide-agent-kit.json');
   if (!existsSync(p)) return { ...DEFAULT_CONFIG };
   const raw = JSON.parse(readFileSync(p, 'utf8'));
-  return {
+  return resolveSecretFiles({
     listen: { ...DEFAULT_CONFIG.listen, ...raw.listen },
     queue: { ...DEFAULT_CONFIG.queue, ...raw.queue },
     receipts: { ...DEFAULT_CONFIG.receipts, ...raw.receipts },
@@ -113,6 +149,8 @@ export function loadConfig(configPath) {
     intent: raw.intent || {},
     memory_api: raw.memory_api || {},
     moltbook: raw.moltbook || {},
-    mcp: raw.mcp || {}
-  };
+    mcp: raw.mcp || {},
+    xfor: raw.xfor || {},
+    degradation_watch: raw.degradation_watch || {}
+  });
 }

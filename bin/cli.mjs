@@ -559,7 +559,7 @@ async function main() {
       const pollerApiKey = config?.poller?.api_key || config?.poller?.apiKey || config?.intent?.apiKey || process.env.ANTIGRAVITY_API_KEY;
       const pollerHandle = config?.poller?.handle;
       if (!pollerRooms || !pollerApiKey || !pollerHandle) {
-        console.error('Error: poller.rooms, poller.api_key, and poller.handle must be set in config');
+        console.error('Error: poller.rooms, poller.api_key (or poller.api_key_file), and poller.handle must be set in config');
         process.exit(1);
       }
       await startRoomPoller({

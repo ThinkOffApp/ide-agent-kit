@@ -30,6 +30,7 @@
 // Flags: --once (single tick, for tests/cron), --dry-run (print, don't post).
 
 import { readFileSync, readdirSync, statSync } from 'node:fs';
+import { resolveSecretFiles } from '../src/config.mjs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -47,8 +48,9 @@ function loadConfig() {
   if (!watch || !Array.isArray(watch.agents) || watch.agents.length === 0) {
     throw new Error('config missing degradation_watch.agents');
   }
+  resolveSecretFiles(cfg);
   const apiKey = watch.api_key || cfg.poller?.api_key;
-  if (!apiKey) throw new Error('no api key (degradation_watch.api_key or poller.api_key)');
+  if (!apiKey) throw new Error('no api key (degradation_watch.api_key[_file] or poller.api_key[_file])');
   return {
     intervalSec: watch.interval_sec || 300,
     alertRoom: watch.alert_room || 'thinkoff-development',
