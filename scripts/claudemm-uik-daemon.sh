@@ -18,4 +18,9 @@ export INTENT_USER_ID="$(python3 -c "import json;print(json.load(open('$CONFIG')
 export INTENT_AGENT_HANDLE="@claudemm"
 export INTENT_DEVICE_ID="mac-mini"
 
-exec node "$IAK_DIR/packages/user-intent-kit/bin/uik-daemon.js"
+# launchd starts this with a bare PATH (no Homebrew): resolve node explicitly
+# or the job dies with "exec: node: not found" - which is what kept the
+# publisher an orphan started by hand instead of a KeepAlive service.
+export PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"
+NODE_BIN="$(command -v node || echo /opt/homebrew/bin/node)"
+exec "$NODE_BIN" "$IAK_DIR/packages/user-intent-kit/bin/uik-daemon.js"
