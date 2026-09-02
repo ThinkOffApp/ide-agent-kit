@@ -12,6 +12,7 @@ import { createServer } from 'node:http';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { writeHeartbeat, startRoomPoller } from '../src/team-relay/room-poller.mjs';
+import { errLogQuietSince, lastSleepLine } from '../scripts/poller-health-alert.mjs';
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const nudge = path.join(repoRoot, 'tools', 'codex_gui_nudge.sh');
@@ -129,4 +130,40 @@ test('poller-health-alert gives up on a stalled POST within the timeout and keep
     assert.equal(hits, 1);
     assert.ok(!existsSync(state), 'no state file after a failed post, so the next loop retries');
   } finally { server.closeAllConnections?.(); server.close(); rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('down-alert says "host slept" when the err log stopped before the heartbeat did, "Last error" when it kept failing', async () => {
+  const dir = mkdtempSync(path.join(tmpdir(), 'iak-slept-'));
+  const posts = [];
+  const server = createServer((req, res) => { let raw = ''; req.on('data', (c) => { raw += c; }); req.on('end', () => { posts.push(JSON.parse(raw).body); res.writeHead(200); res.end('{}'); }); });
+  await new Promise((r) => server.listen(0, '127.0.0.1', r));
+  const base = `http://127.0.0.1:${server.address().port}`;
+  try {
+    const hb = path.join(dir, 'hb'); const err = path.join(dir, 'err.log');
+    const old = new Date(Date.now() - 900_000);
+    writeFileSync(err, 'boot\n'); utimesSync(err, new Date(old.getTime() - 60_000), new Date(old.getTime() - 60_000));
+    writeFileSync(hb, ''); utimesSync(hb, old, old);
+    const env = (state) => ({ ...process.env, IAK_ALERT_KEY: 'k', IAK_POLLER_HEARTBEAT: hb, IAK_POLLER_ERR_LOG: err, IAK_ALERT_STATE: path.join(dir, state), IAK_ALERT_BASE: base, IAK_ALERT_ROOM: 'r', IAK_ALERT_LABEL: 'p' });
+    await execFileP('node', [alert], { encoding: 'utf8', env: env('s1') });
+    assert.match(posts[0], /Looks like the host slept rather than the poller failing/);
+    assert.ok(!/Last error/.test(posts[0]));
+    writeFileSync(err, 'boot\nError: poller.rooms must be set\n');
+    await execFileP('node', [alert], { encoding: 'utf8', env: env('s2') });
+    assert.match(posts[1], /Last error: Error: poller\.rooms must be set/);
+    assert.ok(!/host slept/.test(posts[1]));
+  } finally { server.closeAllConnections?.(); server.close(); rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('errLogQuietSince and lastSleepLine helpers', () => {
+  const dir = mkdtempSync(path.join(tmpdir(), 'iak-helpers-'));
+  try {
+    const hb = path.join(dir, 'hb'); const err = path.join(dir, 'err');
+    writeFileSync(err, 'x'); const t = new Date(Date.now() - 100_000); utimesSync(err, t, t);
+    writeFileSync(hb, 'x');
+    assert.equal(errLogQuietSince(err, hb), true);
+    assert.equal(errLogQuietSince(path.join(dir, 'missing'), hb), false);
+    const fake = () => 'noise\n2026-09-02 01:54:05 Sleep   Entering Sleep state due to Maintenance Sleep: 921 secs\nother\n';
+    if (process.platform === 'darwin') assert.match(lastSleepLine(fake), /Entering Sleep state/);
+    else assert.equal(lastSleepLine(fake), '');
+  } finally { rmSync(dir, { recursive: true, force: true }); }
 });
