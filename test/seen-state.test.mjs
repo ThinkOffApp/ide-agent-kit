@@ -58,3 +58,39 @@ case "$*" in *limit=50*) echo "[]";; *) echo '[{"id":"m1","from":"petrus","body"
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test('with #92 thread context: the state-of-play header lands once, before the first priority line, and no line is written twice', async () => {
+  const dir = mkdtempSync(path.join(tmpdir(), 'iak-header-'));
+  const savedPath = process.env.PATH;
+  let timers;
+  try {
+    const stubDir = path.join(dir, 'bin'); mkdirSync(stubDir);
+    const stub = path.join(stubDir, 'curl');
+    writeFileSync(stub, `#!/bin/sh
+case "$*" in *limit=50*) echo "[]";; *) echo '[{"id":"s1","from":"@claudeMB","body":"state: the card is the benchmark table v2, not hardware","created_at":"2026-09-02T00:00:01Z"},{"id":"o1","from":"petrus","body":"claudemm what is the card","created_at":"2026-09-02T00:00:02Z"}]';; esac
+`);
+    chmodSync(stub, 0o755);
+    process.env.PATH = `${stubDir}:${savedPath}`;
+    const notifyFile = path.join(dir, 'notify');
+    const origLog = console.log; console.log = () => {};
+    try {
+      timers = await startRoomPoller({
+        rooms: ['r'], apiKey: 'k', handle: '@claudemm', interval: 3600,
+        config: { poller: { seen_file: path.join(dir, 'seen'), notification_file: notifyFile, heartbeat_file: path.join(dir, 'hb'), nudge_mode: 'none', owner: 'petrus' }, queue: { path: path.join(dir, 'q.jsonl') } }
+      });
+    } finally { console.log = origLog; }
+    const lines = readFileSync(notifyFile, 'utf8').split('\n').filter(Boolean);
+    const stateIdx = lines.findIndex((l) => /state/i.test(l) && /benchmark table v2/.test(l) && !/@claudeMB:/.test(l));
+    const ownerIdx = lines.findIndex((l) => /petrus: claudemm what is the card/.test(l));
+    assert.ok(stateIdx >= 0, `state-of-play header present: ${lines.join(' | ')}`);
+    assert.ok(ownerIdx >= 0, 'owner line present');
+    assert.ok(stateIdx < ownerIdx, 'header precedes the first priority line');
+    assert.equal(lines.filter((l) => /petrus: claudemm what is the card/.test(l)).length, 1, 'owner line written exactly once');
+    assert.equal(lines.filter((l) => /@claudeMB: state:/.test(l)).length, 1, 'state message line written exactly once');
+  } finally {
+    if (timers?.roomTimer) clearInterval(timers.roomTimer);
+    if (timers?.dmTimer) clearInterval(timers.dmTimer);
+    process.env.PATH = savedPath;
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

@@ -305,6 +305,7 @@ export async function startRoomPoller({ rooms, apiKey, handle, interval, config,
       }
       const roomLines = [];
       let roomPriority = false;
+      let roomHeaderWritten = false;
       for (const m of msgs) {
         const mid = m.id;
         if (!mid || seen.has(mid)) continue;
@@ -317,6 +318,18 @@ export async function startRoomPoller({ rooms, apiKey, handle, interval, config,
         const mentionsSelf = (m.body || '').toLowerCase().includes(mentionNeedle);
         if (normalizedSender === ownerHandle) { hasOwnerMessage = true; roomPriority = true; }
         if (mentionsSelf) { hasMention = true; roomPriority = true; }
+        // Context header (settled facts, our own last post) goes to the
+        // notification file once per room, right before the first line that
+        // makes this batch worth a wake - so the reader still sees header
+        // then lines, while every line is on disk before its seen-marker
+        // (#91 per-message durability on top of #92's thread context).
+        if (roomPriority && !roomHeaderWritten) {
+          roomHeaderWritten = true;
+          const sop = stateOfPlayLine(history, room);
+          if (sop) appendNotifications(notifyFile, [sop]);
+          const own = ownLastPostLine(history, room, selfHandle);
+          if (own) appendNotifications(notifyFile, [own]);
+        }
 
         let body = (m.body || '').slice(0, 500);
         // Surface attachments (2026-07-19 lost-screenshot lesson): an
@@ -364,18 +377,9 @@ export async function startRoomPoller({ rooms, apiKey, handle, interval, config,
 
         console.log(`  [${ts.slice(0, 19)}] ${sender} in ${room}: ${body.slice(0, 80)}...`);
       }
-      if (roomLines.length) {
-        // Context header, only when this batch is worth a wake for this room:
-        // the settled facts and what we ourselves said last, so the agent
-        // answers the thread instead of re-verifying or re-answering.
-        if (roomPriority) {
-          const sop = stateOfPlayLine(history, room);
-          if (sop) newMessages.push(sop);
-          const own = ownLastPostLine(history, room, selfHandle);
-          if (own) newMessages.push(own);
-        }
-        newMessages.push(...roomLines);
-      }
+      // Lines and the context header were written per message above;
+      // newMessages only feeds the count/log below.
+      newMessages.push(...roomLines);
     }
 
     saveSeenIds(seenFile, seen);
