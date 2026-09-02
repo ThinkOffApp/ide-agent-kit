@@ -55,6 +55,37 @@ if [ -f "$NUDGE_STAMP" ]; then
             fi ;;
     esac
 fi
+# Atomic reservation held across the injection (codex review of PR #89):
+# two nudge processes can both pass the early check, both wait out the idle
+# guard, and both inject. mkdir is atomic; the holder re-checks the stamp
+# inside the reservation, so a nudge that landed while we waited debounces
+# this one. A reservation older than 10 min is a crashed holder.
+NUDGE_LOCK="$NUDGE_STAMP.lock"
+release_nudge() { rmdir "$NUDGE_LOCK" 2>/dev/null || true; }
+reserve_nudge() {
+    if [ -d "$NUDGE_LOCK" ]; then
+        LOCK_MTIME=$(stat -c %Y "$NUDGE_LOCK" 2>/dev/null || stat -f %m "$NUDGE_LOCK" 2>/dev/null || echo 0)
+        case "$LOCK_MTIME" in ''|*[!0-9]*) LOCK_MTIME=0 ;; esac
+        if [ $(( $(date +%s) - LOCK_MTIME )) -gt 600 ]; then rmdir "$NUDGE_LOCK" 2>/dev/null || true; fi
+    fi
+    if ! mkdir "$NUDGE_LOCK" 2>/dev/null; then
+        printf '[%s] codex_gui_nudge: debounced (another nudge is injecting right now)\n' "$(date -u +%FT%TZ)" >>"$NUDGE_LOG_EARLY"
+        exit 0
+    fi
+    trap release_nudge EXIT
+    if [ -f "$NUDGE_STAMP" ]; then
+        LAST_MTIME=$(stat -c %Y "$NUDGE_STAMP" 2>/dev/null || stat -f %m "$NUDGE_STAMP" 2>/dev/null || echo "")
+        case "$LAST_MTIME" in
+            ''|*[!0-9]*) ;;
+            *)
+                SINCE=$(( $(date +%s) - LAST_MTIME ))
+                if [ "$SINCE" -lt "$NUDGE_DEBOUNCE" ]; then
+                    printf '[%s] codex_gui_nudge: debounced at injection (%ss since a nudge that landed while we waited)\n' "$(date -u +%FT%TZ)" "$SINCE" >>"$NUDGE_LOG_EARLY"
+                    exit 0
+                fi ;;
+        esac
+    fi
+}
 if ! "$REPO_ROOT/tools/human-idle-guard.sh" --wait 300; then
     echo "nudge aborted: human continuously active" >&2
     exit 1
@@ -169,8 +200,9 @@ PY
     CLICK_X=$((WIN_X + WIN_W / 2))
     CLICK_Y=$((WIN_Y + WIN_H - 72))
     require_human_idle "before cliclick injection" || exit 1
-    touch "$NUDGE_STAMP" 2>/dev/null || true
+    reserve_nudge
     if "$CLICLICK_BIN" -r -w 20 "c:${CLICK_X},${CLICK_Y}" "t:${PROMPT_TEXT}" kp:return; then
+      touch "$NUDGE_STAMP" 2>/dev/null || true
       printf '[%s] codex_gui_nudge: sent via cliclick x=%s y=%s\n' "$(date -u +%FT%TZ)" "$CLICK_X" "$CLICK_Y" >>"$LOG_FILE"
       exit 0
     fi
@@ -179,9 +211,8 @@ PY
 fi
 
 require_human_idle "before AppleScript wake" || exit 0
-touch "$NUDGE_STAMP" 2>/dev/null || true
-
-osascript - "$APP_NAME" "$PROMPT_TEXT" "$LOG_FILE" "$LOCK_PY" "$HUMAN_IDLE_CHECK" "$HUMAN_IDLE_SEC" <<'APPLESCRIPT'
+reserve_nudge
+if osascript - "$APP_NAME" "$PROMPT_TEXT" "$LOG_FILE" "$LOCK_PY" "$HUMAN_IDLE_CHECK" "$HUMAN_IDLE_SEC" <<'APPLESCRIPT'
 on run argv
   set appName to item 1 of argv
   set promptText to item 2 of argv
@@ -242,7 +273,7 @@ on run argv
 
   if not my humanIsIdle(pythonBin, idleCheck, idleThreshold) then
     my writeLog(logFile, "ABORT human active or idle state unknown before AppleScript injection")
-    return
+    error "human active before injection" number 1003
   end if
 
   try
@@ -293,3 +324,12 @@ on writeLog(logFile, msg)
   do shell script "printf '[%s] %s\\n' \"$(date -u +%FT%TZ)\" " & quoted form of ("codex_gui_nudge: " & msg) & " >> " & quoted form of logFile
 end writeLog
 APPLESCRIPT
+then
+  touch "$NUDGE_STAMP" 2>/dev/null || true
+  printf '[%s] codex_gui_nudge: sent via AppleScript\n' "$(date -u +%FT%TZ)" >>"$LOG_FILE"
+  exit 0
+else
+  # AppleScript aborts and failures raise an error (non-zero exit): nothing
+  # was delivered, no stamp, so the next wake is not debounced.
+  exit 1
+fi

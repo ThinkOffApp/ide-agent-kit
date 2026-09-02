@@ -2,7 +2,7 @@
 // Issue #86: a nudge must not fire while the room poller is down, and the
 // supervisor must say so once (and once more when it is back).
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync, writeFileSync, existsSync, utimesSync, readFileSync, chmodSync, statSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync, existsSync, utimesSync, readFileSync, chmodSync, statSync, mkdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { spawnSync, execFile } from 'node:child_process';
@@ -149,5 +149,39 @@ test('codex_gui_nudge debounces a second nudge inside the window, and only a rea
     const r2 = spawnSync('bash', [nudge], { encoding: 'utf8', env: { ...process.env, IAK_POLLER_HEARTBEAT: stale, IAK_NUDGE_STAMP: stamp, IAK_CODEX_NUDGE_LOG: log } });
     assert.equal(r2.status, 1);
     assert.equal(statSync(stamp).mtimeMs, before, 'abort paths never write the stamp');
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('codex_gui_nudge: a reservation held by another nudge debounces this one right before injection', () => {
+  const dir = mkdtempSync(path.join(tmpdir(), 'iak-reserve-'));
+  try {
+    const log = path.join(dir, 'nudge.log');
+    const hb = path.join(dir, 'hb'); writeHeartbeat(hb);
+    const stamp = path.join(dir, 'last');
+    mkdirSync(stamp + '.lock'); // the other process is injecting right now
+    // stubs so the run passes the screen-lock and human-idle checks and reaches
+    // the reservation: ioreg (idle guard), a fake python that reports
+    // "unlocked" and "idle", and an osascript that must never be reached
+    const stubDir = path.join(dir, 'bin'); mkdirSync(stubDir);
+    const mk = (name, body) => { const f = path.join(stubDir, name); writeFileSync(f, body); chmodSync(f, 0o755); return f; };
+    mk('ioreg', '#!/bin/sh\necho \'| "HIDIdleTime" = 999999999999\'\n');
+    const py = mk('fakepy', '#!/bin/sh\n[ "$1" = "-" ] && echo unlocked\nexit 0\n');
+    mk('osascript', '#!/bin/sh\necho "MUST NOT RUN" >&2; exit 99\n');
+    const idleCheck = mk('idle.py', '#!/bin/sh\nexit 0\n');
+    const r = spawnSync('bash', [nudge], { encoding: 'utf8', env: { ...process.env, PATH: `${stubDir}:${process.env.PATH}`, IAK_POLLER_HEARTBEAT: hb, IAK_NUDGE_STAMP: stamp, IAK_CODEX_NUDGE_LOG: log, IAK_CLICLICK_BIN: '/nonexistent', IAK_PYTHON_BIN: py, IAK_HUMAN_IDLE_CHECK: idleCheck } });
+    const out = readFileSync(log, 'utf8');
+    assert.equal(r.status, 0, r.stderr);
+    assert.ok(!/MUST NOT RUN/.test(r.stderr), 'no injection while another nudge holds the reservation');
+    assert.match(out, /debounced \(another nudge is injecting right now\)/);
+    assert.ok(existsSync(stamp + '.lock'), 'a reservation held by another process is not released by us');
+    assert.ok(!existsSync(stamp), 'no stamp written by a debounced run');
+    // positive control: with no reservation the same stubs DO reach the
+    // injection (the osascript stub fails), and a failed send leaves no stamp
+    rmSync(stamp + '.lock', { recursive: true, force: true });
+    const r2 = spawnSync('bash', [nudge], { encoding: 'utf8', env: { ...process.env, PATH: `${stubDir}:${process.env.PATH}`, IAK_POLLER_HEARTBEAT: hb, IAK_NUDGE_STAMP: stamp, IAK_CODEX_NUDGE_LOG: log, IAK_CLICLICK_BIN: '/nonexistent', IAK_PYTHON_BIN: py, IAK_HUMAN_IDLE_CHECK: idleCheck } });
+    assert.match(r2.stderr, /MUST NOT RUN/, 'control: the stubs reach the injection point');
+    assert.equal(r2.status, 1, 'a failed injection exits 1');
+    assert.ok(!existsSync(stamp), 'a failed injection writes no stamp');
+    assert.ok(!existsSync(stamp + '.lock'), 'the reservation is released on exit');
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
