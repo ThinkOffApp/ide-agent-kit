@@ -38,16 +38,30 @@ export function errLogQuietSince(errPath, heartbeatPath) {
   }
 }
 
-// macOS names the sleep directly; elsewhere there is nothing to quote.
-export function lastSleepLine(run = execFileSync) {
+// Independent sleep evidence (codex review of PR #94): a quiet err log also
+// follows a silent exit or SIGKILL, so "the host slept" is claimed only when
+// the OS says so - a pmset sleep/wake event timestamped after the heartbeat
+// stopped. macOS only; elsewhere there is no evidence and no claim.
+export function sleepEvidenceSince(sinceMs, run = execFileSync) {
   if (process.platform !== 'darwin') return '';
   try {
     const out = run('pmset', ['-g', 'log'], { encoding: 'utf8', timeout: 5000 });
-    const lines = out.split('\n').filter((l) => /Entering Sleep|DarkWake|Wake from|Wake Requests/.test(l));
-    return lines.length ? lines[lines.length - 1].trim().slice(0, 200) : '';
+    const hits = out.split('\n').filter((l) => /Entering Sleep|DarkWake|Wake from|Wake Requests/.test(l));
+    for (let i = hits.length - 1; i >= 0; i--) {
+      const m = hits[i].match(/^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}(?: [+-]\d{4})?)/);
+      if (!m) continue;
+      const t = Date.parse(m[1].replace(' +', '+').replace(' -', '-'));
+      if (Number.isFinite(t) && t >= sinceMs - 60_000) return hits[i].trim().slice(0, 200);
+    }
+    return '';
   } catch {
     return '';
   }
+}
+
+// Kept for callers that only want the last line, evidence or not.
+export function lastSleepLine(run = execFileSync) {
+  return sleepEvidenceSince(0, run);
 }
 
 export function lastLine(path) {
@@ -98,11 +112,13 @@ async function main() {
     if (down && !alerted) {
       const err = errLog ? lastLine(errLog) : '';
       const since = age === Infinity ? 'no heartbeat file' : `last heartbeat ${age}s ago`;
-      const slept = errLog && age !== Infinity && errLogQuietSince(errLog, heartbeat);
-      const sleepLine = slept ? lastSleepLine() : '';
-      const shape = slept
-        ? `\nLooks like the host slept rather than the poller failing: the err log has not grown since the heartbeat stopped${sleepLine ? ` (pmset: ${sleepLine})` : ''}.`
-        : (err ? `\nLast error: ${err}` : '');
+      const quiet = errLog && age !== Infinity && errLogQuietSince(errLog, heartbeat);
+      const sleepLine = quiet ? sleepEvidenceSince(Date.now() - age * 1000) : '';
+      const shape = quiet && sleepLine
+        ? `\nLooks like the host slept rather than the poller failing: the err log has not grown since the heartbeat stopped and the OS logged a sleep/wake in that window (pmset: ${sleepLine}).`
+        : quiet
+          ? '\nThe err log has not grown since the heartbeat stopped: the process exited silently, was killed, or the host was suspended (no OS sleep evidence found).'
+          : (err ? `\nLast error: ${err}` : '');
       await post(`⚠️ ${label} is down (${since}, heartbeat ${heartbeat}).` + shape +
         '\nGUI nudges are suspended until it heartbeats again; this alert is posted once.');
       writeFileSync(stateFile, new Date().toISOString() + '\n');
