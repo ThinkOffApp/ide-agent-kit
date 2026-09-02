@@ -191,10 +191,11 @@ export function seedRoom({ seen, history, room, msgs }) {
  * than everything already handled) and they are marked seen, never
  * notified. Exported for the regression test.
  */
-export function classifyFetched({ seen, history, room, m }) {
+export function classifyFetched({ seen, history, room, m, mark }) {
   if (!m || !m.id) return 'skip';
   if (seen.has(m.id)) return 'seen';
-  if (history && typeof history.isStale === 'function' && history.isStale(room, m.created_at)) {
+  const markIso = mark !== undefined ? mark : (history && typeof history.watermark === 'function' ? history.watermark(room) : undefined);
+  if (history && typeof history.isStale === 'function' && history.isStale(room, m.created_at, undefined, markIso)) {
     seen.add(m.id);
     return 'stale';
   }
@@ -333,12 +334,18 @@ export async function startRoomPoller({ rooms, apiKey, handle, interval, config,
       let roomPriority = false;
       let roomHeaderWritten = false;
       let staleCount = 0;
+      // Classify the whole batch against the watermark as it stood before the
+      // batch, and advance it once afterwards: results arrive newest-first,
+      // so advancing per message would classify an outage backlog older than
+      // the first new message as stale and suppress it (codex, PR #95).
+      const markBefore = history.watermark(room);
+      let newestProcessed = '';
       for (const m of msgs) {
         const mid = m.id;
-        const kind = classifyFetched({ seen, history, room, m });
+        const kind = classifyFetched({ seen, history, room, m, mark: markBefore });
         if (kind !== 'new') { if (kind === 'stale') staleCount++; continue; }
         seen.add(mid);
-        history.markProcessed(room, m.created_at);
+        if (m.created_at && (!newestProcessed || Date.parse(m.created_at) > Date.parse(newestProcessed))) newestProcessed = m.created_at;
 
         const sender = m.from || m.sender || '?';
         const normalizedSender = normalizeHandle(sender);
@@ -409,6 +416,7 @@ export async function startRoomPoller({ rooms, apiKey, handle, interval, config,
       // Lines and the context header were written per message above;
       // newMessages only feeds the count/log below.
       newMessages.push(...roomLines);
+      if (newestProcessed) history.markProcessed(room, newestProcessed);
       if (staleCount) {
         console.log(`  ${room}: ${staleCount} old message(s) below the watermark ${history.watermark(room)} marked seen, not notified`);
         saveSeenIds(seenFile, seen);

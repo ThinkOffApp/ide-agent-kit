@@ -49,3 +49,40 @@ esac
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test('an outage backlog behind the first new message in a newest-first batch is still delivered (codex, PR #95)', async () => {
+  const { mkdtempSync, rmSync, writeFileSync, chmodSync, mkdirSync, readFileSync } = await import('node:fs');
+  const { tmpdir } = await import('node:os');
+  const path = (await import('node:path')).default;
+  const { startRoomPoller } = await import('../src/team-relay/room-poller.mjs');
+  const dir = mkdtempSync(path.join(tmpdir(), 'iak-wm-backlog-'));
+  const savedPath = process.env.PATH; const origLog = console.log; console.log = () => {};
+  let timers;
+  try {
+    const stubDir = path.join(dir, 'bin'); mkdirSync(stubDir);
+    // seed sets the watermark at 12:00; the poller then "returns from an outage"
+    // and the fetch shows, newest first: a 14:50 message and a 13:00 backlog
+    // message. Both are newer than the watermark and both must be delivered.
+    writeFileSync(path.join(stubDir, 'curl'), `#!/bin/sh
+case "$*" in
+  *limit=50*) echo '[{"id":"a1","from":"petrus","body":"seed","created_at":"2026-08-31T12:00:00Z"}]';;
+  *) echo '[{"id":"n1","from":"petrus","body":"newest first","created_at":"2026-09-02T14:50:00Z"},{"id":"b1","from":"petrus","body":"backlog from the outage","created_at":"2026-09-02T13:00:00Z"},{"id":"a1","from":"petrus","body":"seed","created_at":"2026-08-31T12:00:00Z"}]';;
+esac
+`);
+    chmodSync(path.join(stubDir, 'curl'), 0o755);
+    process.env.PATH = `${stubDir}:${savedPath}`;
+    const notifyFile = path.join(dir, 'notify');
+    timers = await startRoomPoller({ rooms: ['r'], apiKey: 'k', handle: '@t', interval: 3600,
+      config: { poller: { seen_file: path.join(dir, 'seen'), notification_file: notifyFile, heartbeat_file: path.join(dir, 'hb'), nudge_mode: 'none', history_file: path.join(dir, 'hist.json') }, queue: { path: path.join(dir, 'q.jsonl') } } });
+    const lines = readFileSync(notifyFile, 'utf8').split('\n').filter(Boolean);
+    assert.equal(lines.filter((l) => /petrus: newest first/.test(l)).length, 1, 'new message delivered once');
+    assert.equal(lines.filter((l) => /petrus: backlog from the outage/.test(l)).length, 1, `backlog behind it delivered too: ${lines.join(' | ')}`);
+    assert.ok(!lines.some((l) => /petrus: seed/.test(l)), 'the seeded message is not re-delivered');
+    const hist = JSON.parse(readFileSync(path.join(dir, 'hist.json'), 'utf8'));
+    assert.equal(hist._marks.r, '2026-09-02T14:50:00.000Z', 'watermark advanced once, to the newest processed');
+  } finally {
+    if (timers?.roomTimer) clearInterval(timers.roomTimer);
+    if (timers?.dmTimer) clearInterval(timers.dmTimer);
+    console.log = origLog; process.env.PATH = savedPath; rmSync(dir, { recursive: true, force: true });
+  }
+});

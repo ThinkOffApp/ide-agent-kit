@@ -94,8 +94,12 @@ export class RoomHistory {
    * tolerance: it predates everything already handled here, so it can only
    * be an evicted-from-seen resurfacing, never a genuinely new message.
    */
-  isStale(room, createdAt, toleranceS = STALE_TOLERANCE_S) {
-    const mark = Date.parse(this.marks[room] || '');
+  isStale(room, createdAt, toleranceS = STALE_TOLERANCE_S, markIso = this.marks[room]) {
+    // `markIso` lets a caller classify a whole batch against the watermark as
+    // it stood BEFORE the batch: advancing it per message would let the first
+    // new message in a newest-first batch hide the backlog behind it (codex
+    // review of PR #95).
+    const mark = Date.parse(markIso || '');
     const t = Date.parse(createdAt || '');
     if (!Number.isFinite(mark) || !Number.isFinite(t)) return false;
     return t < mark - toleranceS * 1000;
