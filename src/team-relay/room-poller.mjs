@@ -1,4 +1,5 @@
 import { NOTIFY_FILE_DEFAULT, SEEN_FILE_DEFAULT, QUEUE_PATH_DEFAULT } from '../common/constants.mjs';
+import { loadSeenIds, saveSeenIds as saveSeenIdsShared } from '../common/seen-ids.mjs';
 import { enrichEvent } from './enrichment.mjs';
 // SPDX-License-Identifier: AGPL-3.0-only
 
@@ -30,19 +31,11 @@ import { RoomHistory, threadSuffix, previousSuffix, stateOfPlayLine, ownLastPost
 
 
 
-function loadSeenIds(path) {
-  try {
-    return new Set(readFileSync(path, 'utf8').split('\n').filter(Boolean));
-  } catch {
-    return new Set();
-  }
-}
-
-function saveSeenIds(path, ids) {
-  // Keep last 1000 IDs to prevent unbounded growth
-  const arr = [...ids].slice(-1000);
-  writeFileSync(path, arr.join('\n') + '\n');
-}
+// Seen-state comes from the shared module (atomic + fsynced, issue #90).
+// The marker is written after EACH handled message below, never once per
+// batch: a batch can hold a task that runs for an hour, and a restart inside
+// it replayed a whole day on the M5 (2026-09-01).
+const saveSeenIds = (path, ids) => saveSeenIdsShared(path, ids, 1000);
 
 const DM_SEEN_FILE_DEFAULT = '/tmp/iak-dm-seen-ids.txt';
 
@@ -365,6 +358,9 @@ export async function startRoomPoller({ rooms, apiKey, handle, interval, config,
           + thread + prev;
         roomLines.push(line);
         newCount++;
+        // Handled = queued + notified; only then is it safe to remember it.
+        appendNotifications(notifyFile, [line]);
+        saveSeenIds(seenFile, seen);
 
         console.log(`  [${ts.slice(0, 19)}] ${sender} in ${room}: ${body.slice(0, 80)}...`);
       }
@@ -386,8 +382,7 @@ export async function startRoomPoller({ rooms, apiKey, handle, interval, config,
     history.save();
 
     if (newCount > 0) {
-      // Primary: write to notification file (always works)
-      appendNotifications(notifyFile, newMessages);
+      // Notification lines were appended per message above.
       // Owner messages always qualify; agent @-mentions qualify unless the user
       // is in emergency-only mode (that mode exists to mute agent chatter).
       const mentionQualifies = hasMention && !hasOwnerMessage ? !(await shouldSuppressNudge(config)) : hasMention;
@@ -444,6 +439,8 @@ export async function startRoomPoller({ rooms, apiKey, handle, interval, config,
         const line = `[${ts.slice(0, 19)}] [dm] ${sender} -> ${recipient}: ${body.replace(/\n/g, ' ').slice(0, 200)}`;
         newMessages.push(line);
         newCount++;
+        appendNotifications(dmNotifyFile, [line]);
+        saveSeenIds(dmSeenFile, dmSeen);
 
         console.log(`  [${ts.slice(0, 19)}] ${sender} DM -> ${recipient}: ${body.slice(0, 80)}...`);
       }
@@ -451,7 +448,7 @@ export async function startRoomPoller({ rooms, apiKey, handle, interval, config,
       saveSeenIds(dmSeenFile, dmSeen);
 
       if (newCount > 0) {
-        appendNotifications(dmNotifyFile, newMessages);
+        // Notification lines were appended per message above.
         // DMs are addressed to this agent, so they inherently qualify; owner DMs
         // bypass emergency-only, other senders respect it. Cooldown still applies.
         const dmQualifies = hasOwnerMessage || !(await shouldSuppressNudge(config));
