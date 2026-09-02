@@ -180,6 +180,11 @@ Grok Build has no Claude `SessionStart` hook. Copy
 3. Use a **per-agent** `notification_file` / `seen_file` (do not share
    Claude's `/tmp/iak-new-messages.txt`).
 
+**Footgun 2:** two wake paths (a webhook receiver *and* the poller nudge, or the
+app's own scheduled check) answer every mention twice. Declare the one that owns
+the wake in `poller.wake_path` (`nudge` | `webhook` | `automation` | `none`);
+the poller refuses to nudge unless it is `nudge`.
+
 **Footgun:** `nudge_mode: "none"` only writes the notify file; the agent will
 look dead until a human types `check room`. Full write-up:
 [docs/grok-build.md](docs/grok-build.md).

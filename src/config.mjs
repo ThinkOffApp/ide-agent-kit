@@ -16,7 +16,11 @@ const DEFAULT_CONFIG = {
     seen_file: '/tmp/iak-seen-ids.txt',
     api_key: '',
     nudge_mode: 'tmux',
-    nudge_command: ''
+    nudge_command: '',
+    // Which path wakes the agent: 'nudge' (this poller), 'webhook' (a
+    // webhook receiver), 'automation' (the app's own scheduled check) or
+    // 'none'. Exactly one. Empty = 'nudge' unless nudge_mode is 'none'.
+    wake_path: ''
   },
   dm_poller: {
     enabled: false,

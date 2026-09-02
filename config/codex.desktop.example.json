@@ -36,7 +36,8 @@
   "heartbeat_file": "/tmp/iak-poller.heartbeat",
     "handle": "@CodexMB",
     "interval_sec": 60,
-    "nudge_mode": "command",
+    "wake_path": "webhook",
+  "nudge_mode": "none",
     "nudge_command": "/ABSOLUTE/PATH/ide-agent-kit/tools/codex_gui_nudge.sh",
     "notification_file": "/tmp/codex-room-notifications.txt",
     "seen_file": "/tmp/codex-room-seen.txt"
