@@ -27,7 +27,9 @@ case "$*" in *limit=50*) echo "[]";; *) echo '[{"id":"old1","from":"petrus","bod
     const seen = loadSeenIds(seenFile);
     assert.ok(seen.has('old1') && seen.has('new1'), 'both remembered');
     const notify = existsSync(notifyFile) ? readFileSync(notifyFile, 'utf8') : '';
-    assert.ok(!/codex make 2.0 release/.test(notify), 'the March message is not delivered');
+    // #92 appends the asker's previous message as context to the fresh line, so
+    // the March TEXT may appear inside it; what must not exist is a LINE for it.
+    assert.ok(!notify.split('\n').some((l) => l.startsWith('[2026-03-08')), 'the March message is not delivered as a line');
     assert.match(notify, /petrus: claudemm are you there/, 'control: the fresh message is delivered');
     assert.ok(logs.some((l) => /1 message\(s\) older than 21600s marked seen without notifying/.test(l)), logs.join('\n'));
   } finally {

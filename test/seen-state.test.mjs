@@ -33,8 +33,9 @@ test('the live poller remembers each message as it is handled, not once per batc
     const stub = path.join(stubDir, 'curl');
     // first call (seeding, limit=50) must return nothing so the ids are unseen;
     // later calls return the two messages
+    const t1 = new Date(Date.now() - 2000).toISOString(); const t2 = new Date(Date.now() - 1000).toISOString();
     writeFileSync(stub, `#!/bin/sh
-case "$*" in *limit=50*) echo "[]";; *) echo '[{"id":"m1","from":"petrus","body":"hello one","created_at":"2026-09-02T00:00:01Z"},{"id":"m2","from":"petrus","body":123,"created_at":"2026-09-02T00:00:02Z"}]';; esac
+case "$*" in *limit=50*) echo "[]";; *) echo '[{"id":"m1","from":"petrus","body":"hello one","created_at":"${t1}"},{"id":"m2","from":"petrus","body":123,"created_at":"${t2}"}]';; esac
 `);
     chmodSync(stub, 0o755);
     process.env.PATH = `${stubDir}:${savedPath}`;
@@ -66,8 +67,9 @@ test('with #92 thread context: the state-of-play header lands once, before the f
   try {
     const stubDir = path.join(dir, 'bin'); mkdirSync(stubDir);
     const stub = path.join(stubDir, 'curl');
+    const t1 = new Date(Date.now() - 2000).toISOString(); const t2 = new Date(Date.now() - 1000).toISOString();
     writeFileSync(stub, `#!/bin/sh
-case "$*" in *limit=50*) echo "[]";; *) echo '[{"id":"s1","from":"@claudeMB","body":"state: the card is the benchmark table v2, not hardware","created_at":"2026-09-02T00:00:01Z"},{"id":"o1","from":"petrus","body":"claudemm what is the card","created_at":"2026-09-02T00:00:02Z"}]';; esac
+case "$*" in *limit=50*) echo "[]";; *) echo '[{"id":"s1","from":"@claudeMB","body":"state: the card is the benchmark table v2, not hardware","created_at":"${t1}"},{"id":"o1","from":"petrus","body":"claudemm what is the card","created_at":"${t2}"}]';; esac
 `);
     chmodSync(stub, 0o755);
     process.env.PATH = `${stubDir}:${savedPath}`;
