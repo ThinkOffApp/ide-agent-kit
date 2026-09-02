@@ -35,7 +35,12 @@ import { RoomHistory, threadSuffix, previousSuffix, stateOfPlayLine, ownLastPost
 // The marker is written after EACH handled message below, never once per
 // batch: a batch can hold a task that runs for an hour, and a restart inside
 // it replayed a whole day on the M5 (2026-09-01).
-const saveSeenIds = (path, ids) => saveSeenIdsShared(path, ids, 1000);
+// 20000, not 1000: the cap is global across rooms, and thinkoff-development
+// alone produces >1000 messages between restarts, so the quiet rooms' last
+// ids fell off the end of the file and EVERY restart replayed months-old
+// messages as new (2026-09-02: 80+ replayed lines from four rooms).
+const SEEN_CAP = 20000;
+const saveSeenIds = (path, ids) => saveSeenIdsShared(path, ids, SEEN_CAP);
 
 const DM_SEEN_FILE_DEFAULT = '/tmp/iak-dm-seen-ids.txt';
 
@@ -179,6 +184,10 @@ export function seedRoom({ seen, history, room, msgs }) {
 export async function startRoomPoller({ rooms, apiKey, handle, interval, config, sessionOpt }) {
   const seenFile = config?.poller?.seen_file || SEEN_FILE_DEFAULT;
   const heartbeatFile = config?.poller?.heartbeat_file || HEARTBEAT_FILE_DEFAULT;
+  // Belt for the same replay: a message first seen when it is already older
+  // than this is remembered but never notified or queued. Nobody wants a
+  // March question re-delivered in September, whatever the seen-file lost.
+  const maxAgeSec = parsePositiveInt(config?.poller?.max_age_sec, 6 * 3600);
   // Per-room message history: resolves reply targets older than the fetch
   // window, supplies the asker's previous message, the agent's own last post
   // and the room's "state:" facts (issue #90). One file per poller.
@@ -235,6 +244,7 @@ export async function startRoomPoller({ rooms, apiKey, handle, interval, config,
   }
   console.log(`  seen file: ${seenFile}`);
   console.log(`  heartbeat: ${heartbeatFile}`);
+  console.log(`  max age: ${maxAgeSec}s (older first-seen messages are remembered, not delivered)`);
   console.log(`  history: ${historyFile} (fetch ${fetchLimit}/poll)`);
   if (dmEnabled) {
     console.log(`  direct messages: enabled`);
@@ -285,6 +295,7 @@ export async function startRoomPoller({ rooms, apiKey, handle, interval, config,
     try {
     writeHeartbeat(heartbeatFile);
     let newCount = 0;
+    let staleSkipped = 0;
     let hasOwnerMessage = false;
     let hasMention = false;
     const mentionNeedle = (selfHandle.startsWith('@') ? selfHandle : '@' + selfHandle).toLowerCase();
@@ -310,6 +321,12 @@ export async function startRoomPoller({ rooms, apiKey, handle, interval, config,
         const mid = m.id;
         if (!mid || seen.has(mid)) continue;
         seen.add(mid);
+        const ageSec = (Date.now() - Date.parse(m.created_at || '')) / 1000;
+        if (Number.isFinite(ageSec) && ageSec > maxAgeSec) {
+          staleSkipped++;
+          saveSeenIds(seenFile, seen);
+          continue;
+        }
 
         const sender = m.from || m.sender || '?';
         const normalizedSender = normalizeHandle(sender);
@@ -384,6 +401,7 @@ export async function startRoomPoller({ rooms, apiKey, handle, interval, config,
 
     saveSeenIds(seenFile, seen);
     history.save();
+    if (staleSkipped > 0) console.log(`  ${staleSkipped} message(s) older than ${maxAgeSec}s marked seen without notifying`);
 
     if (newCount > 0) {
       // Notification lines were appended per message above.
