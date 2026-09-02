@@ -2,7 +2,7 @@
 // Issue #86: a nudge must not fire while the room poller is down, and the
 // supervisor must say so once (and once more when it is back).
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync, writeFileSync, existsSync, utimesSync, readFileSync, chmodSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync, existsSync, utimesSync, readFileSync, chmodSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { spawnSync, execFile } from 'node:child_process';
@@ -129,4 +129,25 @@ test('poller-health-alert gives up on a stalled POST within the timeout and keep
     assert.equal(hits, 1);
     assert.ok(!existsSync(state), 'no state file after a failed post, so the next loop retries');
   } finally { server.closeAllConnections?.(); server.close(); rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('codex_gui_nudge debounces a second nudge inside the window, and only a real injection stamps it', () => {
+  const dir = mkdtempSync(path.join(tmpdir(), 'iak-debounce-'));
+  try {
+    const log = path.join(dir, 'nudge.log');
+    const hb = path.join(dir, 'hb'); writeHeartbeat(hb);
+    const stamp = path.join(dir, 'last');
+    // a nudge injected 10 s ago -> this one is debounced before any GUI or idle wait
+    writeFileSync(stamp, '');
+    const t = new Date(Date.now() - 10_000); utimesSync(stamp, t, t);
+    const r = spawnSync('bash', [nudge], { encoding: 'utf8', env: { ...process.env, IAK_POLLER_HEARTBEAT: hb, IAK_NUDGE_STAMP: stamp, IAK_NUDGE_DEBOUNCE_SEC: '120', IAK_CODEX_NUDGE_LOG: log } });
+    assert.equal(r.status, 0);
+    assert.match(readFileSync(log, 'utf8'), /debounced \(\d+s since last nudge, window 120s\)/);
+    // an aborted nudge (poller down) must not touch the stamp
+    const stale = path.join(dir, 'none');
+    const before = statSync(stamp).mtimeMs;
+    const r2 = spawnSync('bash', [nudge], { encoding: 'utf8', env: { ...process.env, IAK_POLLER_HEARTBEAT: stale, IAK_NUDGE_STAMP: stamp, IAK_CODEX_NUDGE_LOG: log } });
+    assert.equal(r2.status, 1);
+    assert.equal(statSync(stamp).mtimeMs, before, 'abort paths never write the stamp');
+  } finally { rmSync(dir, { recursive: true, force: true }); }
 });

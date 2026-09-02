@@ -35,6 +35,26 @@ fi
 # WAIT for an idle window rather than skipping: by the time this script runs
 # the poller has marked the message seen, so skipping would consume it
 # undelivered. Exit 1 on timeout so the caller's failure path applies.
+# One wake per window: with the poller alive, its own nudge AND the webhook
+# receiver's nudge both fire for every mention, and the app answers each
+# (two differently worded reviews 8 s apart, every trigger, 2026-09-01/02).
+# Codex reads the whole recent window per nudge, so a second nudge inside
+# the window adds nothing but a duplicate. The stamp is written only at the
+# point of injection below, so an aborted nudge never suppresses the next.
+NUDGE_STAMP="${IAK_NUDGE_STAMP:-/tmp/codex_gui_nudge.last}"
+NUDGE_DEBOUNCE="${IAK_NUDGE_DEBOUNCE_SEC:-120}"
+if [ -f "$NUDGE_STAMP" ]; then
+    LAST_MTIME=$(stat -c %Y "$NUDGE_STAMP" 2>/dev/null || stat -f %m "$NUDGE_STAMP" 2>/dev/null || echo "")
+    case "$LAST_MTIME" in
+        ''|*[!0-9]*) ;;
+        *)
+            SINCE=$(( $(date +%s) - LAST_MTIME ))
+            if [ "$SINCE" -lt "$NUDGE_DEBOUNCE" ]; then
+                printf '[%s] codex_gui_nudge: debounced (%ss since last nudge, window %ss) - the earlier nudge covers this\n' "$(date -u +%FT%TZ)" "$SINCE" "$NUDGE_DEBOUNCE" >>"$NUDGE_LOG_EARLY"
+                exit 0
+            fi ;;
+    esac
+fi
 if ! "$REPO_ROOT/tools/human-idle-guard.sh" --wait 300; then
     echo "nudge aborted: human continuously active" >&2
     exit 1
@@ -149,6 +169,7 @@ PY
     CLICK_X=$((WIN_X + WIN_W / 2))
     CLICK_Y=$((WIN_Y + WIN_H - 72))
     require_human_idle "before cliclick injection" || exit 1
+    touch "$NUDGE_STAMP" 2>/dev/null || true
     if "$CLICLICK_BIN" -r -w 20 "c:${CLICK_X},${CLICK_Y}" "t:${PROMPT_TEXT}" kp:return; then
       printf '[%s] codex_gui_nudge: sent via cliclick x=%s y=%s\n' "$(date -u +%FT%TZ)" "$CLICK_X" "$CLICK_Y" >>"$LOG_FILE"
       exit 0
@@ -158,6 +179,7 @@ PY
 fi
 
 require_human_idle "before AppleScript wake" || exit 0
+touch "$NUDGE_STAMP" 2>/dev/null || true
 
 osascript - "$APP_NAME" "$PROMPT_TEXT" "$LOG_FILE" "$LOCK_PY" "$HUMAN_IDLE_CHECK" "$HUMAN_IDLE_SEC" <<'APPLESCRIPT'
 on run argv
