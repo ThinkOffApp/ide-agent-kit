@@ -169,6 +169,20 @@ export function writeHeartbeat(path) {
   }
 }
 
+/**
+ * First-run seed for one room: every current message is marked seen (do not
+ * answer the backlog) AND stored in the history (do not lose the thread when
+ * the next poll replies to one of them). Exported for the regression test.
+ */
+export function seedRoom({ seen, history, room, msgs }) {
+  let added = 0;
+  for (const m of msgs || []) {
+    if (m && m.id && !seen.has(m.id)) { seen.add(m.id); added++; }
+  }
+  if (history && typeof history.remember === 'function') history.remember(room, msgs || []);
+  return added;
+}
+
 export async function startRoomPoller({ rooms, apiKey, handle, interval, config, sessionOpt }) {
   const seenFile = config?.poller?.seen_file || SEEN_FILE_DEFAULT;
   const heartbeatFile = config?.poller?.heartbeat_file || HEARTBEAT_FILE_DEFAULT;
@@ -243,16 +257,17 @@ export async function startRoomPoller({ rooms, apiKey, handle, interval, config,
   const seen = loadSeenIds(seenFile);
   const dmSeen = dmEnabled ? loadSeenIds(dmSeenFile) : new Set();
 
-  // Seed: mark current messages as seen on first run
+  // Seed: mark current messages as seen on first run, and REMEMBER them, so
+  // a reply to one of these on the very next poll still gets its parent
+  // (codexmb, PR #92 review: seeding without history lost first-run context).
   if (seen.size === 0) {
     console.log(`  seeding seen IDs from current messages...`);
     for (const room of rooms) {
       const msgs = await fetchRoomMessages(room, apiKey, 50);
-      for (const m of msgs) {
-        if (m.id) seen.add(m.id);
-      }
+      seedRoom({ seen, history, room, msgs });
     }
     saveSeenIds(seenFile, seen);
+    history.save();
     console.log(`  seeded ${seen.size} IDs`);
   }
 

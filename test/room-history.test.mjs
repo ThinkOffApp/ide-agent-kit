@@ -7,6 +7,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { RoomHistory, threadSuffix, previousSuffix, stateOfPlayLine, ownLastPostLine } from '../src/common/room-history.mjs';
 import { resolveReplyTargets } from '../src/common/reply-context.mjs';
+import { seedRoom } from '../src/team-relay/room-poller.mjs';
 
 const R = 'thinkoff-development';
 function msg(id, from, body, created_at, reply_to) {
@@ -108,5 +109,25 @@ describe('room-history (issue #90: the thread, not the window)', () => {
     assert.ok(line.includes('YOUR LAST POST HERE (21:36): "PR 24 is ready to merge"'), line);
     assert.equal(ownLastPostLine(h, R, '@claudemb', '2026-09-02T09:00:00Z'), '', 'older than two hours');
     assert.equal(ownLastPostLine(h, R, '@nobody', '2026-09-01T21:50:00Z'), '');
+  });
+});
+
+
+describe('first-run seed keeps the thread (codexmb, PR #92)', () => {
+  it('seeded messages are both seen and remembered, so a reply to one resolves on the next poll', () => {
+    const h = fresh();
+    const seen = new Set();
+    const seeded = [
+      msg('old1', '@claudeMB', 'Card v2 for your review', '2026-09-01T15:46:19Z'),
+      msg('old2', 'petrus', 'But these people get 15 tps?', '2026-09-01T18:53:35Z')
+    ];
+    assert.equal(seedRoom({ seen, history: h, room: R, msgs: seeded }), 2);
+    assert.ok(seen.has('old1') && seen.has('old2'));
+    assert.equal(seedRoom({ seen, history: h, room: R, msgs: seeded }), 0, 'idempotent');
+    // next poll: only the reply is in the window
+    const batch = [msg('new', 'petrus', 'you have a new card which I cant post', '2026-09-01T19:04:46Z', 'old1')];
+    resolveReplyTargets(batch, (id) => h.get(R, id));
+    assert.equal(batch[0]._replyTarget.from, '@claudeMB');
+    assert.ok(threadSuffix(h, R, batch[0]).includes('Card v2 for your review'));
   });
 });
