@@ -171,9 +171,29 @@ export function seedRoom({ seen, history, room, msgs }) {
   let added = 0;
   for (const m of msgs || []) {
     if (m && m.id && !seen.has(m.id)) { seen.add(m.id); added++; }
+    if (history && typeof history.markProcessed === 'function' && m && m.created_at) {
+      history.markProcessed(room, m.created_at);
+    }
   }
   if (history && typeof history.remember === 'function') history.remember(room, msgs || []);
   return added;
+}
+
+/**
+ * Is this fetched message one to handle, or an old one resurfacing? The
+ * seen set is capped, so a wide fetch window can show months-old messages
+ * whose ids were evicted; the room watermark catches those (they are older
+ * than everything already handled) and they are marked seen, never
+ * notified. Exported for the regression test.
+ */
+export function classifyFetched({ seen, history, room, m }) {
+  if (!m || !m.id) return 'skip';
+  if (seen.has(m.id)) return 'seen';
+  if (history && typeof history.isStale === 'function' && history.isStale(room, m.created_at)) {
+    seen.add(m.id);
+    return 'stale';
+  }
+  return 'new';
 }
 
 export async function startRoomPoller({ rooms, apiKey, handle, interval, config, sessionOpt }) {
@@ -306,10 +326,13 @@ export async function startRoomPoller({ rooms, apiKey, handle, interval, config,
       const roomLines = [];
       let roomPriority = false;
       let roomHeaderWritten = false;
+      let staleCount = 0;
       for (const m of msgs) {
         const mid = m.id;
-        if (!mid || seen.has(mid)) continue;
+        const kind = classifyFetched({ seen, history, room, m });
+        if (kind !== 'new') { if (kind === 'stale') staleCount++; continue; }
         seen.add(mid);
+        history.markProcessed(room, m.created_at);
 
         const sender = m.from || m.sender || '?';
         const normalizedSender = normalizeHandle(sender);
@@ -380,6 +403,10 @@ export async function startRoomPoller({ rooms, apiKey, handle, interval, config,
       // Lines and the context header were written per message above;
       // newMessages only feeds the count/log below.
       newMessages.push(...roomLines);
+      if (staleCount) {
+        console.log(`  ${room}: ${staleCount} old message(s) below the watermark ${history.watermark(room)} marked seen, not notified`);
+        saveSeenIds(seenFile, seen);
+      }
     }
 
     saveSeenIds(seenFile, seen);

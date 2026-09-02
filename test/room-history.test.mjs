@@ -7,7 +7,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { RoomHistory, threadSuffix, previousSuffix, stateOfPlayLine, ownLastPostLine } from '../src/common/room-history.mjs';
 import { resolveReplyTargets } from '../src/common/reply-context.mjs';
-import { seedRoom } from '../src/team-relay/room-poller.mjs';
+import { seedRoom, classifyFetched } from '../src/team-relay/room-poller.mjs';
 
 const R = 'thinkoff-development';
 function msg(id, from, body, created_at, reply_to) {
@@ -129,5 +129,37 @@ describe('first-run seed keeps the thread (codexmb, PR #92)', () => {
     resolveReplyTargets(batch, (id) => h.get(R, id));
     assert.equal(batch[0]._replyTarget.from, '@claudeMB');
     assert.ok(threadSuffix(h, R, batch[0]).includes('Card v2 for your review'));
+  });
+});
+
+
+describe('room watermark: evicted old ids must not resurface as new (claudemm, 2 Sep)', () => {
+  it('marks advance on seed and processing, persist, and classify stale vs new', () => {
+    const h = fresh();
+    const seen = new Set();
+    seedRoom({ seen, history: h, room: R, msgs: [
+      msg('s1', 'petrus', 'old one', '2026-06-01T10:00:00Z'),
+      msg('s2', 'petrus', 'old two', '2026-08-31T12:00:00Z')
+    ] });
+    assert.equal(h.watermark(R), '2026-08-31T12:00:00.000Z');
+    assert.ok(h.save());
+    const again = new RoomHistory(h.path);
+    assert.equal(again.watermark(R), '2026-08-31T12:00:00.000Z', 'watermark survives restart');
+    assert.equal(again.get(R, 's2').body, 'old two', 'rooms still load beside the marks');
+    // the seen cap evicted every old id: a wide window now shows a February message
+    const evicted = new Set();
+    const feb = msg('feb', 'petrus', 'from february', '2026-02-10T09:00:00Z');
+    assert.equal(classifyFetched({ seen: evicted, history: again, room: R, m: feb }), 'stale');
+    assert.ok(evicted.has('feb'), 'stale message is marked seen so it never comes back');
+    // a genuinely new message is new; one 60 s before the mark is within tolerance
+    assert.equal(classifyFetched({ seen: evicted, history: again, room: R, m: msg('n1', 'petrus', 'new', '2026-09-02T14:50:00Z') }), 'new');
+    assert.equal(classifyFetched({ seen: evicted, history: again, room: R, m: msg('n2', 'petrus', 'late arrival', '2026-08-31T11:59:00Z') }), 'new');
+    evicted.add('n2');   // the loop adds a NEW id after classifying it
+    assert.equal(classifyFetched({ seen: evicted, history: again, room: R, m: msg('n2', 'petrus', 'dup', '2026-08-31T11:59:00Z') }), 'seen');
+    again.markProcessed(R, '2026-09-02T14:50:00Z');
+    again.markProcessed(R, '2026-09-01T00:00:00Z');   // older: never moves the mark back
+    assert.equal(again.watermark(R), '2026-09-02T14:50:00.000Z');
+    // no watermark yet (fresh poller, first run): nothing is stale
+    assert.equal(classifyFetched({ seen: new Set(), history: fresh(), room: R, m: feb }), 'new');
   });
 });
