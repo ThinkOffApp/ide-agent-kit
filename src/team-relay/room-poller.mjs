@@ -1,4 +1,5 @@
 import { NOTIFY_FILE_DEFAULT, SEEN_FILE_DEFAULT, QUEUE_PATH_DEFAULT } from '../common/constants.mjs';
+import { loadSeenIds, saveSeenIds as saveSeenIdsShared } from '../common/seen-ids.mjs';
 import { enrichEvent } from './enrichment.mjs';
 // SPDX-License-Identifier: AGPL-3.0-only
 
@@ -9,6 +10,7 @@ import { nudgeCommand } from '../utils.mjs';
 import { shouldSuppressNudge } from '../intent.mjs';
 import { resolveSelfHandle } from '../common/handles.mjs';
 import { resolveReplyTargets, replyAnnotation } from '../common/reply-context.mjs';
+import { RoomHistory, threadSuffix, previousSuffix, stateOfPlayLine, ownLastPostLine } from '../common/room-history.mjs';
 
 /**
  * Room Poller — polls GroupMind rooms and notifies IDE agent of new messages.
@@ -29,19 +31,11 @@ import { resolveReplyTargets, replyAnnotation } from '../common/reply-context.mj
 
 
 
-function loadSeenIds(path) {
-  try {
-    return new Set(readFileSync(path, 'utf8').split('\n').filter(Boolean));
-  } catch {
-    return new Set();
-  }
-}
-
-function saveSeenIds(path, ids) {
-  // Keep last 1000 IDs to prevent unbounded growth
-  const arr = [...ids].slice(-1000);
-  writeFileSync(path, arr.join('\n') + '\n');
-}
+// Seen-state comes from the shared module (atomic + fsynced, issue #90).
+// The marker is written after EACH handled message below, never once per
+// batch: a batch can hold a task that runs for an hour, and a restart inside
+// it replayed a whole day on the M5 (2026-09-01).
+const saveSeenIds = (path, ids) => saveSeenIdsShared(path, ids, 1000);
 
 const DM_SEEN_FILE_DEFAULT = '/tmp/iak-dm-seen-ids.txt';
 
@@ -168,9 +162,29 @@ export function writeHeartbeat(path) {
   }
 }
 
+/**
+ * First-run seed for one room: every current message is marked seen (do not
+ * answer the backlog) AND stored in the history (do not lose the thread when
+ * the next poll replies to one of them). Exported for the regression test.
+ */
+export function seedRoom({ seen, history, room, msgs }) {
+  let added = 0;
+  for (const m of msgs || []) {
+    if (m && m.id && !seen.has(m.id)) { seen.add(m.id); added++; }
+  }
+  if (history && typeof history.remember === 'function') history.remember(room, msgs || []);
+  return added;
+}
+
 export async function startRoomPoller({ rooms, apiKey, handle, interval, config, sessionOpt }) {
   const seenFile = config?.poller?.seen_file || SEEN_FILE_DEFAULT;
   const heartbeatFile = config?.poller?.heartbeat_file || HEARTBEAT_FILE_DEFAULT;
+  // Per-room message history: resolves reply targets older than the fetch
+  // window, supplies the asker's previous message, the agent's own last post
+  // and the room's "state:" facts (issue #90). One file per poller.
+  const historyFile = config?.poller?.history_file || seenFile.replace(/\.txt$/, '') + '-history.json';
+  const fetchLimit = parsePositiveInt(config?.poller?.fetch_limit, 25);
+  const history = new RoomHistory(historyFile);
   const notifyFile = config?.poller?.notification_file || NOTIFY_FILE_DEFAULT;
   const queuePath = config?.queue?.path || './ide-agent-queue.jsonl';
   const session = sessionOpt || config?.tmux?.ide_session || config?.tmux?.default_session || 'claude';
@@ -221,6 +235,7 @@ export async function startRoomPoller({ rooms, apiKey, handle, interval, config,
   }
   console.log(`  seen file: ${seenFile}`);
   console.log(`  heartbeat: ${heartbeatFile}`);
+  console.log(`  history: ${historyFile} (fetch ${fetchLimit}/poll)`);
   if (dmEnabled) {
     console.log(`  direct messages: enabled`);
     console.log(`    dm handle: ${dmHandle}`);
@@ -235,16 +250,17 @@ export async function startRoomPoller({ rooms, apiKey, handle, interval, config,
   const seen = loadSeenIds(seenFile);
   const dmSeen = dmEnabled ? loadSeenIds(dmSeenFile) : new Set();
 
-  // Seed: mark current messages as seen on first run
+  // Seed: mark current messages as seen on first run, and REMEMBER them, so
+  // a reply to one of these on the very next poll still gets its parent
+  // (codexmb, PR #92 review: seeding without history lost first-run context).
   if (seen.size === 0) {
     console.log(`  seeding seen IDs from current messages...`);
     for (const room of rooms) {
       const msgs = await fetchRoomMessages(room, apiKey, 50);
-      for (const m of msgs) {
-        if (m.id) seen.add(m.id);
-      }
+      seedRoom({ seen, history, room, msgs });
     }
     saveSeenIds(seenFile, seen);
+    history.save();
     console.log(`  seeded ${seen.size} IDs`);
   }
 
@@ -274,8 +290,22 @@ export async function startRoomPoller({ rooms, apiKey, handle, interval, config,
     const mentionNeedle = (selfHandle.startsWith('@') ? selfHandle : '@' + selfHandle).toLowerCase();
     const newMessages = [];
     for (const room of rooms) {
-      const msgs = await fetchRoomMessages(room, apiKey);
-      resolveReplyTargets(msgs);
+      let msgs = await fetchRoomMessages(room, apiKey, fetchLimit);
+      history.remember(room, msgs);
+      const lookup = (id) => history.get(room, id);
+      resolveReplyTargets(msgs, lookup);
+      // A reply whose target is older than both the window and our history:
+      // one deeper fetch per room per poll, then resolve again.
+      if (msgs.some((m) => m._replyToId && !m._replyTarget && !seen.has(m.id))) {
+        const deeper = await fetchRoomMessages(room, apiKey, 100);
+        if (deeper.length) {
+          history.remember(room, deeper);
+          resolveReplyTargets(msgs, lookup);
+        }
+      }
+      const roomLines = [];
+      let roomPriority = false;
+      let roomHeaderWritten = false;
       for (const m of msgs) {
         const mid = m.id;
         if (!mid || seen.has(mid)) continue;
@@ -285,8 +315,21 @@ export async function startRoomPoller({ rooms, apiKey, handle, interval, config,
         const normalizedSender = normalizeHandle(sender);
         // Skip own messages
         if (normalizedSender === selfHandle) continue;
-        if (normalizedSender === ownerHandle) hasOwnerMessage = true;
-        if ((m.body || '').toLowerCase().includes(mentionNeedle)) hasMention = true;
+        const mentionsSelf = (m.body || '').toLowerCase().includes(mentionNeedle);
+        if (normalizedSender === ownerHandle) { hasOwnerMessage = true; roomPriority = true; }
+        if (mentionsSelf) { hasMention = true; roomPriority = true; }
+        // Context header (settled facts, our own last post) goes to the
+        // notification file once per room, right before the first line that
+        // makes this batch worth a wake - so the reader still sees header
+        // then lines, while every line is on disk before its seen-marker
+        // (#91 per-message durability on top of #92's thread context).
+        if (roomPriority && !roomHeaderWritten) {
+          roomHeaderWritten = true;
+          const sop = stateOfPlayLine(history, room);
+          if (sop) appendNotifications(notifyFile, [sop]);
+          const own = ownLastPostLine(history, room, selfHandle);
+          if (own) appendNotifications(notifyFile, [own]);
+        }
 
         let body = (m.body || '').slice(0, 500);
         // Surface attachments (2026-07-19 lost-screenshot lesson): an
@@ -318,21 +361,32 @@ export async function startRoomPoller({ rooms, apiKey, handle, interval, config,
         const event = await enrichEvent(rawEvent, config);
         appendFileSync(queuePath, JSON.stringify(event) + '\n');
 
-        // Collect for notification file
-        const line = `[${ts.slice(0, 19)}] [${room}] ${sender}: ${body.replace(/\n/g, ' ').slice(0, 200)}`
-          + replyAnnotation(m._replyToId, m._replyTarget);
-        newMessages.push(line);
+        // Collect for notification file. ONE physical line per message
+        // (readers split on \n and count lines), so the thread rides inside
+        // the line: parent in full, chain above it, and for owner messages
+        // or mentions the asker's previous message (issue #90).
+        const thread = threadSuffix(history, room, m) || replyAnnotation(m._replyToId, m._replyTarget);
+        const prev = (normalizedSender === ownerHandle || mentionsSelf) ? previousSuffix(history, room, m) : '';
+        const line = `[${ts.slice(0, 19)}] [${room}] ${sender}: ${body.replace(/\n/g, ' ').slice(0, 400)}`
+          + thread + prev;
+        roomLines.push(line);
         newCount++;
+        // Handled = queued + notified; only then is it safe to remember it.
+        appendNotifications(notifyFile, [line]);
+        saveSeenIds(seenFile, seen);
 
         console.log(`  [${ts.slice(0, 19)}] ${sender} in ${room}: ${body.slice(0, 80)}...`);
       }
+      // Lines and the context header were written per message above;
+      // newMessages only feeds the count/log below.
+      newMessages.push(...roomLines);
     }
 
     saveSeenIds(seenFile, seen);
+    history.save();
 
     if (newCount > 0) {
-      // Primary: write to notification file (always works)
-      appendNotifications(notifyFile, newMessages);
+      // Notification lines were appended per message above.
       // Owner messages always qualify; agent @-mentions qualify unless the user
       // is in emergency-only mode (that mode exists to mute agent chatter).
       const mentionQualifies = hasMention && !hasOwnerMessage ? !(await shouldSuppressNudge(config)) : hasMention;
@@ -389,6 +443,8 @@ export async function startRoomPoller({ rooms, apiKey, handle, interval, config,
         const line = `[${ts.slice(0, 19)}] [dm] ${sender} -> ${recipient}: ${body.replace(/\n/g, ' ').slice(0, 200)}`;
         newMessages.push(line);
         newCount++;
+        appendNotifications(dmNotifyFile, [line]);
+        saveSeenIds(dmSeenFile, dmSeen);
 
         console.log(`  [${ts.slice(0, 19)}] ${sender} DM -> ${recipient}: ${body.slice(0, 80)}...`);
       }
@@ -396,7 +452,7 @@ export async function startRoomPoller({ rooms, apiKey, handle, interval, config,
       saveSeenIds(dmSeenFile, dmSeen);
 
       if (newCount > 0) {
-        appendNotifications(dmNotifyFile, newMessages);
+        // Notification lines were appended per message above.
         // DMs are addressed to this agent, so they inherently qualify; owner DMs
         // bypass emergency-only, other senders respect it. Cooldown still applies.
         const dmQualifies = hasOwnerMessage || !(await shouldSuppressNudge(config));

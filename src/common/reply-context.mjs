@@ -35,14 +35,21 @@ export function embeddedTargetOf(raw) {
  * object form when the target is older than the window. Sets m._replyToId
  * and m._replyTarget in place; returns the batch for chaining.
  */
-export function resolveReplyTargets(msgs) {
+export function resolveReplyTargets(msgs, lookup) {
   const byId = new Map(msgs.map((m) => [m.id, m]));
   for (const m of msgs) {
     const replyId = replyIdOf(m.reply_to);
     if (replyId) m._replyToId = replyId;
-    if (replyId && byId.has(replyId)) {
-      const t = byId.get(replyId);
-      m._replyTarget = { from: t.from || t.sender || '?', body: (t.body || '').slice(0, 120) };
+    if (!replyId) continue;
+    let t = byId.get(replyId) || null;
+    // Outside the poll window: ask the caller's history (issue #90). The
+    // room API has no single-message fetch, so this is the only way an
+    // older parent ever resolves.
+    if (!t && typeof lookup === 'function') {
+      try { t = lookup(replyId) || null; } catch { t = null; }
+    }
+    if (t) {
+      m._replyTarget = { from: t.from || t.sender || '?', body: (t.body || '').slice(0, 300), created_at: t.created_at || '' };
     } else {
       const embedded = embeddedTargetOf(m.reply_to);
       if (embedded) m._replyTarget = embedded;
