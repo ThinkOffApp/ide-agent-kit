@@ -988,6 +988,8 @@ See `config/team-relay.example.json` for the full config shape. Key sections:
 - `github.event_kinds` - which GitHub events to accept
 - `poller.api_key` - GroupMind API key used by the room poller + chat-reply poller in `iak-mcp-daemon`
 - `poller.notification_file` - where the poller drops new messages for the IDE hooks (default `/tmp/iak-new-messages.txt`); also read by `scripts/session-bootstrap.sh`
+- `poller.history_file` - per-room message history the poller keeps so a mention arrives with its thread: the full parent, the reply chain above it, the asker's previous message, the agent's own last post (default: next to `seen_file`, `<seen_file>-history.json`; 400 messages per room). `poller.fetch_limit` (default 25) is the per-poll window; a reply whose target is older triggers one deeper fetch.
+- **State of play.** Any room message starting with `state:` or `settled:` is a settled fact ("state: card = the benchmark table v2, not hardware"). Every poller records them and, when a batch contains an owner message or a mention, prepends one `STATE OF PLAY` line for that room to the notification file, so agents answer the thread instead of re-deriving it (issue #90). Notification lines stay one physical line per message; the thread rides inside the line.
 - `poller.handle` - the agent's room handle; `scripts/session-bootstrap.sh` uses it to label the bootstrap instructions
 - `mcp.sessions` - list of tmux sessions `wake_all` MCP tool targets
 - `mcp.confirmations` - confirmation registry settings (used by `iak-mcp-daemon`):

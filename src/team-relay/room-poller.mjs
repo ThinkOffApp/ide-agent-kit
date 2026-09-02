@@ -9,6 +9,7 @@ import { nudgeCommand } from '../utils.mjs';
 import { shouldSuppressNudge } from '../intent.mjs';
 import { resolveSelfHandle } from '../common/handles.mjs';
 import { resolveReplyTargets, replyAnnotation } from '../common/reply-context.mjs';
+import { RoomHistory, threadSuffix, previousSuffix, stateOfPlayLine, ownLastPostLine } from '../common/room-history.mjs';
 
 /**
  * Room Poller — polls GroupMind rooms and notifies IDE agent of new messages.
@@ -171,6 +172,12 @@ export function writeHeartbeat(path) {
 export async function startRoomPoller({ rooms, apiKey, handle, interval, config, sessionOpt }) {
   const seenFile = config?.poller?.seen_file || SEEN_FILE_DEFAULT;
   const heartbeatFile = config?.poller?.heartbeat_file || HEARTBEAT_FILE_DEFAULT;
+  // Per-room message history: resolves reply targets older than the fetch
+  // window, supplies the asker's previous message, the agent's own last post
+  // and the room's "state:" facts (issue #90). One file per poller.
+  const historyFile = config?.poller?.history_file || seenFile.replace(/\.txt$/, '') + '-history.json';
+  const fetchLimit = parsePositiveInt(config?.poller?.fetch_limit, 25);
+  const history = new RoomHistory(historyFile);
   const notifyFile = config?.poller?.notification_file || NOTIFY_FILE_DEFAULT;
   const queuePath = config?.queue?.path || './ide-agent-queue.jsonl';
   const session = sessionOpt || config?.tmux?.ide_session || config?.tmux?.default_session || 'claude';
@@ -221,6 +228,7 @@ export async function startRoomPoller({ rooms, apiKey, handle, interval, config,
   }
   console.log(`  seen file: ${seenFile}`);
   console.log(`  heartbeat: ${heartbeatFile}`);
+  console.log(`  history: ${historyFile} (fetch ${fetchLimit}/poll)`);
   if (dmEnabled) {
     console.log(`  direct messages: enabled`);
     console.log(`    dm handle: ${dmHandle}`);
@@ -274,8 +282,21 @@ export async function startRoomPoller({ rooms, apiKey, handle, interval, config,
     const mentionNeedle = (selfHandle.startsWith('@') ? selfHandle : '@' + selfHandle).toLowerCase();
     const newMessages = [];
     for (const room of rooms) {
-      const msgs = await fetchRoomMessages(room, apiKey);
-      resolveReplyTargets(msgs);
+      let msgs = await fetchRoomMessages(room, apiKey, fetchLimit);
+      history.remember(room, msgs);
+      const lookup = (id) => history.get(room, id);
+      resolveReplyTargets(msgs, lookup);
+      // A reply whose target is older than both the window and our history:
+      // one deeper fetch per room per poll, then resolve again.
+      if (msgs.some((m) => m._replyToId && !m._replyTarget && !seen.has(m.id))) {
+        const deeper = await fetchRoomMessages(room, apiKey, 100);
+        if (deeper.length) {
+          history.remember(room, deeper);
+          resolveReplyTargets(msgs, lookup);
+        }
+      }
+      const roomLines = [];
+      let roomPriority = false;
       for (const m of msgs) {
         const mid = m.id;
         if (!mid || seen.has(mid)) continue;
@@ -285,8 +306,9 @@ export async function startRoomPoller({ rooms, apiKey, handle, interval, config,
         const normalizedSender = normalizeHandle(sender);
         // Skip own messages
         if (normalizedSender === selfHandle) continue;
-        if (normalizedSender === ownerHandle) hasOwnerMessage = true;
-        if ((m.body || '').toLowerCase().includes(mentionNeedle)) hasMention = true;
+        const mentionsSelf = (m.body || '').toLowerCase().includes(mentionNeedle);
+        if (normalizedSender === ownerHandle) { hasOwnerMessage = true; roomPriority = true; }
+        if (mentionsSelf) { hasMention = true; roomPriority = true; }
 
         let body = (m.body || '').slice(0, 500);
         // Surface attachments (2026-07-19 lost-screenshot lesson): an
@@ -318,17 +340,35 @@ export async function startRoomPoller({ rooms, apiKey, handle, interval, config,
         const event = await enrichEvent(rawEvent, config);
         appendFileSync(queuePath, JSON.stringify(event) + '\n');
 
-        // Collect for notification file
-        const line = `[${ts.slice(0, 19)}] [${room}] ${sender}: ${body.replace(/\n/g, ' ').slice(0, 200)}`
-          + replyAnnotation(m._replyToId, m._replyTarget);
-        newMessages.push(line);
+        // Collect for notification file. ONE physical line per message
+        // (readers split on \n and count lines), so the thread rides inside
+        // the line: parent in full, chain above it, and for owner messages
+        // or mentions the asker's previous message (issue #90).
+        const thread = threadSuffix(history, room, m) || replyAnnotation(m._replyToId, m._replyTarget);
+        const prev = (normalizedSender === ownerHandle || mentionsSelf) ? previousSuffix(history, room, m) : '';
+        const line = `[${ts.slice(0, 19)}] [${room}] ${sender}: ${body.replace(/\n/g, ' ').slice(0, 400)}`
+          + thread + prev;
+        roomLines.push(line);
         newCount++;
 
         console.log(`  [${ts.slice(0, 19)}] ${sender} in ${room}: ${body.slice(0, 80)}...`);
       }
+      if (roomLines.length) {
+        // Context header, only when this batch is worth a wake for this room:
+        // the settled facts and what we ourselves said last, so the agent
+        // answers the thread instead of re-verifying or re-answering.
+        if (roomPriority) {
+          const sop = stateOfPlayLine(history, room);
+          if (sop) newMessages.push(sop);
+          const own = ownLastPostLine(history, room, selfHandle);
+          if (own) newMessages.push(own);
+        }
+        newMessages.push(...roomLines);
+      }
     }
 
     saveSeenIds(seenFile, seen);
+    history.save();
 
     if (newCount > 0) {
       // Primary: write to notification file (always works)
