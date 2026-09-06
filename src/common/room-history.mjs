@@ -24,6 +24,13 @@ import { replyIdOf } from './reply-context.mjs';
 
 const BODY_KEEP = 600;
 export const STATE_PREFIX = /^\s*(?:state|settled)\s*:\s*(.+)$/i;
+const MARKS_KEY = '_marks';
+// A message this much older than the room's watermark, and not in the seen
+// set, is treated as already handled: the seen-id cap (2000 ids across all
+// rooms) evicts old ids, and a fetch window wider than 10 then re-surfaces
+// months-old messages in quiet rooms as "new" (claudemm, 2 Sep 2026, after
+// #92 raised the window to 25). The tolerance covers out-of-order arrival.
+export const STALE_TOLERANCE_S = 120;
 
 function oneLine(s, n) {
   return String(s || '').replace(/\s+/g, ' ').trim().slice(0, n);
@@ -39,15 +46,21 @@ export class RoomHistory {
     this.path = path;
     this.maxPerRoom = maxPerRoom;
     this.rooms = {};
+    this.marks = {};   // room -> newest created_at ever processed or seeded
     this.load();
   }
 
   load() {
     try {
       const data = JSON.parse(readFileSync(this.path, 'utf8'));
-      if (data && typeof data === 'object') this.rooms = data;
+      if (data && typeof data === 'object') {
+        const { [MARKS_KEY]: marks, ...rooms } = data;
+        this.rooms = rooms;
+        this.marks = (marks && typeof marks === 'object') ? marks : {};
+      }
     } catch {
       this.rooms = {};
+      this.marks = {};
     }
   }
 
@@ -55,12 +68,41 @@ export class RoomHistory {
     try {
       mkdirSync(dirname(this.path), { recursive: true });
       const tmp = this.path + '.tmp';
-      writeFileSync(tmp, JSON.stringify(this.rooms));
+      writeFileSync(tmp, JSON.stringify({ ...this.rooms, [MARKS_KEY]: this.marks }));
       renameSync(tmp, this.path);
       return true;
     } catch {
       return false;
     }
+  }
+
+  /** Advance the room's watermark to `createdAt` if it is newer. */
+  markProcessed(room, createdAt) {
+    if (!room || !createdAt) return;
+    const t = Date.parse(createdAt);
+    if (!Number.isFinite(t)) return;
+    const cur = Date.parse(this.marks[room] || '');
+    if (!Number.isFinite(cur) || t > cur) this.marks[room] = new Date(t).toISOString();
+  }
+
+  watermark(room) {
+    return this.marks[room] || '';
+  }
+
+  /**
+   * True when a message is older than the room's watermark by more than the
+   * tolerance: it predates everything already handled here, so it can only
+   * be an evicted-from-seen resurfacing, never a genuinely new message.
+   */
+  isStale(room, createdAt, toleranceS = STALE_TOLERANCE_S, markIso = this.marks[room]) {
+    // `markIso` lets a caller classify a whole batch against the watermark as
+    // it stood BEFORE the batch: advancing it per message would let the first
+    // new message in a newest-first batch hide the backlog behind it (codex
+    // review of PR #95).
+    const mark = Date.parse(markIso || '');
+    const t = Date.parse(createdAt || '');
+    if (!Number.isFinite(mark) || !Number.isFinite(t)) return false;
+    return t < mark - toleranceS * 1000;
   }
 
   /** Add or refresh a fetched batch. Idempotent; keeps newest-last order. */
