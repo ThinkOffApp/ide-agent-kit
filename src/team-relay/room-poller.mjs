@@ -217,6 +217,12 @@ export async function startRoomPoller({ rooms, apiKey, handle, interval, config,
   const session = sessionOpt || config?.tmux?.ide_session || config?.tmux?.default_session || 'claude';
   const nudgeText = config?.tmux?.nudge_text || 'check rooms';
   const nudgeMode = config?.poller?.nudge_mode || 'tmux';
+  // Exactly one wake path per agent (issue #90 item 4). On 2026-09-01 the
+  // codexmb poller nudged on top of a webhook receiver and the app's own
+  // scheduled check, and every mention got two or three answers. The path
+  // is a config fact: this poller nudges only when it owns the wake.
+  const wakePath = String(config?.poller?.wake_path || (nudgeMode === 'none' ? 'none' : 'nudge')).toLowerCase();
+  const pollerOwnsWake = wakePath === 'nudge';
   const nudgeCommandText = config?.poller?.nudge_command || '';
   const pollInterval = parsePositiveInt(interval || config?.poller?.interval_sec, 30);
   const selfHandle = normalizeHandle(resolveSelfHandle({ explicit: handle, config }));
@@ -232,6 +238,7 @@ export async function startRoomPoller({ rooms, apiKey, handle, interval, config,
   let lastNudgeAt = 0;
   function nudgeGate(hasPriority) {
     if (!hasPriority) return { fire: false, why: 'no owner/mention in batch' };
+    if (!pollerOwnsWake) return { fire: false, why: `wake path is ${wakePath}, not this poller` };
     const now = Date.now();
     if (now - lastNudgeAt < nudgeCooldownSec * 1000) {
       return { fire: false, why: `cooldown ${nudgeCooldownSec}s` };
@@ -255,6 +262,11 @@ export async function startRoomPoller({ rooms, apiKey, handle, interval, config,
   console.log(`  interval: ${pollInterval}s`);
   console.log(`  notification file: ${notifyFile}`);
   console.log(`  nudge mode: ${nudgeMode}`);
+  console.log(`  wake path: ${wakePath}${pollerOwnsWake ? '' : ' (this poller will not nudge)'}`);
+  if (!pollerOwnsWake && nudgeMode !== 'none') {
+    console.error(`  WARNING: poller.nudge_mode is '${nudgeMode}' but poller.wake_path is '${wakePath}': ` +
+      'the wake belongs to another path, so nudges from this poller are refused. Set nudge_mode to none to silence this.');
+  }
   if (nudgeMode === 'tmux') {
     console.log(`  tmux session: ${session} (optional)`);
   } else if (nudgeMode === 'command') {
