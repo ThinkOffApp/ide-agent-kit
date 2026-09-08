@@ -313,3 +313,17 @@ test('a hostile process table never takes the heartbeat down', () => {
   assert.ok(!('model' in host));
   assert.ok('load_1m' in host, 'lost the other vitals along with the model');
 });
+
+test('a voice stack with lower pids does not become the served model (VTA layout)', () => {
+  // pid order: whisper, piper and a python -m all come before llama-server
+  const table = [
+    ['/opt/whisper/whisper-server', '-m', '/models/ggml-large-v3-turbo.bin', '--port', '8090'],
+    ['/usr/bin/piper', '--model', '/models/fi_FI-harri-medium.onnx'],
+    ['/usr/bin/python3', '-m', 'http.server'],
+    LLAMA,
+  ];
+  const host = collectHostTelemetry({ sources: sources({ processes: table }) });
+  assert.equal(host.model, 'Qwen3.8-Flash-Next-UD-IQ3_XXS.gguf');
+  // and with the model server gone, the voice stack still is not "the model"
+  assert.ok(!('model' in collectHostTelemetry({ sources: sources({ processes: table.slice(0, 3) }) })));
+});
