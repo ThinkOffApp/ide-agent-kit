@@ -18,6 +18,7 @@
 
 import { execFileSync } from 'node:child_process';
 import { readFileSync, readdirSync } from 'node:fs';
+import { basename } from 'node:path';
 import { cpus, freemem, loadavg, platform, totalmem } from 'node:os';
 
 /** Plausible CPU die temperatures. Outside this, assume the sensor lied. */
@@ -71,8 +72,96 @@ export const defaultSources = {
   },
   run,
   listThermalZones: () => readdirSync(THERMAL_ROOT).filter((z) => z.startsWith('thermal_zone')),
+  // argv of every process this user may read, Linux only. `comm` is checked
+  // first so the 30 s poll reads one small file per process and the full
+  // command line only for the handful that could be a model server.
+  listProcessCommandLines: () => {
+    if (platform() !== 'linux') return [];
+    const out = [];
+    for (const pid of readdirSync('/proc')) {
+      if (!/^\d+$/.test(pid)) continue;
+      try {
+        const comm = readFileSync(`/proc/${pid}/comm`, 'utf8').trim();
+        if (!MODEL_SERVER_COMM.test(comm)) continue;
+        const argv = readFileSync(`/proc/${pid}/cmdline`, 'utf8').split('\0').filter(Boolean);
+        if (argv.length) out.push(argv);
+      } catch {
+        // Gone or unreadable: not ours to report.
+      }
+    }
+    return out;
+  },
   readThermalZone: (zone) => readFileSync(`${THERMAL_ROOT}/${zone}/temp`, 'utf8'),
 };
+
+/**
+ * Process names that serve a model and say which one on their command line.
+ * llama.cpp's server takes the weights as `-m path.gguf`; that path is the
+ * one honest source of "what is this box serving" — a config file can say
+ * anything while the server runs something else.
+ */
+const MODEL_SERVER_COMM = /^llama-server/;
+
+/** Multi-part GGUF files carry a shard suffix; the model is the stem. */
+const GGUF_SHARD_SUFFIX = /-\d{5}-of-\d{5}(?=\.gguf$)/i;
+
+/**
+ * The served model's name from a model server's argv, or undefined.
+ *
+ * Exported for tests and for anything else that has a command line and wants
+ * the same answer the heartbeat publishes.
+ *
+ * @param {string[]} argv
+ * @returns {string|undefined} e.g. "Qwen3.8-Flash-Next-UD-IQ3_XXS.gguf"
+ */
+export function modelFromCommandLine(argv) {
+  if (!Array.isArray(argv) || !argv.length) return undefined;
+  if (!MODEL_SERVER_COMM.test(basename(String(argv[0])))) return undefined;
+
+  let path;
+  for (let i = 1; i < argv.length; i += 1) {
+    const arg = String(argv[i]);
+    if (arg === '-m' || arg === '--model') {
+      path = argv[i + 1];
+      break;
+    }
+    if (arg.startsWith('--model=')) {
+      path = arg.slice('--model='.length);
+      break;
+    }
+  }
+  if (!path) return undefined;
+
+  const name = basename(String(path)).replace(GGUF_SHARD_SUFFIX, '');
+  return name || undefined;
+}
+
+/**
+ * Which model this host is serving, if any.
+ *
+ * An explicit name always wins: the operator knows what a box is for even
+ * when the server is between restarts. Otherwise, on Linux, the running
+ * llama-server's own command line answers — it is read on every poll, so a
+ * model swap shows within one heartbeat instead of freezing at the name the
+ * daemon started with. A host serving nothing publishes no model at all,
+ * per the omit-not-fake contract: an idle box and a box whose model we could
+ * not read must look the same as each other, not the same as a box serving
+ * something.
+ *
+ * @returns {string|undefined}
+ */
+function readModel(sources, explicit) {
+  const given = typeof explicit === 'string' ? explicit.trim() : '';
+  if (given) return given;
+
+  if (sources.platform() !== 'linux') return undefined;
+  const lines = sources.listProcessCommandLines?.() || [];
+  for (const argv of lines) {
+    const name = modelFromCommandLine(argv);
+    if (name) return name;
+  }
+  return undefined;
+}
 
 /**
  * CPU load, normalised so devices of different sizes are comparable.
@@ -256,10 +345,12 @@ function readLinuxTempC(sources) {
  * @param {string} [opts.kind] - role the fleet knows this box by ("car-pi",
  *   "mac-mini"); the Pi already publishes this, so Macs use the same word
  *   rather than inventing a second vocabulary for the same idea
+ * @param {string} [opts.model] - what this box serves, when the operator
+ *   states it; otherwise discovered from a running model server on Linux
  * @param {object} [opts.sources] - injectable sensor reads, for tests
  * @returns {object} only the fields that were readable
  */
-export function collectHostTelemetry({ machine, kind, sources = defaultSources } = {}) {
+export function collectHostTelemetry({ machine, kind, model, sources = defaultSources } = {}) {
   const host = {};
   if (machine) host.machine = machine;
   if (kind) host.kind = kind;
@@ -296,6 +387,13 @@ export function collectHostTelemetry({ machine, kind, sources = defaultSources }
     Object.assign(host, readNetwork(sources));
   } catch {
     // Same: an unknown link is published as no link, not a wrong one.
+  }
+
+  try {
+    const served = readModel(sources, model);
+    if (served) host.model = served;
+  } catch {
+    // A box we cannot ask publishes no model, never a stale one.
   }
 
   return host;

@@ -18,6 +18,12 @@
  *                        devices view (mac-mini, car-pi, linux-server).
  *                        Without it a row renders with a blank type,
  *                        which is how the M5 first appeared (2026-08-29).
+ *   INTENT_DEVICE_MODEL  default: unset - what this box serves, shown on
+ *                        its device card next to the Pi's GGUF name. Leave
+ *                        unset on Linux to read it from the running
+ *                        llama-server's command line on every poll (a
+ *                        model swap shows within one heartbeat); set it
+ *                        where nothing on the box can be asked.
  *   INTENT_DEVICE_PUBLISH default: 1 - set to 0 on a SECONDARY daemon (a
  *                        second agent's presence beat on the same machine)
  *                        so exactly one daemon owns the device row; two
@@ -36,6 +42,7 @@ const userId = process.env.INTENT_USER_ID;
 const agentHandle = process.env.INTENT_AGENT_HANDLE || '@agent';
 const deviceId = process.env.INTENT_DEVICE_ID || hostname();
 const deviceKind = process.env.INTENT_DEVICE_KIND || undefined;
+const deviceModel = process.env.INTENT_DEVICE_MODEL || undefined;
 const publishDevice = process.env.INTENT_DEVICE_PUBLISH !== '0';
 const pollIntervalMs = Number(process.env.POLL_INTERVAL_MS || 30000);
 
@@ -60,7 +67,7 @@ if (userId.toLowerCase() === agentHandle.replace(/^@/, '').toLowerCase()) {
 
 const client = new IntentClient({ baseUrl, apiKey, userId, deviceId });
 const iak = new IAKAdapter(client, { agentHandle, machine: deviceId });
-const desktop = new DesktopAdapter(client, { pollIntervalMs, machine: deviceId, kind: deviceKind });
+const desktop = new DesktopAdapter(client, { pollIntervalMs, machine: deviceId, kind: deviceKind, model: deviceModel });
 
 if (publishDevice) desktop.start();
 
