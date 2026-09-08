@@ -19,6 +19,7 @@ export class DesktopAdapter {
   #pollTimer;
   #machine;
   #kind;
+  #model;
   #pollIntervalMs;
 
   /**
@@ -26,10 +27,11 @@ export class DesktopAdapter {
    * @param {object} [opts]
    * @param {number} [opts.pollIntervalMs=30000] - How often to publish state
    */
-  constructor(client, { pollIntervalMs = 30000, machine, kind } = {}) {
+  constructor(client, { pollIntervalMs = 30000, machine, kind, model } = {}) {
     this.#client = client;
     this.#machine = machine ?? client?.deviceId ?? undefined;
     this.#kind = kind;
+    this.#model = model;
     this.#pollIntervalMs = pollIntervalMs;
     this.#pollTimer = null;
   }
@@ -100,7 +102,7 @@ export class DesktopAdapter {
       screen_active: active,
       context: active ? 'active' : 'idle',
       ...(idleSec === undefined ? {} : { idle_sec: idleSec }),
-      ...collectHostTelemetry({ machine: this.#machine, kind: this.#kind }),
+      ...collectHostTelemetry({ machine: this.#machine, kind: this.#kind, model: this.#model }),
     };
 
     try {

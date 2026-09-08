@@ -3,7 +3,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { collectHostTelemetry } from '../src/host-telemetry.js';
+import { collectHostTelemetry, modelFromCommandLine } from '../src/host-telemetry.js';
 
 /**
  * Fake sensors. The real ones only report whatever the machine running the
@@ -11,7 +11,8 @@ import { collectHostTelemetry } from '../src/host-telemetry.js';
  * and "tests pass" would say nothing about the Pi.
  */
 function sources({ platform = 'linux', load = [1.8, 1.7, 1.6], cpuCount = 4, zones = {},
-                   totalMem = 16e9, freeMem = 4e9, availMem = 12e9, commands = {} } = {}) {
+                   totalMem = 16e9, freeMem = 4e9, availMem = 12e9, commands = {},
+                   processes = [] } = {}) {
   return {
     platform: () => platform,
     loadavg: () => load,
@@ -22,6 +23,10 @@ function sources({ platform = 'linux', load = [1.8, 1.7, 1.6], cpuCount = 4, zon
     run: (cmd, args) => {
       const key = `${cmd} ${(args || []).join(' ')}`;
       return (commands && commands[key]) || '';
+    },
+    listProcessCommandLines: () => {
+      if (processes instanceof Error) throw processes;
+      return processes;
     },
     listThermalZones: () => Object.keys(zones),
     readThermalZone: (zone) => {
@@ -258,4 +263,67 @@ test('omits available when the OS will not say', () => {
 test('zero available is a real reading', () => {
   const host = collectHostTelemetry({ sources: sources({ availMem: 0 }) });
   assert.equal(host.mem_available_gb, 0);
+});
+
+// --- served model (what the box is for, next to how it is doing) ---
+
+const LLAMA = ['/home/petrus/llm/llama.cpp/build/bin/llama-server', '-m',
+  '/home/petrus/llm/models/flash-next/Qwen3.8-Flash-Next-UD-IQ3_XXS-00001-of-00003.gguf',
+  '--host', '0.0.0.0', '--port', '8080', '-c', '262144'];
+
+test('reads the served model from a running llama-server on Linux', () => {
+  const host = collectHostTelemetry({ sources: sources({ processes: [LLAMA] }) });
+  assert.equal(host.model, 'Qwen3.8-Flash-Next-UD-IQ3_XXS.gguf');
+});
+
+test('a single-file GGUF keeps its full name, extension included, like the Pi publishes', () => {
+  const argv = ['llama-server', '--model', '/models/Ling-3.0-tiny-Q4_K_M.gguf'];
+  assert.equal(modelFromCommandLine(argv), 'Ling-3.0-tiny-Q4_K_M.gguf');
+  assert.equal(modelFromCommandLine(['llama-server', '--model=/models/a-b.gguf']), 'a-b.gguf');
+});
+
+test('an explicit model name wins over discovery', () => {
+  const host = collectHostTelemetry({ model: ' gemma-4-local ', sources: sources({ processes: [LLAMA] }) });
+  assert.equal(host.model, 'gemma-4-local');
+});
+
+test('a host serving nothing publishes no model, not an empty one', () => {
+  for (const explicit of [undefined, '', '   ', 42]) {
+    const host = collectHostTelemetry({ model: explicit, sources: sources({ processes: [] }) });
+    assert.ok(!('model' in host), `published model for ${JSON.stringify(explicit)}`);
+  }
+});
+
+test('only a model server counts; other processes with -m are ignored', () => {
+  const others = [['/usr/bin/python3', '-m', 'http.server'], ['bash', '-c', 'llama-server -m x.gguf']];
+  const host = collectHostTelemetry({ sources: sources({ processes: others }) });
+  assert.ok(!('model' in host));
+  assert.equal(modelFromCommandLine(['/opt/llama-server', '--port', '8080']), undefined);
+  assert.equal(modelFromCommandLine([]), undefined);
+});
+
+test('macOS publishes only an explicit model; the process table is not consulted', () => {
+  const mac = sources({ platform: 'darwin', processes: [LLAMA] });
+  assert.ok(!('model' in collectHostTelemetry({ sources: mac })));
+  assert.equal(collectHostTelemetry({ model: 'lmstudio:qwen', sources: mac }).model, 'lmstudio:qwen');
+});
+
+test('a hostile process table never takes the heartbeat down', () => {
+  const host = collectHostTelemetry({ sources: sources({ processes: new Error('EACCES') }) });
+  assert.ok(!('model' in host));
+  assert.ok('load_1m' in host, 'lost the other vitals along with the model');
+});
+
+test('a voice stack with lower pids does not become the served model (VTA layout)', () => {
+  // pid order: whisper, piper and a python -m all come before llama-server
+  const table = [
+    ['/opt/whisper/whisper-server', '-m', '/models/ggml-large-v3-turbo.bin', '--port', '8090'],
+    ['/usr/bin/piper', '--model', '/models/fi_FI-harri-medium.onnx'],
+    ['/usr/bin/python3', '-m', 'http.server'],
+    LLAMA,
+  ];
+  const host = collectHostTelemetry({ sources: sources({ processes: table }) });
+  assert.equal(host.model, 'Qwen3.8-Flash-Next-UD-IQ3_XXS.gguf');
+  // and with the model server gone, the voice stack still is not "the model"
+  assert.ok(!('model' in collectHostTelemetry({ sources: sources({ processes: table.slice(0, 3) }) })));
 });
