@@ -1102,6 +1102,11 @@ export function composeAnnouncers(map) {
 // Ported from the Mini's field-hardened fork (branch mini-local-fork-rescue),
 // security-reviewed by codexmb 2026-08-27; `owner` kept as an alias so
 // existing call sites keep working.
+// NOTE on `intervalMs`: this default is a COST decision as much as a latency one.
+// The host bills per request, so 5000 ms is 17,280 requests/day/device for this
+// poller alone — the single largest source of our 2026-09 hosting bill. It is kept
+// at 5000 for backward compatibility, but callers should pass a value explicitly;
+// iak-mcp-daemon.mjs derives one from mcp.confirmations.interval_sec.
 export function startChatReplyPoller({ apiKey, room, intervalMs = 5000, log, owners, owner = 'petrus' }) {
   if (!apiKey || !room) {
     process.stderr.write('[iak-mcp] chat-reply poller: missing apiKey or room — disabled\n');

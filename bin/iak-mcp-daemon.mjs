@@ -90,7 +90,16 @@ if (!apiKey) {
   // it request volume). The adjacent poller.interval_sec key already existed in
   // config and was silently ignored here. Default is unchanged so nobody's
   // latency moves without them asking.
-  const pollerIntervalMs = Math.max(1000, Number(config?.poller?.interval_sec ?? 5) * 1000);
+  // Two different jobs share this one loop, and they want opposite things.
+  // Reading the room is paid for per request. Carrying petrus's /approve tap is
+  // the only interval in the fleet a HUMAN feels: 30 seconds after tapping
+  // Approve reads as broken, not thrifty (claudeMB on PR #101). So the gate gets
+  // its own key and falls back to the cheap one, then to the old default — which
+  // means nobody's latency moves unless they set something.
+  const pollerIntervalMs = Math.max(1000, Number(
+    config?.mcp?.confirmations?.interval_sec
+    ?? config?.poller?.interval_sec
+    ?? 5) * 1000);
   startChatReplyPoller({
     apiKey, room, intervalMs: pollerIntervalMs,
     // Exact owner identities allowed to settle intents (config, with the
