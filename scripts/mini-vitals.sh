@@ -33,5 +33,9 @@ print(f'{total:.1f} {avail:.1f}')")"
     mem_total_gb="$MEMT" mem_available_gb="$MEMA" \
     memory="${MEMT}GB total, ${MEMA}GB available" \
     --config "$CONFIG" >/dev/null 2>&1 || true
-  sleep 30
+  # 2026-09-12: was 30s = 2,880 API writes/day from this loop alone, and Vercel
+  # billing passed 200 USD/month on fleet request volume (petrus). Load and free
+  # memory in a dashboard row do not need 30-second freshness; 5 minutes keeps the
+  # row visibly live at a tenth of the requests.
+  sleep "${VITALS_INTERVAL_S:-300}"
 done
