@@ -18,6 +18,11 @@ export INTENT_USER_ID="$(python3 -c "import json;print(json.load(open('$CONFIG')
 export INTENT_AGENT_HANDLE="@claudemm"
 export INTENT_DEVICE_ID="mac-mini"
 
+# 2026-09-12: uik-daemon defaults to POLL_INTERVAL_MS=30000, i.e. 2,880 requests/day
+# per device. With the fleet on the same cadence Vercel billing passed 200 USD/month.
+# 120s still detects a dead agent inside two minutes, at a quarter of the traffic.
+export POLL_INTERVAL_MS="${POLL_INTERVAL_MS:-120000}"
+
 # launchd starts this with a bare PATH (no Homebrew): resolve node explicitly
 # or the job dies with "exec: node: not found" - which is what kept the
 # publisher an orphan started by hand instead of a KeepAlive service.

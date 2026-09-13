@@ -84,8 +84,24 @@ if (!apiKey) {
 } else if (!room) {
   console.warn('[iak-mcp-daemon] mcp.confirmations.room missing — chat-reply poller disabled');
 } else {
+  // Poll cadence is a COST decision, not a detail: at the old hard-wired 5000 ms
+  // this one poller made 17,280 requests a day per device, and the host bills per
+  // invocation (2026-09-12: the fleet's Vercel bill passed 200 USD/month, ~99% of
+  // it request volume). The adjacent poller.interval_sec key already existed in
+  // config and was silently ignored here. Default is unchanged so nobody's
+  // latency moves without them asking.
+  // Two different jobs share this one loop, and they want opposite things.
+  // Reading the room is paid for per request. Carrying petrus's /approve tap is
+  // the only interval in the fleet a HUMAN feels: 30 seconds after tapping
+  // Approve reads as broken, not thrifty (claudeMB on PR #101). So the gate gets
+  // its own key and falls back to the cheap one, then to the old default — which
+  // means nobody's latency moves unless they set something.
+  const pollerIntervalMs = Math.max(1000, Number(
+    config?.mcp?.confirmations?.interval_sec
+    ?? config?.poller?.interval_sec
+    ?? 5) * 1000);
   startChatReplyPoller({
-    apiKey, room, intervalMs: 5000,
+    apiKey, room, intervalMs: pollerIntervalMs,
     // Exact owner identities allowed to settle intents (config, with the
     // fleet's known surfaces as the default). Every surface the owner taps
     // from must be listed — an unlisted one gets a VISIBLE rejection reply,
@@ -93,7 +109,7 @@ if (!apiKey) {
     owners: config?.mcp?.confirmations?.owners || ['petrus', 'petrus-boox'],
     log: (msg) => console.log(`[iak-mcp-daemon] ${msg}`),
   });
-  console.log(`[iak-mcp-daemon] chat-reply poller watching room "${room}" every 5s`);
+  console.log(`[iak-mcp-daemon] chat-reply poller watching room "${room}" every ${pollerIntervalMs / 1000}s`);
   // Mirror every intent/action transition to the central action_status store
   // (antfarm PR #43) so CodeWatch renders durable button state off-LAN.
   const pushBase = config?.groupmind?.base_url || config?.groupmind?.baseUrl || 'https://groupmind.one/api/v1';
