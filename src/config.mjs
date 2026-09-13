@@ -1,8 +1,41 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
-import { readFileSync, existsSync } from 'node:fs';
+import { readFileSync, existsSync, mkdirSync, copyFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { homedir } from 'node:os';
+
+
+// Seen-id watermarks record what a poller has ALREADY delivered. They were
+// defaulted into /tmp, which macOS clears on boot — so every reboot silently
+// reset every watermark and the next poll replayed history as if it were new.
+// On 2026-09-13 that dumped 48 messages from seven rooms back to March into one
+// agent's inbox, including "get them trading before they close today" from 6
+// March. Noise is the mild failure; an agent acting on a six-month-old
+// instruction is the real one.
+//
+// State that must outlive a reboot belongs under the user's own directory.
+// Honours XDG_STATE_HOME where set, falls back to ~/.local/state.
+const STATE_DIR = process.env.XDG_STATE_HOME
+  ? resolve(process.env.XDG_STATE_HOME, 'iak')
+  : resolve(homedir(), '.local', 'state', 'iak');
+
+const stateFile = (name) => {
+  const target = resolve(STATE_DIR, name);
+  // One-time adoption: a box upgrading from the /tmp defaults still holds a
+  // valid watermark there. Copying it over means the upgrade itself does not
+  // cause the single replay this change exists to prevent.
+  try {
+    if (!existsSync(target)) {
+      const legacy = `/tmp/iak-${name === 'seen-ids.txt' ? 'seen-ids' : name.replace(/\.txt$/, '')}.txt`;
+      mkdirSync(STATE_DIR, { recursive: true });
+      if (existsSync(legacy)) copyFileSync(legacy, target);
+    }
+  } catch {
+    // A read-only or unwritable home is not a reason to fail config load;
+    // the poller will fall back to an empty watermark and simply be noisy once.
+  }
+  return target;
+};
 
 const DEFAULT_CONFIG = {
   listen: { host: '127.0.0.1', port: 8787 },
@@ -13,7 +46,7 @@ const DEFAULT_CONFIG = {
     rooms: '',
     handle: '',
     interval_sec: 30,
-    seen_file: '/tmp/iak-seen-ids.txt',
+    seen_file: stateFile('seen-ids.txt'),
     api_key: '',
     nudge_mode: 'tmux',
     nudge_command: '',
@@ -26,7 +59,7 @@ const DEFAULT_CONFIG = {
     enabled: false,
     handle: '',
     interval_sec: 30,
-    seen_file: '/tmp/iak-dm-seen-ids.txt',
+    seen_file: stateFile('dm-seen-ids.txt'),
     api_key: '',
     human_only: false,
     limit: 100
@@ -36,7 +69,7 @@ const DEFAULT_CONFIG = {
   rate_limit: { message_interval_sec: 30 },
   automation: {
     rules: [],
-    seen_file: '/tmp/iak-automation-seen.txt',
+    seen_file: stateFile('automation-seen.txt'),
     interval_sec: 30,
     cooldown_sec: 5,
     first_match_only: true
@@ -45,12 +78,12 @@ const DEFAULT_CONFIG = {
     moltbook: { posts: [], base_url: 'https://www.moltbook.com' },
     github: { repos: [], token: '' },
     interval_sec: 120,
-    seen_file: '/tmp/iak-comment-seen.txt'
+    seen_file: stateFile('comment-seen.txt')
   },
   discord: {
     channels: [],
     interval_sec: 30,
-    seen_file: '/tmp/iak-discord-seen.txt',
+    seen_file: stateFile('discord-seen.txt'),
     self_id: '',
     skip_bots: false
   },
