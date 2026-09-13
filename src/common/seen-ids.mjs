@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
-import { readFileSync, openSync, writeSync, fsyncSync, closeSync, renameSync } from 'node:fs';
+import { readFileSync, openSync, writeSync, fsyncSync, closeSync, renameSync, mkdirSync } from 'node:fs';
+import { dirname } from 'node:path';
 
 /**
  * Shared seen-ID management for all platform pollers.
@@ -22,6 +23,8 @@ export function loadSeenIds(path, maxIds = 2000) {
 // M5 hermes poller did on 2026-09-01 (issue #90, item 1).
 export function saveSeenIds(path, ids, maxIds = 2000) {
   const arr = [...ids].slice(-maxIds);
+  // The watermark now lives under the user's state dir, which may not exist yet.
+  mkdirSync(dirname(path), { recursive: true });
   const tmp = `${path}.tmp-${process.pid}`;
   const fd = openSync(tmp, 'w');
   try {

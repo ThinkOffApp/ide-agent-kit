@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
-import { readFileSync, writeFileSync, appendFileSync } from 'node:fs';
+import { readFileSync, writeFileSync, appendFileSync, mkdirSync } from 'node:fs';
+import { dirname, resolve } from 'node:path';
+import { homedir } from 'node:os';
 import { randomUUID } from 'node:crypto';
 import { execSync } from 'node:child_process';
 import { nudgeTmux, nudgeCommand } from './utils.mjs';
@@ -18,7 +20,12 @@ import { resolveSelfHandle, isSelfSender } from './common/handles.mjs';
  * The IDE agent calls `rooms check` to read and clear the notification file.
  */
 
-const SEEN_FILE_DEFAULT = '/tmp/iak-seen-ids.txt';
+// Durable by default: /tmp is cleared on boot, which silently resets the
+// watermark and replays room history as new. See src/config.mjs.
+const SEEN_FILE_DEFAULT = resolve(
+  process.env.XDG_STATE_HOME ? resolve(process.env.XDG_STATE_HOME, 'iak') : resolve(homedir(), '.local', 'state', 'iak'),
+  'seen-ids.txt'
+);
 const NOTIFY_FILE_DEFAULT = '/tmp/iak-new-messages.txt';
 
 function loadSeenIds(path) {
@@ -31,6 +38,7 @@ function loadSeenIds(path) {
 
 function saveSeenIds(path, ids) {
   const arr = [...ids].slice(-1000);
+  mkdirSync(dirname(path), { recursive: true });
   writeFileSync(path, arr.join('\n') + '\n');
 }
 

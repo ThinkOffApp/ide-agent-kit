@@ -76,10 +76,16 @@ describe('config', () => {
     assert.deepEqual(cfg.poller.rooms, ['thinkoff-development']);
     assert.equal(cfg.poller.handle, '@CodexMB');
     assert.equal(cfg.poller.interval_sec, 30);
-    assert.equal(cfg.poller.seen_file, '/tmp/iak-seen-ids.txt');
+    // Watermarks must OUTLIVE a reboot: /tmp is cleared on boot, which silently
+    // resets them and replays room history as new (2026-09-13: 48 messages back
+    // to March, including actionable ones). Assert the property, not a literal
+    // path, since the state dir varies by home and XDG_STATE_HOME.
+    assert.ok(!cfg.poller.seen_file.startsWith('/tmp/'), 'seen_file must not live in /tmp');
+    assert.ok(cfg.poller.seen_file.endsWith('seen-ids.txt'), cfg.poller.seen_file);
     assert.equal(cfg.dm_poller.enabled, true);
     assert.equal(cfg.dm_poller.interval_sec, 30);
-    assert.equal(cfg.dm_poller.seen_file, '/tmp/iak-dm-seen-ids.txt');
+    assert.ok(!cfg.dm_poller.seen_file.startsWith('/tmp/'), 'dm seen_file must not live in /tmp');
+    assert.ok(cfg.dm_poller.seen_file.endsWith('dm-seen-ids.txt'), cfg.dm_poller.seen_file);
     assert.equal(cfg.dm_poller.limit, 100);
     assert.equal(cfg.background.enabled, true);
     assert.equal(cfg.background.recent_window_sec, 7200);
