@@ -11,6 +11,7 @@ import {
   startConfirmationsServer,
   startChatReplyPoller,
   composeAnnouncers,
+  defaultCallbackBase,
   _resetForTests,
 } from '../src/confirmations.mjs';
 
@@ -429,4 +430,21 @@ test('GET /intents?status=pending returns only open intents, and rejects unknown
   } finally {
     server.close();
   }
+});
+
+test('defaultCallbackBase: explicit callback_base wins, loopback stays loopback, 0.0.0.0 picks a routable LAN address', () => {
+  const ifaces = {
+    lo0: [{ address: '127.0.0.1', family: 'IPv4', internal: true }],
+    en5: [{ address: '169.254.10.7', family: 'IPv4', internal: false }],
+    en0: [
+      { address: 'fe80::1', family: 'IPv6', internal: false },
+      { address: '192.168.50.241', family: 'IPv4', internal: false },
+    ],
+  };
+  assert.equal(defaultCallbackBase({ callback_base: 'http://gate.example:9000/' }, ifaces), 'http://gate.example:9000');
+  assert.equal(defaultCallbackBase({}, ifaces), 'http://127.0.0.1:8788');
+  assert.equal(defaultCallbackBase({ host: '127.0.0.1', port: 9001 }, ifaces), 'http://127.0.0.1:9001');
+  assert.equal(defaultCallbackBase({ host: '0.0.0.0' }, ifaces), 'http://192.168.50.241:8788');
+  assert.equal(defaultCallbackBase({ host: '0.0.0.0', port: 8790 }, { lo0: ifaces.lo0 }), 'http://127.0.0.1:8790');
+  assert.equal(defaultCallbackBase({ host: '192.168.50.5' }, ifaces), 'http://192.168.50.5:8788');
 });

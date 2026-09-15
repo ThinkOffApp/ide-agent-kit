@@ -18,6 +18,7 @@
 // audit, every transition is appended to receipts.
 
 import { createServer } from 'node:http';
+import { networkInterfaces } from 'node:os';
 import { randomUUID, createHmac, timingSafeEqual } from 'node:crypto';
 import { appendFileSync } from 'node:fs';
 import { spawn } from 'node:child_process';
@@ -991,6 +992,28 @@ function renderIntentsHtml() {
 // Post the intent prompt to a GroupMind room with quick-reply text the user
 // can copy / type, and a curl example for the watch-gate. Idempotent (same
 // id is harmless).
+// The address other devices use to reach this daemon. An explicit
+// `callback_base` always wins. Without one, a loopback-only listener can
+// only be reached at 127.0.0.1, but a daemon bound to 0.0.0.0 (or a LAN
+// address) is meant to be reached from phones and tablets, and a
+// 127.0.0.1 link in the room post goes nowhere from those. So pick the
+// first routable IPv4 on this host instead; the machine's LAN address
+// changes with DHCP, so hardcoding it in config rots.
+export function defaultCallbackBase(cc = {}, ifaces = networkInterfaces()) {
+  if (cc.callback_base) return String(cc.callback_base).replace(/\/$/, '');
+  const port = cc.port || 8788;
+  const host = cc.host || '127.0.0.1';
+  if (host === '127.0.0.1' || host === 'localhost' || host === '::1') return `http://127.0.0.1:${port}`;
+  if (host !== '0.0.0.0' && host !== '::') return `http://${host}:${port}`;
+  for (const addrs of Object.values(ifaces || {})) {
+    for (const a of addrs || []) {
+      const fam = a.family === 4 || a.family === 'IPv4';
+      if (fam && !a.internal && !String(a.address).startsWith('169.254.')) return `http://${a.address}:${port}`;
+    }
+  }
+  return `http://127.0.0.1:${port}`;
+}
+
 export function makeGroupmindAnnouncer({ apiKey, room, callbackBase, apiKeys }) {
   // apiKeys: optional map of agent handle (e.g. "@claudemm") → API key.
   // When the intent payload includes `fromHandle`, the announcer uses
