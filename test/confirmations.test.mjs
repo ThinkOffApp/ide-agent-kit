@@ -432,7 +432,7 @@ test('GET /intents?status=pending returns only open intents, and rejects unknown
   }
 });
 
-test('defaultCallbackBase: explicit callback_base wins, loopback stays loopback, 0.0.0.0 picks a routable LAN address', () => {
+test('defaultCallbackBase: explicit callback_base wins, loopback stays loopback, wildcard picks a LAN address', () => {
   const ifaces = {
     lo0: [{ address: '127.0.0.1', family: 'IPv4', internal: true }],
     en5: [{ address: '169.254.10.7', family: 'IPv4', internal: false }],
@@ -444,7 +444,41 @@ test('defaultCallbackBase: explicit callback_base wins, loopback stays loopback,
   assert.equal(defaultCallbackBase({ callback_base: 'http://gate.example:9000/' }, ifaces), 'http://gate.example:9000');
   assert.equal(defaultCallbackBase({}, ifaces), 'http://127.0.0.1:8788');
   assert.equal(defaultCallbackBase({ host: '127.0.0.1', port: 9001 }, ifaces), 'http://127.0.0.1:9001');
+  assert.equal(defaultCallbackBase({ host: 'localhost' }, ifaces), 'http://127.0.0.1:8788');
   assert.equal(defaultCallbackBase({ host: '0.0.0.0' }, ifaces), 'http://192.168.50.241:8788');
   assert.equal(defaultCallbackBase({ host: '0.0.0.0', port: 8790 }, { lo0: ifaces.lo0 }), 'http://127.0.0.1:8790');
   assert.equal(defaultCallbackBase({ host: '192.168.50.5' }, ifaces), 'http://192.168.50.5:8788');
+});
+
+test('defaultCallbackBase: virtual interfaces and enumeration order do not win over the LAN', () => {
+  const ifaces = {
+    docker0: [{ address: '172.17.0.1', family: 'IPv4', internal: false }],
+    utun3: [{ address: '10.8.0.2', family: 'IPv4', internal: false }],
+    tailscale0: [{ address: '100.97.140.13', family: 'IPv4', internal: false }],
+    en0: [{ address: '192.168.50.241', family: 'IPv4', internal: false }],
+  };
+  assert.equal(defaultCallbackBase({ host: '0.0.0.0' }, ifaces), 'http://192.168.50.241:8788');
+  // a real LAN on 10/8 still beats a physical interface on a public range
+  const tenNet = {
+    eth1: [{ address: '203.0.113.5', family: 'IPv4', internal: false }],
+    eth0: [{ address: '10.1.2.3', family: 'IPv4', internal: false }],
+  };
+  assert.equal(defaultCallbackBase({ host: '0.0.0.0' }, tenNet), 'http://10.1.2.3:8788');
+  // only virtual interfaces present: nothing plausible, fall back to loopback
+  assert.equal(defaultCallbackBase({ host: '0.0.0.0' }, { docker0: ifaces.docker0, utun3: ifaces.utun3 }), 'http://127.0.0.1:8788');
+  // explicit interface selection wins over the policy, even for a "virtual" name
+  assert.equal(defaultCallbackBase({ host: '0.0.0.0', callback_interface: 'tailscale0' }, ifaces), 'http://100.97.140.13:8788');
+  // the pick and its alternatives are reported for logging
+  let seen;
+  defaultCallbackBase({ host: '0.0.0.0' }, ifaces, (pick, all) => { seen = { pick, all }; });
+  assert.equal(seen.pick.name, 'en0');
+  assert.deepEqual(seen.all.map((c) => c.name), ['en0']);
+});
+
+test('defaultCallbackBase: a bound IPv6 host is preserved and bracketed', () => {
+  const ifaces = { en0: [{ address: '192.168.50.241', family: 'IPv4', internal: false }] };
+  assert.equal(defaultCallbackBase({ host: '::1' }, ifaces), 'http://[::1]:8788');
+  assert.equal(defaultCallbackBase({ host: 'fd00::123', port: 8790 }, ifaces), 'http://[fd00::123]:8790');
+  // the v6 wildcard still advertises a LAN IPv4, which is what phones dial
+  assert.equal(defaultCallbackBase({ host: '::' }, ifaces), 'http://192.168.50.241:8788');
 });
