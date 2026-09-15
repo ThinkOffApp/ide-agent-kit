@@ -18,6 +18,7 @@
 // audit, every transition is appended to receipts.
 
 import { createServer } from 'node:http';
+import { networkInterfaces } from 'node:os';
 import { randomUUID, createHmac, timingSafeEqual } from 'node:crypto';
 import { appendFileSync } from 'node:fs';
 import { spawn } from 'node:child_process';
@@ -991,6 +992,54 @@ function renderIntentsHtml() {
 // Post the intent prompt to a GroupMind room with quick-reply text the user
 // can copy / type, and a curl example for the watch-gate. Idempotent (same
 // id is harmless).
+// The address other devices use to reach this daemon. An explicit
+// `callback_base` always wins. Without one, a loopback-only listener can
+// only be reached at its loopback address, and a listener bound to one
+// concrete address is advertised at that address. A daemon bound to the
+// wildcard (0.0.0.0 / ::) is meant to be reached from phones and tablets,
+// and a 127.0.0.1 link in the room post goes nowhere from those, so we
+// pick a LAN address on this host instead. Interface enumeration order is
+// not a reachability order (docker0, VPN tunnels and VM bridges come
+// first on many hosts), so the pick is a policy, not "the first one":
+//   1. `callback_interface` in config, when set, and only that interface
+//   2. skip interfaces whose name says virtual (docker, veth, br-, utun,
+//      tun/tap, wg, tailscale, vbox/vmnet, lo)
+//   3. prefer 192.168/16, then 10/8, then 172.16/12, then anything else
+// The result is best-effort: it is the most plausible LAN address, not a
+// proven-reachable one. Callers get the alternatives back via `onPick`
+// so the choice can be logged at startup.
+const VIRTUAL_IFACE = /^(docker|veth|br-|virbr|utun|tun|tap|wg|tailscale|ts|vboxnet|vmnet|vmenet|bridge|lo|awdl|llw)\d*/i;
+function lanRank(ip) {
+  if (ip.startsWith('192.168.')) return 0;
+  if (ip.startsWith('10.')) return 1;
+  if (/^172\.(1[6-9]|2\d|3[01])\./.test(ip)) return 2;
+  return 3;
+}
+function formatHost(addr) {
+  return addr.includes(':') ? `[${addr}]` : addr;
+}
+export function defaultCallbackBase(cc = {}, ifaces = networkInterfaces(), onPick = null) {
+  if (cc.callback_base) return String(cc.callback_base).replace(/\/$/, '');
+  const port = cc.port || 8788;
+  const host = cc.host || '127.0.0.1';
+  if (host === 'localhost') return `http://127.0.0.1:${port}`;
+  if (host !== '0.0.0.0' && host !== '::') return `http://${formatHost(host)}:${port}`;
+  const wanted = cc.callback_interface ? String(cc.callback_interface) : null;
+  const candidates = [];
+  for (const [name, addrs] of Object.entries(ifaces || {})) {
+    if (wanted ? name !== wanted : VIRTUAL_IFACE.test(name)) continue;
+    for (const a of addrs || []) {
+      const v4 = a.family === 4 || a.family === 'IPv4';
+      if (!v4 || a.internal || String(a.address).startsWith('169.254.')) continue;
+      candidates.push({ name, address: a.address, rank: lanRank(a.address) });
+    }
+  }
+  candidates.sort((x, y) => x.rank - y.rank);
+  const pick = candidates[0] || null;
+  if (onPick) onPick(pick, candidates);
+  return pick ? `http://${pick.address}:${port}` : `http://127.0.0.1:${port}`;
+}
+
 export function makeGroupmindAnnouncer({ apiKey, room, callbackBase, apiKeys }) {
   // apiKeys: optional map of agent handle (e.g. "@claudemm") → API key.
   // When the intent payload includes `fromHandle`, the announcer uses

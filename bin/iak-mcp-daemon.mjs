@@ -15,7 +15,7 @@
 // Run: node bin/iak-mcp-daemon.mjs [--config path/to/config.json]
 
 import { loadConfig } from '../src/config.mjs';
-import {
+import { defaultCallbackBase,
   startConfirmationsServer,
   startChatReplyPoller,
   configureActionStatusPush,
@@ -43,9 +43,13 @@ const apiKey = config?.poller?.api_key;
 const room = cc.room;
 
 const serverAnnouncerMap = {};
+const callbackBase = defaultCallbackBase(cc, undefined, (pick, all) => {
+  if (!pick) console.log('[iak-mcp-daemon] callback_base: no LAN IPv4 found, cards will link to 127.0.0.1');
+  else console.log(`[iak-mcp-daemon] callback_base: ${pick.address} on ${pick.name}` + (all.length > 1 ? ` (also ${all.slice(1).map((c) => `${c.address}@${c.name}`).join(', ')})` : ''));
+});
 if (cc.room && apiKey) {
   serverAnnouncerMap.groupmind = makeGroupmindAnnouncer({
-    apiKey, room: cc.room, callbackBase: cc.callback_base || `http://127.0.0.1:${cc.port || 8788}`,
+    apiKey, room: cc.room, callbackBase,
     // Per-agent author attribution: configure
     // `mcp.confirmations.api_keys` as { "@CodexMB": "xfb_...", ... }
     // and forwarding daemons that include `from_handle` in POST /intent
@@ -130,7 +134,7 @@ if (argv.includes('--demo')) {
   const announcerMap = {};
   if (cc.room && apiKey) {
     announcerMap.groupmind = makeGroupmindAnnouncer({
-      apiKey, room: cc.room, callbackBase: cc.callback_base || `http://127.0.0.1:${cc.port || 8788}`,
+      apiKey, room: cc.room, callbackBase: defaultCallbackBase(cc),
     });
   }
   if (cc.codewatch_gate_url) {

@@ -35,7 +35,7 @@ import { nudgeTmux } from './common/notify.mjs';
 import { tmuxRun } from './ide/tmux-runner.mjs';
 import { loadConfig } from './config.mjs';
 import { assertRoomVoice } from './responder-lock.mjs';
-import {
+import { defaultCallbackBase,
   createIntent,
   decideIntent,
   waitForDecision,
@@ -400,7 +400,7 @@ export async function runMcpServer({ configPath } = {}) {
     announcerMap.groupmind = makeGroupmindAnnouncer({
       apiKey: config.poller.api_key,
       room: confirmCfg.room,
-      callbackBase: confirmCfg.callback_base || `http://127.0.0.1:${confirmCfg.port || 8788}`,
+      callbackBase: defaultCallbackBase(confirmCfg),
     });
   }
   if (confirmCfg.codewatch_gate_url) {
