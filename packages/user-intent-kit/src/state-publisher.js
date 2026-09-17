@@ -11,8 +11,8 @@ export class StatePublisher {
     if (!Number.isFinite(refreshMs) || refreshMs <= 0) throw new Error('Invalid refreshMs');
     this.#send = send; this.#refreshMs = refreshMs; this.#now = now;
   }
-  publish(state) {
-    this.#pending = structuredClone(state);
+  publish(state, { force = false } = {}) {
+    this.#pending = { state: structuredClone(state), force };
     if (!this.#running) {
       this.#running = this.#drain().finally(() => { this.#running = undefined; });
     }
@@ -20,10 +20,10 @@ export class StatePublisher {
   }
   async #drain() {
     while (this.#pending) {
-      const state = this.#pending;
+      const { state, force } = this.#pending;
       this.#pending = undefined;
       const key = JSON.stringify(state);
-      if (key === this.#lastKey && this.#now() - this.#lastAt < this.#refreshMs) continue;
+      if (!force && key === this.#lastKey && this.#now() - this.#lastAt < this.#refreshMs) continue;
       await this.#send(state);
       this.#lastKey = key;
       this.#lastAt = this.#now();

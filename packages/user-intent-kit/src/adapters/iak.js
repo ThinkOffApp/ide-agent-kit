@@ -41,12 +41,12 @@ export class IAKAdapter {
    * string on some publishers, which gave the dashboard nowhere to put a
    * temperature or a load figure.
    */
-  async publishStatus({ status = 'active', currentTask = null }) {
+  async publishStatus({ status = 'active', currentTask = null, heartbeat = false }) {
     await this.#publisher.publish({
       status,
       last_task: currentTask,
       ttl_sec: 300,
-    });
+    }, { force: heartbeat });
   }
 
   /**
