@@ -7,6 +7,7 @@ import { platform } from 'node:os';
 const IDLE_AFTER_SEC = 300;
 import { collectHostTelemetry } from '../host-telemetry.js';
 import { StatePublisher } from '../state-publisher.js';
+import { createModelDiscovery } from '../model-discovery.js';
 
 /**
  * Desktop Adapter - detects active window and context on macOS.
@@ -22,14 +23,16 @@ export class DesktopAdapter {
   #kind;
   #pollIntervalMs;
   #publisher;
+  #discoverModels;
 
   /**
    * @param {import('../client.js').IntentClient} client
    * @param {object} [opts]
    * @param {number} [opts.pollIntervalMs=30000] - How often to publish state
    */
-  constructor(client, { pollIntervalMs = 30000, machine, kind } = {}) {
+  constructor(client, { pollIntervalMs = 30000, machine, kind, discoverModels = createModelDiscovery() } = {}) {
     this.#client = client;
+    this.#discoverModels = discoverModels;
     this.#machine = machine ?? client?.deviceId ?? undefined;
     this.#kind = kind;
     if (!Number.isFinite(pollIntervalMs) || pollIntervalMs <= 0) throw new Error('Invalid pollIntervalMs');
@@ -46,7 +49,7 @@ export class DesktopAdapter {
    */
   async publishState() {
     const state = this.#detectState();
-    await this.#publisher.publish({ ...state, ttl_sec: 90 });
+    await this.#publisher.publish({ ...state, ...await this.#discoverModels(), ttl_sec: 90 });
   }
 
   /**
