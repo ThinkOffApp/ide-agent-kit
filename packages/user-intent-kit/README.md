@@ -365,3 +365,30 @@ a 50% reduction for that daemon, excluding startup/status changes and retries.
 These are schedule-derived counts, not measured Vercel billing or fleet totals.
 The test suite separately verifies 720 unchanged-agent writes over a simulated day.
 Standalone vitals scripts and secondary agents still contribute additional traffic.
+
+### Model identity discovery
+
+The device publisher checks local servers once per minute (cached and single
+flight), piggybacking the result on its existing device PATCH. Defaults:
+LM Studio at `127.0.0.1:1234/api/v1/models` and OpenAI-compatible serving
+endpoints at ports 8080, 8000 and 8888 (`/v1/models`). LM Studio uses only loaded
+LLM instances; downloaded models and embeddings are excluded. Generic OpenAI
+IDs are labelled `advertised`, not proof of loaded weights or active generation.
+
+Optional configuration:
+
+- `INTENT_MODEL_SERVER_URL`: explicit server origin, replacing default probes.
+- `INTENT_MODEL_SERVER_KIND`: `openai` (default) or `lmstudio`.
+- `INTENT_MODEL_SERVER_KEY_FILE`: server-specific bearer token file, used only
+  for the explicit server. The intent API key is never reused. Redirects are
+  refused. HTTP is allowed only on loopback; remote endpoints require HTTPS.
+- `INTENT_DEVICE_MODEL`: manual fallback when discovery is unavailable, visibly
+  suffixed `(manual)`. Successful empty results do not fall back to this label.
+
+Payloads include `model`, `models`, `model_status`, `model_source` and
+`model_checked_at`. Unknown/unauthorized results explicitly send `model: null`
+when there is no manual label, clearing any previous model through PATCH.
+A refused/unreachable server means unknown, not verified absence. With automatic
+multi-port discovery, absence cannot be verified while any endpoint is unknown.
+Neither endpoint discovery nor these read-only probes load a model.
+LM Studio schema: https://lmstudio.ai/docs/developer/rest/list .
