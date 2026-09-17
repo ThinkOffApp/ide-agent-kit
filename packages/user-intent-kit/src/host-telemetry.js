@@ -92,6 +92,19 @@ export const defaultSources = {
     return out;
   },
   readThermalZone: (zone) => readFileSync(`${THERMAL_ROOT}/${zone}/temp`, 'utf8'),
+  // The zone's own critical trip point, in millidegrees, or '' when the zone
+  // declares none. A zone advertises several trips (passive, hot, critical);
+  // only 'critical' is the number a reading should be judged against.
+  readThermalCriticalMilli: (zone) => {
+    const dir = `${THERMAL_ROOT}/${zone}`;
+    for (const entry of readdirSync(dir)) {
+      const m = entry.match(/^trip_point_(\d+)_type$/);
+      if (!m) continue;
+      if (readFileSync(`${dir}/${entry}`, 'utf8').trim() !== 'critical') continue;
+      return readFileSync(`${dir}/trip_point_${m[1]}_temp`, 'utf8');
+    }
+    return '';
+  },
 };
 
 /**
@@ -318,17 +331,39 @@ function readLinuxTempC(sources) {
   }
 
   let hottest;
+  let hottestZone;
   for (const zone of zones || []) {
     try {
       const celsius = Number(String(sources.readThermalZone(zone)).trim()) / 1000;
       if (celsius >= TEMP_MIN_C && celsius <= TEMP_MAX_C) {
-        if (hottest === undefined || celsius > hottest) hottest = celsius;
+        if (hottest === undefined || celsius > hottest) {
+          hottest = celsius;
+          hottestZone = zone;
+        }
       }
     } catch {
       // Unreadable zone: skip it, keep whatever the other zones gave us.
     }
   }
-  return hottest === undefined ? undefined : Math.round(hottest * 10) / 10;
+  if (hottest === undefined) return undefined;
+
+  // The limit MUST come from the same zone as the reading. Pairing the
+  // hottest zone's temperature with some other zone's critical point would
+  // produce a headroom figure describing neither.
+  let limitC;
+  try {
+    const raw = String(sources.readThermalCriticalMilli(hottestZone) ?? '').trim();
+    const c = Number(raw) / 1000;
+    // A critical point below the current reading, or outside plausible die
+    // temperatures, is a broken table rather than an emergency.
+    if (raw !== '' && Number.isFinite(c) && c > hottest && c <= TEMP_MAX_C) {
+      limitC = Math.round(c * 10) / 10;
+    }
+  } catch {
+    // No trip table: publish the reading without a limit.
+  }
+
+  return { tempC: Math.round(hottest * 10) / 10, limitC };
 }
 
 /**
@@ -369,8 +404,16 @@ export function collectHostTelemetry({ machine, kind, model, sources = defaultSo
 
   try {
     if (sources.platform() === 'linux') {
-      const tempC = readLinuxTempC(sources);
-      if (tempC !== undefined) host.temp_c = tempC;
+      const reading = readLinuxTempC(sources);
+      if (reading !== undefined) {
+        host.temp_c = reading.tempC;
+        // Published so a dashboard can colour a temperature against THIS
+        // machine's own limit instead of a guessed scale: 49 C is idle on a
+        // box that trips at 104 and alarming on one that trips at 60. A host
+        // that declares no critical point simply omits this, and the reader
+        // falls back to its own default (petrus, 17 Sep 2026).
+        if (reading.limitC !== undefined) host.temp_limit_c = reading.limitC;
+      }
     }
   } catch {
     // No thermal zones exposed; publish without a temperature.
