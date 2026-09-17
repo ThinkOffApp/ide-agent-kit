@@ -8,6 +8,7 @@ const IDLE_AFTER_SEC = 300;
 import { collectHostTelemetry } from '../host-telemetry.js';
 import { ServedModelProbe } from '../served-model.js';
 import { ModelAvailabilityProbe } from '../model-availability.js';
+import { StatePublisher } from '../state-publisher.js';
 
 /**
  * Desktop Adapter - detects active window and context on macOS.
@@ -25,6 +26,7 @@ export class DesktopAdapter {
   #modelProbe;
   #availabilityProbe;
   #pollIntervalMs;
+  #publisher;
 
   /**
    * @param {import('../client.js').IntentClient} client
@@ -57,7 +59,12 @@ export class DesktopAdapter {
     this.#modelProbe = modelProbe === undefined
       ? new ServedModelProbe({ guard: id => scan?.couldLoad(id) ?? false })
       : modelProbe;
-    this.#pollIntervalMs = pollIntervalMs;
+    if (!Number.isFinite(pollIntervalMs) || pollIntervalMs <= 0) throw new Error('Invalid pollIntervalMs');
+    // One timer owns both telemetry and liveness. Default server device TTL is 90s.
+    this.#pollIntervalMs = Math.min(pollIntervalMs, 60000);
+    this.#publisher = new StatePublisher(fields => this.#client.patchDevice(fields), {
+      refreshMs: this.#pollIntervalMs,
+    });
     this.#pollTimer = null;
   }
 
@@ -111,7 +118,7 @@ export class DesktopAdapter {
    */
   async publishState() {
     const state = this.#detectState();
-    await this.#client.patchDevice(state);
+    await this.#publisher.publish({ ...state, ttl_sec: 90 });
   }
 
   /**
@@ -121,7 +128,6 @@ export class DesktopAdapter {
     this.stop();
     // Publish immediately
     this.publishState().catch(() => {});
-    this.#client.startHeartbeat();
     // Started AFTER the first publish and never awaited, so the machine
     // appears on the dashboard at once with whatever vitals it has, label or
     // no label. The first probe fills the label in for the next beat.
@@ -129,6 +135,9 @@ export class DesktopAdapter {
     // Same contract, slower timer: the scan is disk-bound, so it never runs on
     // the heartbeat's path and the first beat goes out without waiting for it.
     this.#availabilityProbe?.start();
+    // this.#client.startHeartbeat() removed: the StatePublisher's own
+    // refreshMs timer now re-sends the last state as the liveness beat, so a
+    // second heartbeat mechanism only doubled the writes (c0ed66d, 18 Sep 2026).
     this.#pollTimer = setInterval(() => {
       this.publishState().catch(() => {});
     }, this.#pollIntervalMs);
@@ -142,7 +151,6 @@ export class DesktopAdapter {
     }
     this.#modelProbe?.stop();
     this.#availabilityProbe?.stop();
-    this.#client.stopHeartbeat();
   }
 
   /**
