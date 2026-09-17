@@ -128,11 +128,11 @@ function gateOpen() {
   catch { return false; }
 }
 
-if (gateOpen()) await iak.publishStatus({ status: 'active', currentTask: null });
+if (gateOpen()) await iak.publishStatus({ status: 'active', currentTask: null, heartbeat: true });
 
 const agentTimer = setInterval(() => {
   if (!gateOpen()) return;
-  iak.publishStatus({ status: 'active', currentTask: null }).catch(() => {});
+  iak.publishStatus({ status: 'active', currentTask: null, heartbeat: true }).catch(() => {});
 }, Math.min(pollIntervalMs, 120000));
 
 console.log(`uik-daemon: device=${deviceId} agent=${agentHandle} interval=${pollIntervalMs}ms`);

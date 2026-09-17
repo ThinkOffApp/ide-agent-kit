@@ -52,3 +52,12 @@ test('desktop uses one bounded timer, not an independent heartbeat', async (t) =
 test('invalid refresh intervals are rejected', () => {
   for (const n of [0, -1, NaN, Infinity]) assert.throws(() => new StatePublisher(async () => {}, { refreshMs: n }));
 });
+
+ test('explicit liveness tick is not skipped because the last request completed late', async () => {
+  let now = 0, sends = 0;
+  const p = new StatePublisher(async () => { sends++; now += 1000; }, { refreshMs: 120000, now: () => now });
+  await p.publish({ status: 'active' });
+  now = 120000;
+  await p.publish({ status: 'active' }, { force: true });
+  assert.equal(sends, 2);
+});
