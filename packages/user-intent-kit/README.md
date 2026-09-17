@@ -344,3 +344,24 @@ its actual supervisor process instead of a bare timer, e.g.
 ## License
 
 AGPL-3.0
+
+### Request coalescing and liveness
+
+DesktopAdapter now uses one telemetry timer rather than also starting a separate
+30-second client heartbeat. Sampling is capped at 60 seconds and device writes
+explicitly retain a 90-second TTL. Every sample refreshes the full device payload;
+this preserves changing vitals and avoids stale rows for old 120-second settings.
+Agent status sends on status/task changes and otherwise refreshes every 120
+seconds (300-second TTL). Agent vitals are collected on those actual sends.
+One request per adapter is in flight; pending updates coalesce to the latest
+state. Failed writes do not advance the successful checkpoint and retry on the
+next sample. Network outages and event-loop delays can still make a device stale.
+Room polling, message delivery and command handling are unaffected.
+
+For the old 120-second daemon configuration, a primary desktop publisher formerly
+made 2,880 standalone heartbeats plus 720 device and 720 agent writes per day.
+The new steady schedule is 1,440 device plus 720 agent writes: 4,320 → 2,160/day,
+a 50% reduction for that daemon, excluding startup/status changes and retries.
+These are schedule-derived counts, not measured Vercel billing or fleet totals.
+The test suite separately verifies 720 unchanged-agent writes over a simulated day.
+Standalone vitals scripts and secondary agents still contribute additional traffic.

@@ -39,6 +39,11 @@ const deviceKind = process.env.INTENT_DEVICE_KIND || undefined;
 const publishDevice = process.env.INTENT_DEVICE_PUBLISH !== '0';
 const pollIntervalMs = Number(process.env.POLL_INTERVAL_MS || 30000);
 
+if (!Number.isFinite(pollIntervalMs) || pollIntervalMs <= 0) {
+  console.error('uik-daemon: POLL_INTERVAL_MS must be positive and finite');
+  process.exit(1);
+}
+
 if (!apiKey || !userId) {
   console.error('uik-daemon: INTENT_API_KEY and INTENT_USER_ID required');
   process.exit(1);
@@ -83,7 +88,7 @@ if (gateOpen()) await iak.publishStatus({ status: 'active', currentTask: null })
 const agentTimer = setInterval(() => {
   if (!gateOpen()) return;
   iak.publishStatus({ status: 'active', currentTask: null }).catch(() => {});
-}, pollIntervalMs);
+}, Math.min(pollIntervalMs, 120000));
 
 console.log(`uik-daemon: device=${deviceId} agent=${agentHandle} interval=${pollIntervalMs}ms`);
 

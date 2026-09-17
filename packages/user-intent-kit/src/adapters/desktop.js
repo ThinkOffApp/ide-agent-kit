@@ -6,6 +6,7 @@ import { platform } from 'node:os';
 /** Idle longer than this and the user is not at this machine. */
 const IDLE_AFTER_SEC = 300;
 import { collectHostTelemetry } from '../host-telemetry.js';
+import { StatePublisher } from '../state-publisher.js';
 
 /**
  * Desktop Adapter - detects active window and context on macOS.
@@ -20,6 +21,7 @@ export class DesktopAdapter {
   #machine;
   #kind;
   #pollIntervalMs;
+  #publisher;
 
   /**
    * @param {import('../client.js').IntentClient} client
@@ -30,7 +32,12 @@ export class DesktopAdapter {
     this.#client = client;
     this.#machine = machine ?? client?.deviceId ?? undefined;
     this.#kind = kind;
-    this.#pollIntervalMs = pollIntervalMs;
+    if (!Number.isFinite(pollIntervalMs) || pollIntervalMs <= 0) throw new Error('Invalid pollIntervalMs');
+    // One timer owns both telemetry and liveness. Default server device TTL is 90s.
+    this.#pollIntervalMs = Math.min(pollIntervalMs, 60000);
+    this.#publisher = new StatePublisher(fields => this.#client.patchDevice(fields), {
+      refreshMs: this.#pollIntervalMs,
+    });
     this.#pollTimer = null;
   }
 
@@ -39,7 +46,7 @@ export class DesktopAdapter {
    */
   async publishState() {
     const state = this.#detectState();
-    await this.#client.patchDevice(state);
+    await this.#publisher.publish({ ...state, ttl_sec: 90 });
   }
 
   /**
@@ -49,7 +56,6 @@ export class DesktopAdapter {
     this.stop();
     // Publish immediately
     this.publishState().catch(() => {});
-    this.#client.startHeartbeat();
     this.#pollTimer = setInterval(() => {
       this.publishState().catch(() => {});
     }, this.#pollIntervalMs);
@@ -61,7 +67,6 @@ export class DesktopAdapter {
       clearInterval(this.#pollTimer);
       this.#pollTimer = null;
     }
-    this.#client.stopHeartbeat();
   }
 
   /**
