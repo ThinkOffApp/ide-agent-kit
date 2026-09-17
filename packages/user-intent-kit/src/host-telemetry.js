@@ -354,9 +354,16 @@ function readLinuxTempC(sources) {
   try {
     const raw = String(sources.readThermalCriticalMilli(hottestZone) ?? '').trim();
     const c = Number(raw) / 1000;
-    // A critical point below the current reading, or outside plausible die
-    // temperatures, is a broken table rather than an emergency.
-    if (raw !== '' && Number.isFinite(c) && c > hottest && c <= TEMP_MAX_C) {
+    // Plausibility is judged on the VALUE ALONE, never against the current
+    // reading. An earlier cut required `c > hottest`, reasoning that a
+    // critical point below the temperature had to be a broken table. It is
+    // the opposite: crossing the critical trip is a protection event the
+    // kernel acts on, so a box reading 105 C against a 100 C critical is in
+    // exactly the trouble a dashboard exists to show. That guard deleted the
+    // limit at the only moment it mattered, and a reader falling back to a
+    // default would have painted a thermally emergency box calmer than it
+    // was. (codexmb, 17 Sep 2026.)
+    if (raw !== '' && Number.isFinite(c) && c >= TEMP_MIN_C && c <= TEMP_MAX_C) {
       limitC = Math.round(c * 10) / 10;
     }
   } catch {
