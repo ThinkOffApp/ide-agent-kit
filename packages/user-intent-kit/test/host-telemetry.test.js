@@ -299,10 +299,28 @@ test('an unreadable trip table costs the limit, never the temperature', () => {
   assert.ok(!('temp_limit_c' in host));
 });
 
+test('a critical point is kept when the machine has REACHED it', () => {
+  // The moment the limit matters most. An earlier cut dropped any critical
+  // point at or below the reading as "a broken table", so a box sitting on
+  // its trip published no limit at all and a reader fell back to a calmer
+  // default. Crossing the critical trip is a protection event, not bad data.
+  const at = collectHostTelemetry({
+    sources: sources({ zones: { thermal_zone0: '100000' }, trips: { thermal_zone0: '100000' } }),
+  });
+  assert.equal(at.temp_c, 100);
+  assert.equal(at.temp_limit_c, 100, 'dropped the limit at exactly the trip point');
+
+  const over = collectHostTelemetry({
+    sources: sources({ zones: { thermal_zone0: '105000' }, trips: { thermal_zone0: '100000' } }),
+  });
+  assert.equal(over.temp_c, 105);
+  assert.equal(over.temp_limit_c, 100, 'dropped the limit on a box that is OVER it');
+});
+
 test('a nonsense critical point is dropped rather than published', () => {
-  // Below the current reading, or hotter than any real die: a broken table,
-  // not an emergency. Publishing it would paint a cool box fuchsia.
-  for (const bad of ['30000', '900000', 'not-a-number', '']) {
+  // Judged on the value alone: unparseable, empty, or hotter than any real
+  // die. Deliberately NOT "below the current reading" - see the test above.
+  for (const bad of ['900000', 'not-a-number', '']) {
     const host = collectHostTelemetry({
       sources: sources({ zones: { thermal_zone0: '49000' }, trips: { thermal_zone0: bad } }),
     });
