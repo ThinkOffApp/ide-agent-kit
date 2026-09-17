@@ -11,7 +11,8 @@ import { collectHostTelemetry } from '../src/host-telemetry.js';
  * and "tests pass" would say nothing about the Pi.
  */
 function sources({ platform = 'linux', load = [1.8, 1.7, 1.6], cpuCount = 4, zones = {},
-                   totalMem = 16e9, freeMem = 4e9, availMem = 12e9, commands = {} } = {}) {
+                   totalMem = 16e9, freeMem = 4e9, availMem = 12e9, commands = {},
+                   trips = {} } = {}) {
   return {
     platform: () => platform,
     loadavg: () => load,
@@ -28,6 +29,11 @@ function sources({ platform = 'linux', load = [1.8, 1.7, 1.6], cpuCount = 4, zon
       const value = zones[zone];
       if (value instanceof Error) throw value;
       return value;
+    },
+    readThermalCriticalMilli: (zone) => {
+      const value = trips[zone];
+      if (value instanceof Error) throw value;
+      return value ?? '';
     },
   };
 }
@@ -258,4 +264,49 @@ test('omits available when the OS will not say', () => {
 test('zero available is a real reading', () => {
   const host = collectHostTelemetry({ sources: sources({ availMem: 0 }) });
   assert.equal(host.mem_available_gb, 0);
+});
+
+// --- the machine's own limit, so a dashboard is not guessing a scale ---
+
+test('publishes the critical trip point of the SAME zone the reading came from', () => {
+  const host = collectHostTelemetry({
+    sources: sources({
+      zones: { thermal_zone0: '49000', thermal_zone1: '72000' },
+      // zone1 is the hottest, so zone1's limit is the one that applies.
+      trips: { thermal_zone0: '104000', thermal_zone1: '95000' },
+    }),
+  });
+  assert.equal(host.temp_c, 72);
+  assert.equal(host.temp_limit_c, 95, "paired the reading with another zone's limit");
+});
+
+test('a host that declares no critical point publishes a temperature and no limit', () => {
+  const host = collectHostTelemetry({
+    sources: sources({ zones: { thermal_zone0: '49000' }, trips: {} }),
+  });
+  assert.equal(host.temp_c, 49);
+  assert.ok(!('temp_limit_c' in host), 'invented a limit the machine never declared');
+});
+
+test('an unreadable trip table costs the limit, never the temperature', () => {
+  const host = collectHostTelemetry({
+    sources: sources({
+      zones: { thermal_zone0: '49000' },
+      trips: { thermal_zone0: new Error('EACCES') },
+    }),
+  });
+  assert.equal(host.temp_c, 49);
+  assert.ok(!('temp_limit_c' in host));
+});
+
+test('a nonsense critical point is dropped rather than published', () => {
+  // Below the current reading, or hotter than any real die: a broken table,
+  // not an emergency. Publishing it would paint a cool box fuchsia.
+  for (const bad of ['30000', '900000', 'not-a-number', '']) {
+    const host = collectHostTelemetry({
+      sources: sources({ zones: { thermal_zone0: '49000' }, trips: { thermal_zone0: bad } }),
+    });
+    assert.equal(host.temp_c, 49, `temp lost for trip=${bad}`);
+    assert.ok(!('temp_limit_c' in host), `published nonsense limit ${bad}`);
+  }
 });
