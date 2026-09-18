@@ -173,9 +173,13 @@ async function bootAndListTools(configPath) {
   child.kill('SIGTERM');
   await new Promise((r) => child.on('exit', r));
   const messages = Buffer.concat(stdout).toString('utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l));
+  const advertised = messages.find((m) => m.id === 2)?.result?.tools || [];
   return {
     init: messages.find((m) => m.id === 1),
-    tools: (messages.find((m) => m.id === 2)?.result?.tools || []).map((t) => t.name).sort(),
+    tools: advertised.map((t) => t.name).sort(),
+    // Full tool objects: a tool's description is what an agent reads before
+    // choosing it, so it is worth asserting on, not just the name.
+    raw: advertised,
   };
 }
 
@@ -229,6 +233,32 @@ test('iak-mcp.mjs with room API config exposes low-latency room tools', async ()
     assert.ok(tools.includes('room_post'), `expected room_post, got ${tools.join(',')}`);
     assert.ok(tools.includes('room_recent'), `expected room_recent, got ${tools.join(',')}`);
     assert.ok(tools.includes('alert_recipient'), `expected alert_recipient, got ${tools.join(',')}`);
+    // Without this tool an agent whose only route to the room is this server
+    // cannot react at all, so every acknowledgement becomes a message -- which
+    // is the cost petrus asked us to remove.
+    assert.ok(tools.includes('room_react'), `expected room_react, got ${tools.join(',')}`);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('iak-mcp.mjs room_react describes itself as a REPLACEMENT for posting agreement', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'iak-mcp-test-'));
+  const cfgPath = join(dir, 'config.json');
+  writeFileSync(cfgPath, JSON.stringify({
+    poller: { api_key: 'test-key', rooms: ['thinkoff-development'] },
+    tmux: { allow: [], default_session: 't' },
+  }));
+  try {
+    const { raw } = await bootAndListTools(cfgPath);
+    const tool = raw.find(t => t.name === 'room_react');
+    assert.ok(tool, 'room_react missing');
+    // The description is the only thing an agent reads before choosing between
+    // reacting and posting, so the guidance has to live IN it, not in a doc on
+    // one machine. That was the actual failure: the rule existed, on one box.
+    assert.match(tool.description, /INSTEAD of posting/);
+    assert.match(tool.description, /costs the human/);
+    assert.deepEqual(tool.inputSchema.required, ['message_id', 'emoji']);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
