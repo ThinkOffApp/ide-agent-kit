@@ -6,6 +6,7 @@ import assert from 'node:assert/strict';
 import {
   createIntent,
   decideIntent,
+  expireIntent,
   waitForDecision,
   listIntents,
   startConfirmationsServer,
@@ -481,4 +482,73 @@ test('defaultCallbackBase: a bound IPv6 host is preserved and bracketed', () => 
   assert.equal(defaultCallbackBase({ host: 'fd00::123', port: 8790 }, ifaces), 'http://[fd00::123]:8790');
   // the v6 wildcard still advertises a LAN IPv4, which is what phones dial
   assert.equal(defaultCallbackBase({ host: '::' }, ifaces), 'http://192.168.50.241:8788');
+});
+
+
+// --- expiry: a timed-out gate must settle its own intent -------------------
+// Regression cover for 2026-09-18: the PreToolUse gate called
+// POST /intent/:id/expire on timeout-allow, the daemon had no such route, and
+// 31 already-executed commands sat `pending` with live buttons.
+
+test('expireIntent settles a pending intent without deciding it', () => {
+  _resetForTests();
+  return createIntent({ prompt: 'p', announce: async () => {} }).then((id) => {
+    const r = expireIntent(id, { timeoutSec: 120 });
+    assert.equal(r.ok, true);
+    assert.equal(r.status, 'expired');
+    const i = listIntents().find((x) => x.id === id);
+    assert.equal(i.status, 'expired');
+    // Expiry is not consent: no approve/deny may be recorded.
+    assert.equal(i.decision, null);
+    // And it leaves the pending queue, which is the whole point.
+    assert.equal(listIntents().filter((x) => x.status === 'pending').length, 0);
+  });
+});
+
+test('expireIntent is idempotent and never overrides a human decision', async () => {
+  _resetForTests();
+  const id = await createIntent({ prompt: 'p', announce: async () => {} });
+  assert.equal(expireIntent(id).ok, true);
+  assert.equal(expireIntent(id).idempotent, true);
+
+  const decided = await createIntent({ prompt: 'q', announce: async () => {} });
+  decideIntent(decided, 'deny');
+  const r = expireIntent(decided, { timeoutSec: 120 });
+  assert.equal(r.ok, true);
+  assert.equal(r.noop, true);
+  // The human's deny stands.
+  assert.equal(listIntents().find((x) => x.id === decided).decision, 'deny');
+});
+
+test('expireIntent releases waiters instead of leaving them hanging', async () => {
+  _resetForTests();
+  const id = await createIntent({ prompt: 'p', announce: async () => {} });
+  const wait = waitForDecision(id, { timeoutMs: 1500 });
+  expireIntent(id, { timeoutSec: 1 });
+  const r = await wait;
+  assert.equal(r.status, 'expired');
+});
+
+test('expireIntent rejects an unknown id', () => {
+  _resetForTests();
+  assert.equal(expireIntent('nope').ok, false);
+});
+
+test('HTTP POST /intent/:id/expire settles it, 404s an unknown id', async () => {
+  _resetForTests();
+  httpServer = httpServer || startConfirmationsServer({ port: TEST_PORT, host: '127.0.0.1' });
+  const id = await createIntent({ prompt: 'p', announce: async () => {} });
+  const ok = await fetch(`http://127.0.0.1:${TEST_PORT}/intent/${id}/expire`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ timeout_sec: 120 }),
+  });
+  assert.equal(ok.status, 200);
+  assert.equal((await ok.json()).status, 'expired');
+  assert.equal(listIntents().find((x) => x.id === id).status, 'expired');
+
+  const missing = await fetch(`http://127.0.0.1:${TEST_PORT}/intent/nope/expire`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}',
+  });
+  assert.equal(missing.status, 404);
 });
