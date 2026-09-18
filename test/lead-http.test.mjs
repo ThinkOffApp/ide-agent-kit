@@ -124,3 +124,82 @@ test('a proven lead still cannot clear a requiresHuman intent', async () => {
   assert.equal(res.status, 403);
   assert.equal(listIntents().find(i => i.id === id).status, 'pending');
 });
+
+test('the shared token cannot approve what a proven lead was just refused', async () => {
+  // @codexmb, 2026-09-18: the lead's own token got 403 on a requiresHuman
+  // intent, then the SHARED token with no actor got 200 on the same one.
+  // `principal || OWNER_HANDLE` handed the owner's authority to anyone who
+  // omitted a field, so the boundary was bypassable by deleting `actor`.
+  _resetForTests();
+  const { setLead } = await import('../src/confirmations.mjs');
+  setLead('hermes', { actor: 'petrus' });
+  const id = await createIntent({
+    prompt: 'cp ~/.ssh/id_ed25519 /tmp', session: 's', channels: [],
+    requiresHuman: true, announce: async () => {},
+  });
+  const asLead = await post(`/intent/${id}/decision`, { decision: 'approve' }, LEAD_TOKEN);
+  assert.equal(asLead.status, 403, 'a lead may not clear an owner-only intent');
+  const anonymous = await post(`/intent/${id}/decision`, { decision: 'approve' });
+  assert.equal(anonymous.status, 403, 'and neither may the same caller by omitting actor');
+  assert.equal(listIntents().find(i => i.id === id).status, 'pending');
+});
+
+test('an ordinary intent is refused anonymously too once principals exist', async () => {
+  // Not a special case for requiresHuman: a daemon that says it can identify
+  // callers must identify them. Narrowing the refusal to owner-only intents
+  // would leave the same hole one field away.
+  _resetForTests();
+  const id = await createIntent({ prompt: 'ls', session: 's', channels: [], announce: async () => {} });
+  const res = await post(`/intent/${id}/decision`, { decision: 'approve' });
+  assert.equal(res.status, 403);
+  assert.equal(listIntents().find(i => i.id === id).status, 'pending');
+});
+
+test('LEGACY MODE: with no principals, anonymous still decides — Petrus is not locked out', async () => {
+  // The other half of the branch above, and the one that matters to the human:
+  // a daemon that has NOT been given per-agent tokens must behave exactly as it
+  // does today, or his phone buttons stop working the moment this ships.
+  // Proving only the refusal would leave that untested.
+  _resetForTests();
+  const legacy = startConfirmationsServer({
+    port: 0, host: '127.0.0.1',
+    receiptsPath: '/tmp/iak-test-lead-legacy.jsonl',
+    announce: async () => {},
+  });
+  await new Promise(r => legacy.listen(0, '127.0.0.1', r));
+  const url = `http://127.0.0.1:${legacy.address().port}`;
+  try {
+    const id = await createIntent({ prompt: 'ls', session: 's', channels: [], announce: async () => {} });
+    const res = await fetch(`${url}/intent/${id}/decision`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ decision: 'approve' }),
+    });
+    assert.equal(res.status, 200, 'legacy anonymous approval must keep working');
+    assert.equal(listIntents().find(i => i.id === id).decision, 'approve');
+  } finally {
+    await new Promise(r => legacy.close(r));
+  }
+});
+
+test('LEGACY MODE: /lead still refuses, because delegation needs identity', async () => {
+  _resetForTests();
+  const legacy = startConfirmationsServer({
+    port: 0, host: '127.0.0.1',
+    receiptsPath: '/tmp/iak-test-lead-legacy.jsonl',
+    announce: async () => {},
+  });
+  await new Promise(r => legacy.listen(0, '127.0.0.1', r));
+  const url = `http://127.0.0.1:${legacy.address().port}`;
+  try {
+    const res = await fetch(`${url}/lead`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ handle: 'hermes', actor: 'petrus' }),
+    });
+    assert.equal(res.status, 403);
+    assert.match((await res.json()).error, /no per-agent tokens/i);
+  } finally {
+    await new Promise(r => legacy.close(r));
+  }
+});
