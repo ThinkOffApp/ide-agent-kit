@@ -88,8 +88,14 @@ function saveSeenIds(path, ids) {
 //
 // The key also no longer goes through a shell: `curl -H "X-API-Key: ${key}"`
 // under execSync puts the credential in the process table for anyone running ps.
+export // The base is injectable ONLY so the startup/replay path can be exercised
+// against a stub room server. @codexmb: "handle tests alone do not exercise
+// poller startup/replay" -- and they cannot, if the host is hardcoded.
+let API_BASE = 'https://groupmind.one/api/v1';
+export function __setApiBaseForTest(base) { API_BASE = base || 'https://groupmind.one/api/v1'; }
+
 export async function fetchRoomMessages(room, apiKey, limit = 20) {
-  const url = `https://groupmind.one/api/v1/rooms/${encodeURIComponent(room)}/messages?limit=${limit}`;
+  const url = `${API_BASE}/rooms/${encodeURIComponent(room)}/messages?limit=${limit}`;
   try {
     const res = await fetch(url, {
       headers: { 'X-API-Key': apiKey },
@@ -121,7 +127,7 @@ async function postMessage(room, body, apiKey, config) {
     // that never reached the room (@codexmb). The status is checked now, and the
     // key no longer travels through a command line where ps can read it.
     try {
-      const res = await fetch('https://groupmind.one/api/v1/messages', {
+      const res = await fetch(`${API_BASE}/messages`, {
         method: 'POST',
         headers: { 'X-API-Key': apiKey, 'Content-Type': 'application/json' },
         body: JSON.stringify({ room, body }),
@@ -401,6 +407,7 @@ export async function startRoomAutomation({ rooms, apiKey, handle, interval, con
   const receiptPath = config?.receipts?.path || './ide-agent-receipts.jsonl';
   const pollInterval = interval || config?.automation?.interval_sec || 30;
   const selfHandle = resolveSelfHandle({ explicit: handle, config });
+  if (config?.automation?.api_base) __setApiBaseForTest(config.automation.api_base);
   const cooldownMs = (config?.automation?.cooldown_sec || 5) * 1000;
 
   console.log(`Room automation started`);
