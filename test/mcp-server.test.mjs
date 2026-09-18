@@ -378,14 +378,32 @@ test('ackNotificationFile: REGRESSION — poller append between read and ack sur
   }
 });
 
-test('ackNotificationFile: no prior read (null) keeps legacy clear-all contract', () => {
+// CONTRACT CHANGE 2026-09-18: a null prior read used to clear the file and return
+// advice not to do that. The advice arrived after the messages were gone. It now
+// refuses when there is anything unread, and stays a no-op when there is not.
+test('ackNotificationFile: no prior read (null) REFUSES and preserves unread lines', () => {
   const dir = mkdtempSync(join(tmpdir(), 'iak-ack-test-'));
   const notifyFile = join(dir, 'new-messages.txt');
   try {
     writeFileSync(notifyFile, '[room] a: x\n[room] b: y\n');
     const r = ackNotificationFile(notifyFile, null);
-    assert.equal(r.mode, 'all');
-    assert.equal(readFileSync(notifyFile, 'utf8'), '');
+    assert.equal(r.mode, 'refused');
+    assert.equal(r.preservedLines, 2);
+    assert.match(r.error, /room_list_new first/);
+    assert.equal(readFileSync(notifyFile, 'utf8'), '[room] a: x\n[room] b: y\n');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('ackNotificationFile: no prior read (null) on an EMPTY file is still a no-op', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'iak-ack-test-'));
+  const notifyFile = join(dir, 'new-messages.txt');
+  try {
+    writeFileSync(notifyFile, '');
+    const r = ackNotificationFile(notifyFile, null);
+    assert.equal(r.mode, 'noop');
+    assert.equal(r.preservedLines, 0);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -466,6 +484,46 @@ test('iak-mcp.mjs REGRESSION: room_ack clears only what room_list_new returned',
     // Second read+ack drains the file completely.
     const listed2 = await request('tools/call', { name: 'room_list_new', arguments: {} });
     assert.match(listed2.result.content[0].text, /send all 3/);
+    await request('tools/call', { name: 'room_ack', arguments: {} });
+    assert.equal(readFileSync(notifyFile, 'utf8'), '');
+  } finally {
+    await close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('iak-mcp.mjs REGRESSION: a bare room_ack REFUSES to discard unread messages', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'iak-mcp-test-'));
+  const cfgPath = join(dir, 'config.json');
+  const notifyFile = join(dir, 'new-messages.txt');
+  writeFileSync(cfgPath, JSON.stringify({
+    poller: { notification_file: notifyFile },
+    tmux: { allow: [], default_session: 't' },
+  }));
+  // Two lines nobody has read, and NO room_list_new this session.
+  writeFileSync(notifyFile, '[room] petrus: did you hear me\n[room] petrus: answer\n');
+  const { request, close } = bootMcp(cfgPath);
+  try {
+    const acked = await request('tools/call', { name: 'room_ack', arguments: {} });
+    const text = acked.result.content[0].text;
+    assert.match(text, /REFUSING to ack/);
+    assert.match(text, /room_list_new first/);
+    // The point of the guard: the messages are STILL THERE.
+    assert.equal(
+      readFileSync(notifyFile, 'utf8'),
+      '[room] petrus: did you hear me\n[room] petrus: answer\n',
+      'a refused ack must not modify the notification file'
+    );
+
+    // An empty file is harmless to ack cold -- that still succeeds as a no-op,
+    // so the guard refuses the destructive case only.
+    writeFileSync(notifyFile, '');
+    const acked2 = await request('tools/call', { name: 'room_ack', arguments: {} });
+    assert.match(acked2.result.content[0].text, /already empty/);
+
+    // And the normal path is untouched: list, then ack, and it clears.
+    writeFileSync(notifyFile, '[room] alice: hello\n');
+    await request('tools/call', { name: 'room_list_new', arguments: {} });
     await request('tools/call', { name: 'room_ack', arguments: {} });
     assert.equal(readFileSync(notifyFile, 'utf8'), '');
   } finally {
