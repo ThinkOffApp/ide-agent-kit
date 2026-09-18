@@ -240,6 +240,35 @@ async function fetchRoomMessages({ config, room, limit }) {
   return JSON.parse(text);
 }
 
+// React to a room message instead of posting "agreed" as its own message.
+//
+// Added 2026-09-18 after petrus: "everybody saying they agree with emojis takes
+// zero space, with messages at least one page ... i cant find answers to my
+// questions as id need to scroll 30 pages". Agreement was costing him a screen
+// each time, and the only way to react was raw HTTP, which agents that talk to
+// the room exclusively through this server could not do at all.
+//
+// The room slug MUST be in the path. /messages/{id}/react and any /reactions
+// spelling 404, and three agents read those 404s as "the product has no
+// reactions" while he was using them daily.
+async function reactToRoomMessage({ config, room, messageId, emoji, remove }) {
+  const roomCfg = configuredRoomApi(config, { room });
+  if (!roomCfg.apiKey) throw new Error('room_react: missing poller.api_key or intent.apiKey');
+  if (!roomCfg.room) throw new Error('room_react: room is required');
+  if (!messageId) throw new Error('room_react: message_id is required');
+  if (!emoji) throw new Error('room_react: emoji is required');
+  const url = `${roomCfg.baseUrl}/rooms/${encodeURIComponent(roomCfg.room)}/messages/${encodeURIComponent(messageId)}/react`;
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: { ...roomHeaders(roomCfg.apiKey), 'Content-Type': 'application/json' },
+    body: JSON.stringify(remove ? { emoji, remove: true } : { emoji }),
+    signal: AbortSignal.timeout(5000),
+  });
+  const text = await res.text();
+  if (!res.ok) throw new Error(`room_react: HTTP ${res.status} — ${text}`);
+  return JSON.parse(text);
+}
+
 // Decides whether tmux_run should be exposed and why. Returns
 // {enabled: boolean, reason: string} so the boot log can explain itself.
 export function decideTmuxRunMode(config) {
@@ -633,6 +662,25 @@ export async function runMcpServer({ configPath } = {}) {
         },
       },
       {
+        name: 'room_react',
+        description:
+          'React to a room message with an emoji INSTEAD of posting a message that says the same thing. ' +
+          'Agreement, acknowledgement and "me too" are reactions, never posts: a reaction costs the human ' +
+          'reader no scrolling, a message costs a screen. Convention: ✅ agreed/done, 👀 taking it, ' +
+          '⚠️ blocked or a problem, 📩 detail sent by DM. Still post when you have a question, an answer, ' +
+          'or something broken or finished to report.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            message_id: { type: 'string', description: 'id of the room message to react to (from room_recent).' },
+            emoji: { type: 'string', description: 'The emoji, e.g. "✅".' },
+            room: { type: 'string', description: 'Room slug. Defaults to mcp.confirmations.room or first poller room.' },
+            remove: { type: 'boolean', description: 'Remove this reaction instead of adding it.', default: false },
+          },
+          required: ['message_id', 'emoji'],
+        },
+      },
+      {
         name: 'room_recent',
         description: 'Fetch recent messages from a configured GroupMind room without shelling out.',
         inputSchema: {
@@ -796,6 +844,24 @@ export async function runMcpServer({ configPath } = {}) {
             fromHandle: args.fromHandle || args.from_handle,
           });
           return ok(JSON.stringify(posted, null, 2));
+        }
+        case 'room_react': {
+          if (!roomToolsEnabled) return err('room_react: room API is not configured.');
+          // Deliberately NOT behind assertRoomVoice: a reaction is not the
+          // machine speaking, it is an acknowledgement, and a passive session
+          // being unable to react is what pushes it into posting a message.
+          try {
+            const reacted = await reactToRoomMessage({
+              config,
+              room: args.room,
+              messageId: args.message_id || args.messageId,
+              emoji: args.emoji,
+              remove: args.remove === true,
+            });
+            return ok(JSON.stringify(reacted, null, 2));
+          } catch (e) {
+            return err(String(e.message || e));
+          }
         }
         case 'room_recent': {
           if (!roomToolsEnabled) return err('room_recent: room API is not configured.');
