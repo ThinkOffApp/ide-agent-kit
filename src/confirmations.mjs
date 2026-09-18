@@ -315,6 +315,45 @@ export function getIntent(id) {
   };
 }
 
+// Settle an intent that timed out while nobody answered it.
+//
+// The PreToolUse gate waits IAK_GATE_TIMEOUT for a human, then proceeds under
+// IAK_GATE_DEFAULT=allow and calls this so the intent stops sitting in the
+// queue. Without it the request stays `pending` for ever: the phone shows a
+// list of commands that already ran, and every later tap is a no-op on a
+// decision that can no longer change anything. (2026-09-18: 31 such entries
+// had accumulated, the oldest three minutes after the daemon started.)
+//
+// Deliberately NOT decideIntent():
+//   - a real human approve/deny must win, so an already-decided intent is left
+//     exactly as it is;
+//   - expiry must never run an action. decideIntent() looks for an action bound
+//     to the intent and executes it; a timeout is not consent to do that.
+export function expireIntent(id, { timeoutSec, receiptsPath } = {}) {
+  const i = intents.get(id);
+  if (!i) return { ok: false, error: `unknown intent ${id}` };
+  if (i.status === 'expired') return { ok: true, idempotent: true, status: 'expired' };
+  if (i.status !== 'pending') {
+    // A human got there first. Their decision stands; say so rather than
+    // quietly overwriting it.
+    return { ok: true, noop: true, status: i.status, decision: i.decision };
+  }
+  i.status = 'expired';
+  i.decidedAt = Date.now();
+  i.decision = null;
+  i.timeoutSec = timeoutSec ?? null;
+  postReceipt(receiptsPath, {
+    kind: 'intent.expired', id, timeoutSec: i.timeoutSec,
+    expiredAt: i.decidedAt, prompt: i.prompt,
+  });
+  // Release anything still waiting so it does not hang on a settled intent.
+  for (const r of i.resolvers) {
+    try { r({ decision: null, expired: true, id }); } catch {}
+  }
+  i.resolvers = [];
+  return { ok: true, status: 'expired', timeoutSec: i.timeoutSec };
+}
+
 // Decide an intent. Returns true if decided, false if id unknown or already
 // decided. Idempotent for same decision; rejects different decision after
 // settle.
@@ -577,6 +616,9 @@ export function waitForDecision(id, { timeoutMs }) {
     }, timeoutMs);
     const resolverWithCleanup = (val) => {
       clearTimeout(timer);
+      // An expiry is not a decision. Reporting it as `decided` with a null
+      // decision is how a caller ends up believing someone approved something.
+      if (val.expired) { resolve({ status: 'expired', decision: null }); return; }
       resolve({ status: 'decided', decision: val.decision });
     };
     i.resolvers.push(resolverWithCleanup);
@@ -935,6 +977,29 @@ export function startConfirmationsServer({
         }
         const result = decideIntent(id, payload.decision, { receiptsPath });
         res.writeHead(result.ok ? 200 : 400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify(result));
+      });
+      return;
+    }
+    const expireMatch = url.pathname.match(/^\/intent\/([^/]+)\/expire$/);
+    if (req.method === 'POST' && expireMatch) {
+      const id = expireMatch[1];
+      let body = '';
+      req.on('data', (c) => { body += c; });
+      req.on('end', () => {
+        let payload = {};
+        if (body) {
+          try { payload = JSON.parse(body); } catch {
+            res.writeHead(400, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ ok: false, error: 'invalid json' }));
+            return;
+          }
+        }
+        const result = expireIntent(id, {
+          timeoutSec: payload.timeout_sec ?? payload.timeoutSec ?? null,
+          receiptsPath,
+        });
+        res.writeHead(result.ok ? 200 : 404, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify(result));
       });
       return;
