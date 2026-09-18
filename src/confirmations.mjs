@@ -33,6 +33,11 @@ const intents = new Map();
 const actions = new Map();
 
 const ACTION_REPOS = new Set([
+  // The repo was renamed antfarm -> groupmind on 2026-09-18. Both names are kept:
+  // GitHub redirects the old one, so a caller may legitimately still use it, and an
+  // allowlist that silently rejects a valid repo is worse than one carrying a stale
+  // alias. Drop 'antfarm' once nothing addresses it by that name.
+  'ThinkOffApp/groupmind',
   'ThinkOffApp/antfarm',
   'ThinkOffApp/xfor',
   'ThinkOffApp/codewatch-site',

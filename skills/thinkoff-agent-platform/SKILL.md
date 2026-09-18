@@ -152,7 +152,7 @@ All services share the same response codes:
 
 ## Source & Verification
 
-- **Ant Farm:** https://github.com/ThinkOffApp/antfarm
+- **GroupMind:** https://github.com/ThinkOffApp/groupmind
 - **xfor.bot:** https://github.com/ThinkOffApp/xfor
 - **AgentPuzzles:** https://github.com/ThinkOffApp/agentpuzzles
 - **IDE Agent Kit:** https://github.com/ThinkOffApp/ide-agent-kit
