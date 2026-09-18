@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
 import { execSync } from 'node:child_process';
-import { readFileSync, writeFileSync, appendFileSync, existsSync } from 'node:fs';
+import { readFileSync, writeFileSync, appendFileSync, existsSync, renameSync, unlinkSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { createReceipt, appendReceipt } from './receipt.mjs';
 import { canSend, markSent } from './rate-limiter.mjs';
@@ -59,9 +59,25 @@ function loadSeenIds(path) {
   }
 }
 
+// Write through a temp file and rename. A direct write that is interrupted
+// leaves a truncated or empty seen-file, and an empty seen-file on the next
+// start means every historical message is unseen again -- a crash during a
+// routine save becomes a replay of privileged commands (@codexmb). rename(2)
+// within a directory is atomic, so a reader sees the old file or the new one
+// and never a half-written one.
 function saveSeenIds(path, ids) {
   const arr = [...ids].slice(-2000);
-  writeFileSync(path, arr.join('\n') + '\n');
+  const tmp = `${path}.tmp-${process.pid}`;
+  try {
+    writeFileSync(tmp, arr.join('\n') + '\n');
+    renameSync(tmp, path);
+  } catch (e) {
+    // Losing the save is survivable; losing it SILENTLY is not, because the
+    // consequence lands on the next startup as a replay.
+    console.error(`  FAILED to persist seen ids to ${path}: ${e.message}`);
+    try { unlinkSync(tmp); } catch {}
+    throw e;
+  }
 }
 
 // Returns an array on success and NULL on failure. The difference matters: []
@@ -410,24 +426,47 @@ export async function startRoomAutomation({ rooms, apiKey, handle, interval, con
   //
   // Dispatch is gated on `ready`. Seeding retries on the poll interval until it
   // succeeds; until then the loop executes nothing.
-  let ready = seen.size > 0;
+  // Seeding is per ROOM, not per process. `seen.size > 0` was enough to declare
+  // the whole thing seeded, so adding a room to the list later meant its entire
+  // history arrived as new and any historical /lead in it would dispatch
+  // (@codexmb). The marker file records WHICH rooms have been seeded.
+  const seededFile = `${seenFile}.seeded`;
+  const seededRooms = new Set(
+    (() => { try { return readFileSync(seededFile, 'utf8').split('\n').filter(Boolean); } catch { return []; } })()
+  );
+  function markSeeded(room) {
+    seededRooms.add(room);
+    const tmp = `${seededFile}.tmp-${process.pid}`;
+    try { writeFileSync(tmp, [...seededRooms].join('\n') + '\n'); renameSync(tmp, seededFile); }
+    catch (e) { console.error(`  FAILED to record seeded rooms: ${e.message}`); try { unlinkSync(tmp); } catch {} throw e; }
+  }
+  // A pre-existing seen-file from before this marker existed counts as having
+  // seeded the rooms configured at that time -- otherwise the upgrade itself
+  // would replay them. New rooms added after this point still seed properly.
+  if (seen.size > 0 && seededRooms.size === 0) {
+    for (const room of rooms) seededRooms.add(room);
+    try { markSeeded(rooms[0]); } catch {}
+    console.log(`  existing seen-file adopted for ${rooms.length} room(s)`);
+  }
+
   async function trySeed() {
-    console.log(`  seeding seen IDs...`);
-    const fresh = new Set();
-    for (const room of rooms) {
+    const pending = rooms.filter(r => !seededRooms.has(r));
+    if (!pending.length) return true;
+    console.log(`  seeding ${pending.length} room(s): ${pending.join(', ')}`);
+    for (const room of pending) {
       const msgs = await fetchRoomMessages(room, apiKey, 50);
       if (msgs === null) {
         console.error(`  seeding ABORTED: could not read ${room}. Dispatch stays off until it succeeds.`);
         return false;
       }
-      for (const m of msgs) if (m.id) fresh.add(m.id);
+      for (const m of msgs) if (m.id) seen.add(m.id);
+      saveSeenIds(seenFile, seen);
+      markSeeded(room);
+      console.log(`  seeded ${room}; ${seen.size} ids known`);
     }
-    for (const id of fresh) seen.add(id);
-    saveSeenIds(seenFile, seen);
-    console.log(`  seeded ${seen.size} IDs`);
     return true;
   }
-  if (!ready) ready = await trySeed();
+  let ready = await trySeed();
 
   async function poll() {
     let actionsRun = 0;
@@ -517,21 +556,34 @@ export async function startRoomAutomation({ rooms, apiKey, handle, interval, con
     }
   }
 
-  // Initial poll
-  await poll();
-
-  // Start interval
-  const timer = setInterval(poll, pollInterval * 1000);
+  // setInterval(poll) fired an async function and dropped the promise, so a
+  // rejection inside a later poll went to unhandledRejection while the loop
+  // carried on looking healthy -- the CLI's .catch only ever covered the FIRST
+  // call (@codexmb). This schedules the next run only after the previous one
+  // settles, and a failure is loud without stopping the loop.
+  let stopped = false;
+  let timer = null;
+  const runLoop = async () => {
+    if (stopped) return;
+    try {
+      await poll();
+    } catch (e) {
+      console.error(`  poll failed: ${e?.message || e}`);
+      console.error('  automation continues; dispatch stays gated on a successful seed.');
+    }
+    if (!stopped) timer = setTimeout(runLoop, pollInterval * 1000);
+  };
+  await runLoop();
 
   process.on('SIGINT', () => {
     console.log('\nAutomation stopped.');
-    clearInterval(timer);
+    stopped = true; if (timer) clearTimeout(timer);
     process.exit(0);
   });
   process.on('SIGTERM', () => {
-    clearInterval(timer);
+    stopped = true; if (timer) clearTimeout(timer);
     process.exit(0);
   });
 
-  return timer;
+  return { stop: () => { stopped = true; if (timer) clearTimeout(timer); } };
 }
