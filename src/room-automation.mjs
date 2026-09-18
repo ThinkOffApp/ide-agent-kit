@@ -168,8 +168,16 @@ export async function handleLeadCommand(msg, { daemonUrl, ownerHandle = 'petrus'
 
   try {
     if (parsed.op === 'status') {
-      const { payload } = await callDaemon(daemonUrl, '/lead');
-      const lead = payload?.lead;
+      const { status, payload } = await callDaemon(daemonUrl, '/lead');
+      // A daemon that does not KNOW about /lead answers 404, and reading that
+      // as "unset" would be a false answer wearing a legitimate one — the same
+      // failure shape as an empty list that is really a broken query. Say the
+      // feature is not running instead.
+      if (status === 404 || !payload?.ok) {
+        return 'Team lead: this daemon does not have /lead — the feature is built but not '
+          + 'running here yet (it needs a restart). Confirmations are owner-only meanwhile.';
+      }
+      const lead = payload.lead;
       return lead
         ? `Team lead: ${lead.handle} (assigned by ${lead.assignedBy}).`
         : 'Team lead: unset. Only the owner can decide confirmations, and only the owner can appoint a lead.';
