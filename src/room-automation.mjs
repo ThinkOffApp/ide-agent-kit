@@ -130,9 +130,16 @@ function postMessage(room, body, apiKey, config) {
 const LEAD_COMMAND_RE = /^\s*\/lead\b\s*(.*)$/i;
 
 function parseLeadCommand(body) {
-  const m = LEAD_COMMAND_RE.exec(body || '');
+  // Read the FIRST LINE only. The original regex ran against the whole body
+  // with no /m flag, so `$` demanded end-of-string and any second line made the
+  // command invisible: @claudeMB's test message was "/lead status" followed by
+  // a note to petrus, and it was silently ignored. Someone typing a command and
+  // then a sentence has still typed a command.
+  const lines = String(body || '').split('\n');
+  const m = LEAD_COMMAND_RE.exec(lines[0] || '');
   if (!m) return null;
   const rest = (m[1] || '').trim();
+  const hasMoreLines = lines.slice(1).join('').trim().length > 0;
   if (!rest || /^status$/i.test(rest)) return { op: 'status' };
   if (/^clear$/i.test(rest)) return { op: 'clear' };
   // STRICT on purpose: exactly one token, nothing trailing. Taking the first
@@ -140,6 +147,11 @@ function parseLeadCommand(body) {
   // guess that hands command-approval rights to the wrong agent. When the
   // input is not unambiguous, refuse and say so.
   if (!/^@?[A-Za-z0-9_.-]+$/.test(rest)) return { op: 'invalid', handle: rest };
+  // Appointing is a PRIVILEGE GRANT, so it stays maximally strict: the command
+  // must be the whole message. Reading it out of the first line of a longer
+  // post is how a quoted line becomes an appointment. Status and clear are
+  // harmless reads and may carry trailing prose.
+  if (hasMoreLines) return { op: 'not-alone', handle: rest };
   return { op: 'assign', handle: rest.replace(/^@+/, '') };
 }
 
@@ -181,6 +193,12 @@ export async function handleLeadCommand(msg, { daemonUrl, ownerHandle = 'petrus'
       return lead
         ? `Team lead: ${lead.handle} (assigned by ${lead.assignedBy}).`
         : 'Team lead: unset. Only the owner can decide confirmations, and only the owner can appoint a lead.';
+    }
+    if (parsed.op === 'not-alone') {
+      // Say WHY. "@grok is not a handle" would be false and would send whoever
+      // typed it looking for a typo that is not there.
+      return `Appointing a lead has to be the whole message. Send just "/lead @${parsed.handle.replace(/^@+/, '')}" `
+        + 'on its own, with nothing after it.';
     }
     if (parsed.op === 'invalid') {
       return `"${parsed.handle}" is not a handle. Use /lead @agent, /lead status or /lead clear.`;

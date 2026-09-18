@@ -17,7 +17,7 @@ import { startRoomPoller, checkRoomMessages } from '../src/team-relay/room-polle
 import { startLinearPoller } from '../src/team-relay/linear-poller.mjs';
 import { memoryList, memoryGet, memorySet, memoryAppend, memoryDelete, memorySearch } from '../src/team-relay/memory.mjs';
 import { moltbookPost, moltbookFeed } from '../src/team-relay/moltbook.mjs';
-import { startRoomAutomation } from '../src/team-relay/room-automation.mjs';
+import { startRoomAutomation } from '../src/room-automation.mjs';
 import { pollDiscord, startDiscordPoller } from '../src/team-relay/discord-poller.mjs';
 import { UnifiedPoller } from '../src/team-relay/unified-poller.mjs';
 import { groupmindAdapter } from '../src/team-relay/adapters/groupmind.mjs';
@@ -562,6 +562,33 @@ async function main() {
         console.error('Error: poller.rooms, poller.api_key (or poller.api_key_file), and poller.handle must be set in config');
         process.exit(1);
       }
+      // Room AUTOMATION rides along with the watcher.
+      //
+      // It used to run only under the separate "automate" subcommand, which
+      // nothing on the fleet launches. That is why /lead answered nobody: the
+      // handler existed, its module was imported, its tests passed, and no
+      // process ever executed it. petrus pressed the command twice and got
+      // silence twice before anyone asked WHICH PROCESS RUNS THIS.
+      //
+      // Started here rather than as a second daemon so there is one thing to
+      // launch and one thing to restart. It keeps its own seen-ids file
+      // (automation.seen_file), separate from the poller's, so the two never
+      // consume each other's messages; on a first run with no seen file it
+      // SEEDS rather than replaying, which is what stops a historical /lead or
+      // /approve from executing on startup.
+      //
+      // Not awaited: both loop forever. A crash in automation must not take the
+      // poller - and therefore every room notification - down with it.
+      startRoomAutomation({
+        rooms: pollerRooms,
+        apiKey: pollerApiKey,
+        handle: pollerHandle,
+        config,
+      }).catch((e) => {
+        console.error(`Room automation stopped: ${e?.message || e}`);
+        console.error('  The poller is still running; chat commands like /lead are not.');
+      });
+
       await startRoomPoller({
         rooms: pollerRooms,
         apiKey: pollerApiKey,
