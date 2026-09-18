@@ -100,6 +100,12 @@ export function listIntents() {
     createdAt: i.createdAt,
     decidedAt: i.decidedAt,
     decision: i.decision,
+    // Who decided, and under which rule. The queue and the dashboard both read
+    // this projection, so leaving it out hid the audit trail in the one place
+    // anyone would go looking for it.
+    decidedBy: i.decidedBy ?? null,
+    decidedByRole: i.decidedByRole ?? null,
+    requiresHuman: Boolean(i.requiresHuman),
   }));
 }
 
@@ -115,13 +121,125 @@ export function getIntent(id) {
     createdAt: i.createdAt,
     decidedAt: i.decidedAt,
     decision: i.decision,
+    decidedBy: i.decidedBy ?? null,
+    decidedByRole: i.decidedByRole ?? null,
+    requiresHuman: Boolean(i.requiresHuman),
   };
 }
 
 // Decide an intent. Returns true if decided, false if id unknown or already
 // decided. Idempotent for same decision; rejects different decision after
 // settle.
-export function decideIntent(id, decision, { receiptsPath } = {}) {
+// ---------------------------------------------------------------------------
+// TEAM-LEAD APPROVALS
+//
+// Petrus, 2026-09-18 07:20: "we need autoapprove or team lead approve for these
+// if i sleep", and 07:25: "Ok lets do 2 and 3. Team lead assigned by me
+// dynamically (chat command?) and lead can move the duty to another agent if
+// they need to".
+//
+// So: a single lead may decide ordinary confirmations in his place. The rules
+// below are what keep that from becoming "any agent can approve anything".
+//
+//   * The lead starts UNSET and there is no default. An unset lead means only
+//     the human owner decides, which is exactly today's behaviour — this
+//     feature can never weaken the gate by simply being deployed.
+//   * NO SELF-APPOINTMENT. An agent cannot make itself lead, and cannot appoint
+//     one while the post is empty; only the human owner can fill it. Otherwise
+//     the first agent to boot grants itself approval rights.
+//   * The sitting lead MAY hand over, because Petrus asked for exactly that.
+//     It may not appoint a second lead: handing over clears its own claim.
+//   * The human owner can always assign, transfer or clear, and can always
+//     decide regardless of who holds the post.
+//   * Intents marked `requiresHuman` are never delegable. Destructive,
+//     credential and paid actions are the owner's alone; a sleeping owner is a
+//     reason to delay those, not to widen who may authorise them.
+//   * Every assignment and every decision records WHO did it. Before this, the
+//     receipt said `actor: 'petrus'` no matter who called the endpoint, so the
+//     audit trail asserted something nobody had checked.
+// ---------------------------------------------------------------------------
+
+/** Handle of the human owner — the only identity that can fill an empty post. */
+export const OWNER_HANDLE = 'petrus';
+
+let teamLead = null; // { handle, assignedBy, assignedAt }
+
+function normalizeHandle(handle) {
+  if (typeof handle !== 'string') return null;
+  const trimmed = handle.trim().replace(/^@+/, '');
+  return trimmed ? `@${trimmed}` : null;
+}
+
+function isOwner(actor) {
+  return normalizeHandle(actor) === normalizeHandle(OWNER_HANDLE);
+}
+
+/** Current lead, or null. Safe to call before any assignment. */
+export function getLead() {
+  return teamLead ? { ...teamLead } : null;
+}
+
+/**
+ * Assign, transfer or clear the lead.
+ *   - owner may do anything;
+ *   - the sitting lead may transfer the duty onward, or clear it;
+ *   - nobody else may touch it, and nobody may appoint themselves.
+ * Pass `handle: null` to clear.
+ */
+export function setLead(handle, { actor, receiptsPath } = {}) {
+  const by = normalizeHandle(actor);
+  if (!by) return { ok: false, error: 'actor is required' };
+  const target = handle === null ? null : normalizeHandle(handle);
+  if (handle !== null && !target) return { ok: false, error: 'handle is required' };
+
+  const owner = isOwner(by);
+  const sitting = teamLead && normalizeHandle(teamLead.handle) === by;
+  if (!owner && !sitting) {
+    return {
+      ok: false,
+      error: teamLead
+        ? `only ${OWNER_HANDLE} or the current lead (${teamLead.handle}) may change the lead`
+        : `the lead is unset; only ${OWNER_HANDLE} may appoint one`,
+    };
+  }
+  // A lead handing over must name someone else. Re-appointing yourself is a
+  // no-op dressed as an action, and self-appointment is the thing we forbid.
+  if (!owner && target && target === by) {
+    return { ok: false, error: 'a lead cannot re-appoint itself; name another agent or clear' };
+  }
+
+  const previous = teamLead ? teamLead.handle : null;
+  teamLead = target ? { handle: target, assignedBy: by, assignedAt: Date.now() } : null;
+  postReceipt(receiptsPath, {
+    kind: 'lead.changed', lead: target, previous, actor: by, at: Date.now(),
+  });
+  return { ok: true, lead: getLead(), previous };
+}
+
+/**
+ * May `actor` decide this intent? Returns a reason when not, so the caller can
+ * say which rule refused rather than a bare 403.
+ */
+export function canDecide(intent, actor) {
+  const who = normalizeHandle(actor);
+  if (!who) return { ok: false, error: 'actor is required' };
+  if (isOwner(who)) return { ok: true, role: 'owner' };
+  if (intent?.requiresHuman) {
+    return {
+      ok: false,
+      error: `this action is reserved for ${OWNER_HANDLE} and cannot be delegated`,
+    };
+  }
+  if (teamLead && normalizeHandle(teamLead.handle) === who) return { ok: true, role: 'lead' };
+  return {
+    ok: false,
+    error: teamLead
+      ? `only ${OWNER_HANDLE} or the team lead (${teamLead.handle}) may decide`
+      : `only ${OWNER_HANDLE} may decide; no team lead is assigned`,
+  };
+}
+
+export function decideIntent(id, decision, { receiptsPath, actor = OWNER_HANDLE } = {}) {
   if (decision !== 'approve' && decision !== 'deny') {
     return { ok: false, error: 'decision must be "approve" or "deny"' };
   }
@@ -131,11 +249,17 @@ export function decideIntent(id, decision, { receiptsPath } = {}) {
     if (i.decision === decision) return { ok: true, idempotent: true };
     return { ok: false, error: `intent ${id} already decided as ${i.decision}` };
   }
+  const permitted = canDecide(i, actor);
+  if (!permitted.ok) return { ok: false, error: permitted.error };
+
   i.status = 'decided';
   i.decision = decision;
   i.decidedAt = Date.now();
+  i.decidedBy = normalizeHandle(actor);
+  i.decidedByRole = permitted.role;
   postReceipt(receiptsPath, {
     kind: 'intent.decided', id, decision, decidedAt: i.decidedAt, prompt: i.prompt,
+    actor: i.decidedBy, role: permitted.role,
   });
   // Resolve waiters.
   for (const r of i.resolvers) {
@@ -147,7 +271,7 @@ export function decideIntent(id, decision, { receiptsPath } = {}) {
     if (decision === 'deny') {
       settleAction(action, {
         status: 'denied',
-        actor: 'petrus',
+        actor: i.decidedBy,
         decided_at: new Date(i.decidedAt).toISOString(),
         ran_at: null,
         command: null,
@@ -168,7 +292,7 @@ export function decideIntent(id, decision, { receiptsPath } = {}) {
       runApprovedAction(action, { receiptsPath }).catch((e) => {
         settleAction(action, {
           status: 'failed',
-          actor: 'petrus',
+          actor: i.decidedBy,
           decided_at: action.decided_at,
           ran_at: new Date().toISOString(),
           command: action.command || null,
@@ -183,7 +307,7 @@ export function decideIntent(id, decision, { receiptsPath } = {}) {
     // (processing) and settleAction (completed/failed/denied/expired).
     pushStatus(id, decision === 'approve' ? 'approved' : 'denied', {
       decision,
-      approver: 'petrus',
+      approver: i.decidedBy,
       decided_at: new Date(i.decidedAt).toISOString(),
     });
   }
@@ -202,6 +326,10 @@ export async function createIntent({
   receiptsPath,
   fromHandle,  // optional originator handle (e.g. "@CodexMB") for per-agent
                // chat-author attribution; passed through to announcers.
+  requiresHuman = false, // destructive/credential/paid: never delegable to a
+                         // team lead, however sound the lead is. A sleeping
+                         // owner is a reason to WAIT on these, not to widen
+                         // who may authorise them.
 }) {
   const id = randomUUID().slice(0, 8);
   const intent = {
@@ -214,10 +342,13 @@ export async function createIntent({
     decision: null,
     resolvers: [],
     timeoutSec,
+    requiresHuman: Boolean(requiresHuman),
+    decidedBy: null,
   };
   intents.set(id, intent);
   postReceipt(receiptsPath, {
     kind: 'intent.created', id, prompt, session, channels, createdAt: intent.createdAt,
+    requiresHuman: intent.requiresHuman,
   });
   pushStatus(id, 'pending', { target_summary: prompt });
   // Side effects — never let an announce failure block the intent itself.
@@ -604,8 +735,43 @@ export function startConfirmationsServer({
           res.end(JSON.stringify({ ok: false, error: 'invalid json' }));
           return;
         }
-        const result = decideIntent(id, payload.decision, { receiptsPath });
-        res.writeHead(result.ok ? 200 : 400, { 'Content-Type': 'application/json' });
+        // `actor` is who is deciding. It defaults to the owner so every
+        // existing caller (the phone buttons, the dashboard) keeps working
+        // unchanged; a team lead identifies itself explicitly.
+        const result = decideIntent(id, payload.decision, {
+          receiptsPath,
+          actor: payload.actor || OWNER_HANDLE,
+        });
+        // 403, not 400: the request was well formed and the rule refused it.
+        const code = result.ok ? 200 : /may decide|reserved for|actor is required/.test(result.error || '') ? 403 : 400;
+        res.writeHead(code, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify(result));
+      });
+      return;
+    }
+    if (req.method === 'GET' && url.pathname === '/lead') {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ ok: true, lead: getLead(), owner: OWNER_HANDLE }));
+      return;
+    }
+    if (req.method === 'POST' && url.pathname === '/lead') {
+      let body = '';
+      req.on('data', (c) => { body += c; });
+      req.on('end', () => {
+        let payload;
+        try { payload = JSON.parse(body); } catch {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: false, error: 'invalid json' }));
+          return;
+        }
+        // `handle: null` clears the post. `actor` is who is asking, and the
+        // rules in setLead decide whether they may.
+        const result = setLead(
+          Object.prototype.hasOwnProperty.call(payload, 'handle') ? payload.handle : undefined,
+          { actor: payload.actor, receiptsPath }
+        );
+        const code = result.ok ? 200 : /may appoint|may change|cannot re-appoint/.test(result.error || '') ? 403 : 400;
+        res.writeHead(code, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify(result));
       });
       return;
@@ -705,6 +871,13 @@ export function startConfirmationsServer({
             // `from_handle` so the GroupMind announcer authors the chat
             // post as the originating agent rather than the daemon owner.
             fromHandle: typeof payload.from_handle === 'string' ? payload.from_handle : undefined,
+            // The CALLER classifies. The precommand gate already knows which
+            // commands are destructive, credential-touching or paid — it has
+            // the command text and the patterns — and marks those here so a
+            // team lead can never approve them. The daemon does not re-derive
+            // that from a prompt string: guessing intent from prose is exactly
+            // how a gate quietly stops gating.
+            requiresHuman: payload.requires_human === true,
           });
           res.writeHead(201, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ ok: true, id }));
@@ -1307,4 +1480,8 @@ export function _resetForTests() {
     }
   }
   intents.clear();
+  // The lead is global state too: a test that appoints one must not leak that
+  // appointment into the next test, or a later "an agent cannot decide" case
+  // passes for the wrong reason.
+  teamLead = null;
 }
