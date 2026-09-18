@@ -1134,6 +1134,30 @@ export function startConfirmationsServer({
           }));
           return;
         }
+        // THE ANONYMOUS-IS-OWNER FALLBACK IS LEGACY MODE ONLY.
+        //
+        // @codexmb, 2026-09-18: with principals configured, the lead's own
+        // token got 403 on a requiresHuman intent and then the SHARED token
+        // with no actor got 200 on the same one. `principal || OWNER_HANDLE`
+        // handed every caller the owner's authority by omission, so the
+        // boundary I had just written was bypassable by deleting a field.
+        //
+        // Once a daemon configures principals it has said it can tell callers
+        // apart, so from then on it must: every decision needs a proven
+        // principal, the owner's included. Configuring principals therefore
+        // means also issuing Petrus one — which is the point, not an
+        // oversight. A daemon with NO principals keeps today's behaviour
+        // exactly, so nothing that works now stops working
+        // ([[never lock Petrus out]]).
+        if (!principal && principalByToken.size > 0) {
+          res.writeHead(403, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({
+            ok: false,
+            error: 'this daemon identifies callers; present your own token. '
+              + 'Anonymous decisions are only accepted when no principals are configured.',
+          }));
+          return;
+        }
         const result = decideIntent(id, payload.decision, {
           receiptsPath,
           actor: principal || OWNER_HANDLE,
