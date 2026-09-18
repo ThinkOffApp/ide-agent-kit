@@ -114,8 +114,15 @@ test('status does not report "unset" when the daemon lacks the route', async () 
   const dead = createServer((req, res) => { res.writeHead(404); res.end('{}'); });
   await new Promise(r => dead.listen(0, '127.0.0.1', r));
   const url = `http://127.0.0.1:${dead.address().port}`;
-  const reply = await handleLeadCommand({ body: '/lead status', from: 'petrus', isHuman: true }, { daemonUrl: url });
-  assert.match(reply, /not running here yet/i);
-  assert.doesNotMatch(reply, /^Team lead: unset/);
-  dead.close();
+  try {
+    const reply = await handleLeadCommand({ body: '/lead status', from: 'petrus', isHuman: true }, { daemonUrl: url });
+    assert.match(reply, /not running here yet/i);
+    assert.doesNotMatch(reply, /^Team lead: unset/);
+  } finally {
+    // Awaited, and in a finally: an unawaited close leaves the handle open if
+    // the assertion throws, and a leaked listener is how a suite starts failing
+    // once in three runs — which is worse than failing every time, because the
+    // third flake is the one everybody stops reading.
+    await new Promise(r => dead.close(r));
+  }
 });
