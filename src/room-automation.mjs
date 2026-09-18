@@ -65,22 +65,34 @@ function saveSeenIds(path, ids) {
   writeFileSync(path, arr.join('\n') + '\n');
 }
 
-function fetchRoomMessages(room, apiKey, limit = 20) {
-  const url = `https://groupmind.one/api/v1/rooms/${room}/messages?limit=${limit}`;
+// Returns an array on success and NULL on failure. The difference matters: []
+// for a failed fetch made "the room is quiet" and "I could not ask" identical,
+// so seeding could complete on nothing and the first poll that DID succeed
+// treated the whole history as new -- fail-open seeding on a dispatch path
+// (@codexmb).
+//
+// The key also no longer goes through a shell: `curl -H "X-API-Key: ${key}"`
+// under execSync puts the credential in the process table for anyone running ps.
+export async function fetchRoomMessages(room, apiKey, limit = 20) {
+  const url = `https://groupmind.one/api/v1/rooms/${encodeURIComponent(room)}/messages?limit=${limit}`;
   try {
-    const result = execSync(
-      `curl -sS -H "X-API-Key: ${apiKey}" "${url}"`,
-      { encoding: 'utf8', timeout: 15000 }
-    );
-    const data = JSON.parse(result);
+    const res = await fetch(url, {
+      headers: { 'X-API-Key': apiKey },
+      signal: AbortSignal.timeout(15000),
+    });
+    if (!res.ok) {
+      console.error(`  fetch ${room} failed: HTTP ${res.status}`);
+      return null;
+    }
+    const data = await res.json();
     return data.messages || (Array.isArray(data) ? data : []);
   } catch (e) {
     console.error(`  fetch ${room} failed: ${e.message}`);
-    return [];
+    return null;
   }
 }
 
-function postMessage(room, body, apiKey, config) {
+async function postMessage(room, body, apiKey, config) {
   if (isAckOnly(body)) {
     console.log(`  ack-only message filtered, skipping post to ${room}: ${body.slice(0, 60)}`);
     return false;
@@ -89,18 +101,27 @@ function postMessage(room, body, apiKey, config) {
     console.log(`  rate-limited (${config?.rate_limit?.message_interval_sec || 30}s interval), skipping post to ${room}`);
     return false;
   }
-  const payload = JSON.stringify({ room, body });
-  try {
-    execSync(
-      `curl -sS -X POST "https://groupmind.one/api/v1/messages" -H "X-API-Key: ${apiKey}" -H "Content-Type: application/json" -d '${payload.replace(/'/g, "'\\''")}'`,
-      { timeout: 15000 }
-    );
-    markSent();
-    return true;
-  } catch (e) {
-    console.error(`  post failed: ${e.message}`);
-    return false;
-  }
+    // The old version shelled out to curl and returned true whenever curl exited
+    // 0 -- which it does for a 500. A receipt then said "completed" for a message
+    // that never reached the room (@codexmb). The status is checked now, and the
+    // key no longer travels through a command line where ps can read it.
+    try {
+      const res = await fetch('https://groupmind.one/api/v1/messages', {
+        method: 'POST',
+        headers: { 'X-API-Key': apiKey, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ room, body }),
+        signal: AbortSignal.timeout(15000),
+      });
+      if (!res.ok) {
+        console.error(`  post failed: HTTP ${res.status}`);
+        return false;
+      }
+      markSent();
+      return true;
+    } catch (e) {
+      console.error(`  post failed: ${e.message}`);
+      return false;
+    }
 }
 
 /**
@@ -264,14 +285,16 @@ function matchesRule(msg, rule) {
  * Execute a rule action and return a receipt.
  */
 // `muted` is petrus's emergency-only mode, resolved once per poll cycle by the
-// caller (shouldSuppressNudge is async; this function is not).
+// caller (shouldSuppressNudge is async; this function itself is now async too,
+// because postMessage below awaits the fetch and checks its status instead of
+// trusting a shelled-out curl's exit code).
 //
 // The carve-out is the point, and it is the same one the room and DM pollers
 // already make: HIS OWN MESSAGES ALWAYS GET AN ANSWER. Emergency-only exists to
 // silence agent chatter, not to make the room stop answering the person typing
 // in it -- a withheld reply to a command he just sent is indistinguishable from
 // a crash, which is a failure this repo keeps rediscovering.
-function executeAction(action, msg, apiKey, config, muted = false) {
+async function executeAction(action, msg, apiKey, config, muted = false) {
   const startedAt = new Date().toISOString();
   if (!action) {
     return createReceipt({
@@ -304,7 +327,7 @@ function executeAction(action, msg, apiKey, config, muted = false) {
         startedAt,
       });
     }
-    const ok = postMessage(targetRoom, body, apiKey, config);
+    const ok = await postMessage(targetRoom, body, apiKey, config);
     return createReceipt({
       actor: { name: config?.poller?.handle || 'ide-agent-kit', kind: 'automation' },
       action: `post to ${targetRoom}`,
@@ -400,18 +423,34 @@ export async function startRoomAutomation({ rooms, apiKey, handle, interval, con
   const seen = loadSeenIds(seenFile);
   const lastFired = new Map(); // rule name → timestamp
 
-  // Seed on first run
-  if (seen.size === 0) {
+  // Seed on first run, and REFUSE TO DISPATCH if seeding could not complete.
+  //
+  // The old version treated a failed fetch as an empty room, so a transient
+  // network error at startup produced a "successful" seed of nothing -- and the
+  // first poll that worked then saw every historical message as new. On a path
+  // that can execute /lead or /approve, that is a replay of privileged history
+  // caused by a dropped packet (@codexmb).
+  //
+  // Dispatch is gated on `ready`. Seeding retries on the poll interval until it
+  // succeeds; until then the loop executes nothing.
+  let ready = seen.size > 0;
+  async function trySeed() {
     console.log(`  seeding seen IDs...`);
+    const fresh = new Set();
     for (const room of rooms) {
       const msgs = await fetchRoomMessages(room, apiKey, 50);
-      for (const m of msgs) {
-        if (m.id) seen.add(m.id);
+      if (msgs === null) {
+        console.error(`  seeding ABORTED: could not read ${room}. Dispatch stays off until it succeeds.`);
+        return false;
       }
+      for (const m of msgs) if (m.id) fresh.add(m.id);
     }
+    for (const id of fresh) seen.add(id);
     saveSeenIds(seenFile, seen);
     console.log(`  seeded ${seen.size} IDs`);
+    return true;
   }
+  if (!ready) ready = await trySeed();
 
   async function poll() {
     let actionsRun = 0;
@@ -423,11 +462,23 @@ export async function startRoomAutomation({ rooms, apiKey, handle, interval, con
     const muted = await shouldSuppressNudge(config);
     if (muted) console.log('  emergency-only: agent-triggered posts withheld; his own still answered');
 
+    if (!ready) {
+      ready = await trySeed();
+      if (!ready) return;   // still blind: execute nothing
+    }
+
     for (const room of rooms) {
-      const msgs = fetchRoomMessages(room, apiKey);
+      const msgs = await fetchRoomMessages(room, apiKey);
+      if (msgs === null) continue;   // could not read this room; do not guess
       for (const m of msgs) {
         if (!m.id || seen.has(m.id)) continue;
+        // Mark seen and PERSIST before acting. The old order saved once at the
+        // end of the poll, so a crash between executing a command and saving
+        // replayed it on restart (@codexmb). At-most-once is the right bias for
+        // a privileged action: a missed /lead is a message petrus can send
+        // again, a repeated one is an appointment he never made.
         seen.add(m.id);
+        saveSeenIds(seenFile, seen);
 
         // Skip own messages (case-insensitive; see src/common/handles.mjs)
         const sender = m.user?.handle || m.from || m.sender || '';
@@ -445,11 +496,20 @@ export async function startRoomAutomation({ rooms, apiKey, handle, interval, con
           ownerHandle: config?.poller?.owner_handle || 'petrus',
         });
         if (leadReply !== null) {
-          postMessage(room, leadReply, apiKey, config);
+          const posted = await postMessage(room, leadReply, apiKey, config);
+          if (!posted) {
+            // A receipt that says "completed" for a reply nobody can see is
+            // worse than no receipt: it is the silence petrus experienced,
+            // recorded as a success (@codexmb).
+            console.error('  /lead reply was NOT posted; not recording it as completed');
+          }
           appendReceipt(receiptPath, createReceipt({
             actor: { name: 'automation', kind: 'command' },
             action: `/lead from ${m.user?.handle || m.from || '?'}`,
-            status: 'completed',
+            // The status is what HAPPENED, not what was attempted. This said
+            // 'completed' even when the post returned false, recording the exact
+            // silence petrus hit as a success (@codexmb).
+            status: posted ? 'completed' : 'failed',
             startedAt: new Date().toISOString(),
           }));
           actionsRun++;
@@ -468,7 +528,7 @@ export async function startRoomAutomation({ rooms, apiKey, handle, interval, con
           }
 
           console.log(`  rule "${rule.name}" matched → ${rule.action?.type || '?'}`);
-          const receipt = executeAction(rule.action, m, apiKey, config, muted);
+          const receipt = await executeAction(rule.action, m, apiKey, config, muted);
           appendReceipt(receiptPath, receipt);
           lastFired.set(rule.name, now);
           actionsRun++;
