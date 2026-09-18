@@ -105,3 +105,17 @@ test('a daemon that is down reports it instead of throwing', async () => {
   });
   assert.match(reply, /could not reach/i);
 });
+
+test('status does not report "unset" when the daemon lacks the route', async () => {
+  // Petrus typed /lead status at 11:23 before the daemon had been restarted.
+  // The first version answered "unset" — true-sounding, and produced by a 404.
+  // An answer that cannot tell "nobody holds the post" from "this endpoint does
+  // not exist" is the empty-list bug again, in a security-relevant place.
+  const dead = createServer((req, res) => { res.writeHead(404); res.end('{}'); });
+  await new Promise(r => dead.listen(0, '127.0.0.1', r));
+  const url = `http://127.0.0.1:${dead.address().port}`;
+  const reply = await handleLeadCommand({ body: '/lead status', from: 'petrus', isHuman: true }, { daemonUrl: url });
+  assert.match(reply, /not running here yet/i);
+  assert.doesNotMatch(reply, /^Team lead: unset/);
+  dead.close();
+});
