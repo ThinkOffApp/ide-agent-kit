@@ -105,6 +105,97 @@ function postMessage(room, body, apiKey, config) {
 /**
  * Check if a message matches a rule's conditions.
  */
+// ---------------------------------------------------------------------------
+// /lead — the chat command Petrus asked for on 2026-09-18 07:25 ("Team lead
+// assigned by me dynamically (chat command?)").
+//
+//   /lead @agent   appoint or transfer     /lead status   who holds it
+//   /lead clear    vacate the post
+//
+// HANDLED HERE, NOT AS A CONFIGURABLE RULE, on purpose. Who may approve
+// commands on this machine is not something that should be editable by adding
+// an entry to a rules array in a JSON file — a rule that grants approval
+// rights is a rule someone can write by accident.
+//
+// AUTHORISATION IS DOUBLE-KEYED: the sender must be the owner handle AND the
+// message must be flagged as human. Either alone is too weak — agents post
+// under their own handles with isHuman false, and a tapped action button
+// arrives as `petrus` with isHuman false (see the action-button notes), so
+// requiring both means neither an agent quoting this syntax nor a replayed
+// button can appoint anyone. The daemon enforces the same rules again; this
+// is the outer key, not the only one.
+// ---------------------------------------------------------------------------
+
+const LEAD_COMMAND_RE = /^\s*\/lead\b\s*(.*)$/i;
+
+function parseLeadCommand(body) {
+  const m = LEAD_COMMAND_RE.exec(body || '');
+  if (!m) return null;
+  const rest = (m[1] || '').trim();
+  if (!rest || /^status$/i.test(rest)) return { op: 'status' };
+  if (/^clear$/i.test(rest)) return { op: 'clear' };
+  // STRICT on purpose: exactly one token, nothing trailing. Taking the first
+  // word of "/lead somebody nice please" and appointing @somebody is a wrong
+  // guess that hands command-approval rights to the wrong agent. When the
+  // input is not unambiguous, refuse and say so.
+  if (!/^@?[A-Za-z0-9_.-]+$/.test(rest)) return { op: 'invalid', handle: rest };
+  return { op: 'assign', handle: rest.replace(/^@+/, '') };
+}
+
+async function callDaemon(daemonUrl, path, { method = 'GET', body } = {}) {
+  const res = await fetch(`${daemonUrl.replace(/\/+$/, '')}${path}`, {
+    method,
+    headers: body ? { 'Content-Type': 'application/json' } : undefined,
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  let payload = null;
+  try { payload = await res.json(); } catch { /* non-JSON error body */ }
+  return { status: res.status, payload };
+}
+
+/**
+ * Returns a reply string when the message was a /lead command, or null when it
+ * was not one. Never throws: a daemon that is down must not stop the poller.
+ */
+export async function handleLeadCommand(msg, { daemonUrl, ownerHandle = 'petrus' } = {}) {
+  const parsed = parseLeadCommand(msg.body || '');
+  if (!parsed) return null;
+
+  const sender = (msg.user?.handle || msg.from || msg.sender || '').replace(/^@+/, '').toLowerCase();
+  const owner = ownerHandle.replace(/^@+/, '').toLowerCase();
+  const fromOwner = sender === owner && msg.isHuman === true;
+
+  try {
+    if (parsed.op === 'status') {
+      const { payload } = await callDaemon(daemonUrl, '/lead');
+      const lead = payload?.lead;
+      return lead
+        ? `Team lead: ${lead.handle} (assigned by ${lead.assignedBy}).`
+        : 'Team lead: unset. Only the owner can decide confirmations, and only the owner can appoint a lead.';
+    }
+    if (parsed.op === 'invalid') {
+      return `"${parsed.handle}" is not a handle. Use /lead @agent, /lead status or /lead clear.`;
+    }
+    if (!fromOwner) {
+      // Say which key was missing rather than a flat refusal — a lead trying to
+      // hand over from chat needs to know the daemon route exists for that.
+      return `Only ${ownerHandle} can change the team lead from chat. A sitting lead may hand over via the daemon.`;
+    }
+    const { status, payload } = await callDaemon(daemonUrl, '/lead', {
+      method: 'POST',
+      body: { handle: parsed.op === 'clear' ? null : parsed.handle, actor: ownerHandle },
+    });
+    if (payload?.ok) {
+      return parsed.op === 'clear'
+        ? 'Team lead cleared. Confirmations are owner-only again.'
+        : `Team lead is now @${parsed.handle}. Destructive, credential and paid actions still wait for ${ownerHandle}.`;
+    }
+    return `Could not change the lead (${status}): ${payload?.error || 'no response'}`;
+  } catch (e) {
+    return `Could not reach the confirmations daemon: ${e.message}`;
+  }
+}
+
 function matchesRule(msg, rule) {
   const match = rule.match || {};
   const body = (msg.body || '').toLowerCase();
@@ -291,6 +382,26 @@ export async function startRoomAutomation({ rooms, apiKey, handle, interval, con
 
         // Attach room for rule matching
         m.room = room;
+
+        // /lead runs BEFORE the configurable rules and consumes the message.
+        // It is a command about who may approve things, so it must not be
+        // shadowed, cooled down or overridden by whatever is in the rules
+        // array.
+        const leadReply = await handleLeadCommand(m, {
+          daemonUrl: config?.confirmations?.daemon_url || 'http://127.0.0.1:8788',
+          ownerHandle: config?.poller?.owner_handle || 'petrus',
+        });
+        if (leadReply !== null) {
+          postMessage(room, leadReply, apiKey, config);
+          appendReceipt(receiptPath, createReceipt({
+            actor: { name: 'automation', kind: 'command' },
+            action: `/lead from ${m.user?.handle || m.from || '?'}`,
+            status: 'completed',
+            startedAt: new Date().toISOString(),
+          }));
+          actionsRun++;
+          continue;
+        }
 
         // Check each rule
         for (const rule of rules) {
