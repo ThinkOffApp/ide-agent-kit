@@ -74,6 +74,13 @@ startConfirmationsServer({
   port: cc.port || 8788,
   host: cc.host || '127.0.0.1',
   authToken: cc.auth_token || '',
+  // Per-agent principal tokens. startConfirmationsServer has accepted these
+  // since the team-lead work, but NOTHING EVER PASSED THEM: this call read
+  // auth_token and stopped, so `principals` in dogfood.json was inert and
+  // POST /lead answered "this daemon has no per-agent tokens" whatever was
+  // configured. That is why /lead never worked end to end -- the missing
+  // bearer in callDaemon was only half of it.
+  principals: cc.principals || {},
   receiptsPath: config?.receipts?.path,
   announce: serverAnnounce,
   wakeScript,
