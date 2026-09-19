@@ -110,6 +110,7 @@ export function getIntent(id) {
     id,
     prompt: i.prompt,
     session: i.session,
+    options: i.options || null,
     channels: i.channels,
     status: i.status,
     createdAt: i.createdAt,
@@ -121,12 +122,30 @@ export function getIntent(id) {
 // Decide an intent. Returns true if decided, false if id unknown or already
 // decided. Idempotent for same decision; rejects different decision after
 // settle.
-export function decideIntent(id, decision, { receiptsPath } = {}) {
-  if (decision !== 'approve' && decision !== 'deny') {
-    return { ok: false, error: 'decision must be "approve" or "deny"' };
-  }
+export function decideIntent(id, rawDecision, { receiptsPath } = {}) {
+  // Look the intent up BEFORE validating, because what counts as a legal
+  // answer depends on the intent: a choice intent's legal answers are its own
+  // declared options, and nothing else. Validating first against a fixed
+  // approve/deny vocabulary is what made multi-option intents impossible.
   const i = intents.get(id);
   if (!i) return { ok: false, error: `unknown intent ${id}` };
+  const options = Array.isArray(i.options) && i.options.length ? i.options : null;
+  let decision = rawDecision;
+  if (options) {
+    // An option list is an allow-list, not a hint. `/choose <id> <anything>`
+    // must never smuggle a value the requester did not offer, so match against
+    // the declared options and store the DECLARED spelling - the requester
+    // compares against the list it supplied, not against the phone's casing.
+    const hit = options.find(
+      (o) => String(o).toLowerCase() === String(rawDecision).trim().toLowerCase(),
+    );
+    if (!hit) {
+      return { ok: false, error: `"${rawDecision}" is not an option for ${id}` };
+    }
+    decision = hit;
+  } else if (decision !== 'approve' && decision !== 'deny') {
+    return { ok: false, error: 'decision must be "approve" or "deny"' };
+  }
   if (i.status !== 'pending') {
     if (i.decision === decision) return { ok: true, idempotent: true };
     return { ok: false, error: `intent ${id} already decided as ${i.decision}` };
@@ -142,7 +161,13 @@ export function decideIntent(id, decision, { receiptsPath } = {}) {
     try { r({ decision, id }); } catch {}
   }
   i.resolvers = [];
-  const action = [...actions.values()].find((a) => a.intentId === id);
+  // A choice answers a QUESTION; it does not authorise a typed executor. The
+  // branch below treats everything that is not 'deny' as an approval and runs
+  // the bound action, so letting a choice reach it would make picking an
+  // option execute whatever action happened to be attached. The requester
+  // acts on the resolved value instead - it is the one that knows what the
+  // options meant.
+  const action = options ? null : [...actions.values()].find((a) => a.intentId === id);
   if (action) {
     if (decision === 'deny') {
       settleAction(action, {
@@ -181,7 +206,10 @@ export function decideIntent(id, decision, { receiptsPath } = {}) {
     // Pure confirmation (no typed executor): the decision itself is terminal,
     // so mirror it directly. Typed actions instead mirror via runApprovedAction
     // (processing) and settleAction (completed/failed/denied/expired).
-    pushStatus(id, decision === 'approve' ? 'approved' : 'denied', {
+    // A settled choice is an affirmative outcome: the owner answered. The
+    // status store enforces a monotonic rank, so a choice reports 'approved'
+    // rather than inventing a state that could move a row backwards.
+    pushStatus(id, (options || decision === 'approve') ? 'approved' : 'denied', {
       decision,
       approver: 'petrus',
       decided_at: new Date(i.decidedAt).toISOString(),
@@ -196,6 +224,9 @@ export function decideIntent(id, decision, { receiptsPath } = {}) {
 export async function createIntent({
   prompt,
   session,
+  options,     // optional string[]: turns this into a CHOICE intent whose legal
+               // answers are exactly these labels, rendered as one button each
+               // instead of Approve/Deny.
   channels = ['groupmind'],
   timeoutSec = 600,
   announce = async () => {},
@@ -204,9 +235,18 @@ export async function createIntent({
                // chat-author attribution; passed through to announcers.
 }) {
   const id = randomUUID().slice(0, 8);
+  const cleanOptions = Array.isArray(options)
+    // One line each, no blanks, no duplicates: a label is posted verbatim as
+    // `/choose <id> <label>`, so a newline would split the command.
+    ? [...new Set(options.map((o) => String(o).replace(/[\r\n]+/g, ' ').trim()).filter(Boolean))]
+    : null;
+  if (cleanOptions && cleanOptions.length < 2) {
+    throw new Error('a choice intent needs at least two distinct options');
+  }
   const intent = {
     prompt,
     session,
+    options: cleanOptions,
     channels,
     status: 'pending',
     createdAt: Date.now(),
@@ -217,12 +257,12 @@ export async function createIntent({
   };
   intents.set(id, intent);
   postReceipt(receiptsPath, {
-    kind: 'intent.created', id, prompt, session, channels, createdAt: intent.createdAt,
+    kind: 'intent.created', id, prompt, session, options: cleanOptions, channels, createdAt: intent.createdAt,
   });
   pushStatus(id, 'pending', { target_summary: prompt });
   // Side effects — never let an announce failure block the intent itself.
   try {
-    await announce({ id, prompt, session, channels, fromHandle });
+    await announce({ id, prompt, session, channels, fromHandle, options: cleanOptions });
   } catch (e) {
     postReceipt(receiptsPath, {
       kind: 'intent.announce_failed', id, error: e.message,
@@ -694,9 +734,19 @@ export function startConfirmationsServer({
           res.end(JSON.stringify({ ok: false, error: 'missing prompt' }));
           return;
         }
+        // A malformed option list is the CALLER's error, so answer 400 rather
+        // than letting createIntent throw into the 500 branch below - a 500
+        // reads as "the daemon is broken" and sends someone looking in the
+        // wrong place for a typo in their own request.
+        if (payload.options !== undefined && !Array.isArray(payload.options)) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: false, error: 'options must be an array' }));
+          return;
+        }
         try {
           const id = await createIntent({
             prompt: payload.prompt,
+            options: payload.options,
             session: payload.session || 'external',
             channels: Array.isArray(payload.channels) ? payload.channels : (announce ? ['groupmind'] : []),
             announce: announce || (async () => {}),
@@ -709,8 +759,12 @@ export function startConfirmationsServer({
           res.writeHead(201, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ ok: true, id }));
         } catch (e) {
-          res.writeHead(500, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ ok: false, error: e.message || String(e) }));
+          // createIntent rejects an option list that cannot be a choice
+          // (fewer than two distinct labels). That is the caller's input, not
+          // a daemon fault.
+          const msg = e.message || String(e);
+          res.writeHead(/at least two/.test(msg) ? 400 : 500, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: false, error: msg }));
         }
       });
       return;
@@ -1046,23 +1100,31 @@ export function makeGroupmindAnnouncer({ apiKey, room, callbackBase, apiKeys }) 
   // the matching key from this map so the chat post is authored by the
   // ORIGINATING agent rather than always by the daemon owner.
   // Falls back to the default `apiKey` when no match is found.
-  return async ({ id, prompt, session, fromHandle }) => {
+  return async ({ id, prompt, session, fromHandle, options }) => {
     if (!apiKey || !room) return;
     // Per-agent key override.
     const effectiveKey = (fromHandle && apiKeys && apiKeys[fromHandle]) || apiKey;
     const uiLink = callbackBase ? `${callbackBase}/` : null;
+    const opts = Array.isArray(options) && options.length ? options : null;
+    // ALWAYS spell out the typed equivalent. The buttons need a client that
+    // renders them, and a phone that cannot (or an older build) must still be
+    // able to answer - otherwise a choice intent is unanswerable on exactly
+    // the surface it was built for.
+    const typed = opts
+      ? opts.map((o) => `\`/choose ${id} ${o}\``).join(' · ')
+      : `\`/approve ${id}\` · \`/deny ${id}\``;
     const body =
-      `[Confirmation needed] **${prompt}**\n` +
+      `[${opts ? 'Choice needed' : 'Confirmation needed'}] **${prompt}**\n` +
       `Target session: \`${session || '(none)'}\`\n` +
       (uiLink ? `Tap to decide: ${uiLink}\n` : '') +
-      `Or reply: \`/approve ${id}\` · \`/deny ${id}\``;
+      `Or reply: ${typed}`;
     // Attach metadata so the GroupMind chat UI can render inline Approve/Deny
     // buttons. Frontend reads `metadata.actions` + `metadata.intent_id` and
     // POSTs `/approve <id>` (or `/deny <id>`) chat replies on tap, which the
     // chat-reply poller in iak-mcp-daemon catches and routes to the local
     // /intent/:id/decision endpoint. No new backend route needed.
     const metadata = {
-      actions: ['Approve', 'Deny'],
+      actions: opts || ['Approve', 'Deny'],
       intent_id: id,
       intent_prompt: prompt,
       intent_session: session || null,
@@ -1212,7 +1274,11 @@ export function startChatReplyPoller({ apiKey, room, intervalMs = 5000, log, own
         seen.add(m.id);
         if (!primed) continue; // ignore historical messages on first pass
         const text = (m.body || '').trim();
-        const match = text.match(/^\/(approve|deny)\s+([a-f0-9]+)$/i);
+        // `/choose <id> <value>` carries a value, so its tail is greedy where
+        // approve/deny are anchored. Keep them one regex so a message can
+        // never match both readings.
+        const match = text.match(/^\/(approve|deny)\s+([a-f0-9]+)$/i)
+          || text.match(/^\/(choose)\s+([a-f0-9]+)\s+(.+)$/i);
         if (!match) continue;
         // Only the human owner may settle intents. Fleet agents share the room
         // and one (hermes) auto-replied "/approve <id>" to a confirmation card,
@@ -1259,7 +1325,9 @@ export function startChatReplyPoller({ apiKey, room, intervalMs = 5000, log, own
           }
           continue;
         }
-        const decision = match[1].toLowerCase();
+        const verb = match[1].toLowerCase();
+        // For /choose the answer is the tail, not the verb.
+        const decision = verb === 'choose' ? match[3].trim() : verb;
         const id = match[2];
         const intent = getIntent(id);
         if (!intent) {
@@ -1281,11 +1349,15 @@ export function startChatReplyPoller({ apiKey, room, intervalMs = 5000, log, own
           // error: nothing happens, and the pending list still shows the
           // truth. Restore a reply here only once a poller can tell "expired"
           // apart from "belongs to another poller".
-          emit(`/${decision} ${id} from ${m.from}: unknown intent here, staying silent (another poller may own it)`);
+          emit(`/${verb} ${id} from ${m.from}: unknown intent here, staying silent (another poller may own it)`);
           continue;
         }
         const r = decideIntent(id, decision);
-        emit(`/${decision} ${id} from ${m.from}: ${r.ok ? 'settled' : r.error}`);
+        // Keep the approve/deny line byte-identical - it is asserted by the
+        // suite and read by anyone grepping poller logs. Only /choose adds
+        // its value, because for a choice the verb alone says nothing.
+        const label = verb === 'choose' ? `/${verb} ${id} ${decision}` : `/${verb} ${id}`;
+        emit(`${label} from ${m.from}: ${r.ok ? 'settled' : r.error}`);
       }
       primed = true;
     } catch (e) {
