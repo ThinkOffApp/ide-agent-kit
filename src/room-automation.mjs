@@ -197,10 +197,22 @@ function parseLeadCommand(body) {
   return { op: 'assign', handle: rest.replace(/^@+/, '') };
 }
 
-async function callDaemon(daemonUrl, path, { method = 'GET', body } = {}) {
+async function callDaemon(daemonUrl, path, { method = 'GET', body, token } = {}) {
+  // `token` is the caller's PER-AGENT principal token. Without it the daemon
+  // cannot tell who is asking, and POST /lead refuses outright ("delegation is
+  // unavailable"). That refusal is correct and it is why /lead had never
+  // worked end to end: this function attached no identity at all, so a
+  // perfectly authorised owner command died at the last hop. Verified live
+  // 2026-09-19: POST /lead -> 403, GET /lead -> 200.
+  //
+  // Omitted when unset, so a daemon with no principals configured behaves
+  // exactly as before rather than sending an empty Bearer.
+  const headers = {};
+  if (body) headers['Content-Type'] = 'application/json';
+  if (token) headers.Authorization = `Bearer ${token}`;
   const res = await fetch(`${daemonUrl.replace(/\/+$/, '')}${path}`, {
     method,
-    headers: body ? { 'Content-Type': 'application/json' } : undefined,
+    headers: Object.keys(headers).length > 0 ? headers : undefined,
     body: body ? JSON.stringify(body) : undefined,
   });
   let payload = null;
@@ -212,7 +224,7 @@ async function callDaemon(daemonUrl, path, { method = 'GET', body } = {}) {
  * Returns a reply string when the message was a /lead command, or null when it
  * was not one. Never throws: a daemon that is down must not stop the poller.
  */
-export async function handleLeadCommand(msg, { daemonUrl, ownerHandle = 'petrus' } = {}) {
+export async function handleLeadCommand(msg, { daemonUrl, ownerHandle = 'petrus', principalToken } = {}) {
   const parsed = parseLeadCommand(msg.body || '');
   if (!parsed) return null;
 
@@ -253,7 +265,16 @@ export async function handleLeadCommand(msg, { daemonUrl, ownerHandle = 'petrus'
     const { status, payload } = await callDaemon(daemonUrl, '/lead', {
       method: 'POST',
       body: { handle: parsed.op === 'clear' ? null : parsed.handle, actor: ownerHandle },
+      token: principalToken,
     });
+    // A 403 here is the daemon saying it cannot identify the caller, which is
+    // a CONFIGURATION fault on this side, not a refusal of the user. Saying
+    // "forbidden" would send petrus looking for a permission he already has.
+    if (status === 403 && !principalToken) {
+      return 'Team lead is not configured on this machine: the room poller has no '
+        + 'principal token, so the daemon cannot tell that the request comes from it. '
+        + 'Nothing was changed.';
+    }
     if (payload?.ok) {
       return parsed.op === 'clear'
         ? 'Team lead cleared. Confirmations are owner-only again.'
