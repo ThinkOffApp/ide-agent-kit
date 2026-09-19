@@ -382,8 +382,30 @@ export function ackNotificationFile(notifyFile, consumedRaw) {
     current = ''; // missing file == already empty
   }
   if (consumedRaw == null) {
-    if (current !== '') atomicWriteNotify(notifyFile, '');
-    return { mode: 'all', consumedLines: countNotificationLines(current), preservedLines: 0 };
+    // No room_list_new this session. The old behaviour was to blank the file
+    // anyway and return a sentence advising against it. A warning that still
+    // performs the destructive act is not a guard: it destroys unread messages
+    // and tells you afterwards. Two agents on this fleet hit it in one day.
+    //
+    // Clearing an EMPTY file is harmless, so that still succeeds as a no-op.
+    // Clearing a file with unread lines in it is refused, and the refusal names
+    // the one command that makes the ack safe.
+    const pending = countNotificationLines(current);
+    if (pending === 0) {
+      return { mode: 'noop', consumedLines: 0, preservedLines: 0 };
+    }
+    return {
+      mode: 'refused',
+      consumedLines: 0,
+      preservedLines: pending,
+      error:
+        `REFUSING to ack: ${pending} unread line(s) in ${notifyFile} and no room_list_new ` +
+        'was recorded this session, so there is nothing to ack AGAINST. Blanking the file ' +
+        'here would discard messages nobody has read — that is exactly how an owner ' +
+        'instruction sat unseen for five hours on 2026-07-08.\n' +
+        'Call room_list_new first, act on what it returns, then room_ack: it removes only ' +
+        'those lines and preserves anything the poller appended meanwhile.',
+    };
   }
   const { remainder, consumedLines, mode } = removeConsumedNotifications(current, consumedRaw);
   if (remainder !== current) atomicWriteNotify(notifyFile, remainder);
@@ -756,11 +778,11 @@ export async function runMcpServer({ configPath } = {}) {
             const consumedRaw = lastRoomListNew.has(notifyFile) ? lastRoomListNew.get(notifyFile) : null;
             const result = ackNotificationFile(notifyFile, consumedRaw);
             lastRoomListNew.delete(notifyFile);
-            if (result.mode === 'all') {
-              return ok(
-                'Acknowledged new messages (no room_list_new recorded this session — cleared the whole file; ' +
-                  'prefer room_list_new → room_ack so late arrivals are preserved).'
-              );
+            if (result.mode === 'refused') {
+              return ok(result.error);
+            }
+            if (result.mode === 'noop' && result.consumedLines === 0 && result.preservedLines === 0) {
+              return ok('Nothing to acknowledge — the notification file is already empty.');
             }
             if (result.preservedLines > 0) {
               return ok(
