@@ -235,6 +235,15 @@ export async function createIntent({
                // chat-author attribution; passed through to announcers.
 }) {
   const id = randomUUID().slice(0, 8);
+  // ROUTE-DEPENDENT CAP, verified on GroupMind origin/main 159b16b. This
+  // announcer posts to the GENERIC /api/v1/messages route, which carries
+  // `actions` inside caller metadata and does NOT cap it. The per-room route
+  // is different: it reads a TOP-LEVEL `actions` and silently does
+  // `.slice(0, 6)`, so anything announcing a choice through that route loses
+  // option 7 onwards with no error - a picker that renders fewer buttons than
+  // it accepts answers. No cap is imposed here because it would be wrong for
+  // the route actually in use; if you move the announcer to the room route,
+  // cap it there and keep declared options equal to rendered ones.
   const cleanOptions = Array.isArray(options)
     // One line each, no blanks, no duplicates: a label is posted verbatim as
     // `/choose <id> <label>`, so a newline would split the command.
