@@ -2,6 +2,7 @@
 
 import { execSync } from 'node:child_process';
 import { readFileSync, writeFileSync, appendFileSync, existsSync, renameSync, unlinkSync } from 'node:fs';
+import { homedir } from 'node:os';
 import { randomUUID } from 'node:crypto';
 import { createReceipt, appendReceipt } from './receipt.mjs';
 import { canSend, markSent } from './rate-limiter.mjs';
@@ -218,6 +219,21 @@ async function callDaemon(daemonUrl, path, { method = 'GET', body, token } = {})
   let payload = null;
   try { payload = await res.json(); } catch { /* non-JSON error body */ }
   return { status: res.status, payload };
+}
+
+function readPrincipalToken(config) {
+  const p = config?.mcp?.confirmations?.principal_token_file
+    || config?.confirmations?.principal_token_file;
+  if (!p) return undefined;
+  try {
+    const v = readFileSync(p.replace(/^~/, homedir()), 'utf8').trim();
+    return v || undefined;
+  } catch {
+    // A missing token file is not fatal: /lead then answers with the
+    // "not configured on this machine" reply rather than throwing and
+    // taking the whole poller down with it.
+    return undefined;
+  }
 }
 
 /**
@@ -532,6 +548,12 @@ export async function startRoomAutomation({ rooms, apiKey, handle, interval, con
         const leadReply = await handleLeadCommand(m, {
           daemonUrl: config?.confirmations?.daemon_url || 'http://127.0.0.1:8788',
           ownerHandle: config?.poller?.owner_handle || 'petrus',
+          // The poller's principal token. Read from a FILE, never inlined:
+          // config carries the path, the value stays in ~/.config/iak-gate.token
+          // at mode 600. Same token petrus's phone has presented since
+          // 2026-07-08, mapped to `petrus` in principals -- /lead needs
+          // actor == petrus because only the owner may appoint a lead.
+          principalToken: readPrincipalToken(config),
         });
         if (leadReply !== null) {
           const posted = await postMessage(room, leadReply, apiKey, config);
