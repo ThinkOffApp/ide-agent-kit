@@ -26,9 +26,14 @@
 // HuggingFace cache, so `/v1/models` naming a model proves only that some
 // files exist - the same grade of evidence as the disk scan below it, and in
 // September 2026 it put a still-downloading 75 GiB model on a dashboard as
-// "serving". Only a returned token proves a model is loaded, so `serving`
-// requires --generate. That probe is OFF by default: it spends a forward pass
-// on somebody's box and can make a server load a model it had not loaded.
+// "serving". Only a returned token proves a model is loaded.
+//
+// The generation probe's default is split by trust: ON for a loopback
+// endpoint, which is this box's own server and where one token every five
+// minutes costs nothing worth counting, and OFF for anything else, which may
+// be somebody else's compute, may bill per token, and may be a load-on-demand
+// server where asking IS loading. --generate and --no-generate override it.
+// Where it is off, the honest reading is `listed`, never `serving`.
 //
 // TWO FIT STATES, NOT ONE. Comparing a model against the machine's total
 // budget assumes the operator will quit whatever else is running. "Fits" is
@@ -50,54 +55,42 @@ import {
   describeLocalModels,
   defaultSearchRoots,
 } from '../packages/user-intent-kit/src/model-availability.js';
-import { servedModelEntry } from '../packages/user-intent-kit/src/served-model.js';
-import { probeServedModels, probeGeneration } from '../packages/user-intent-kit/src/model-capacity.js';
+import { ServedModelProbe } from '../packages/user-intent-kit/src/served-model.js';
+import { ModelAvailabilityProbe } from '../packages/user-intent-kit/src/model-availability.js';
 
 const argv = process.argv.slice(2);
 const asJson = argv.includes('--json');
-const wantGeneration = argv.includes('--generate');
 const endpointArg = argv[argv.indexOf('--endpoint') + 1];
 const env = argv.includes('--endpoint') && endpointArg && !endpointArg.startsWith('--')
   ? { ...process.env, INTENT_MODEL_ENDPOINT: endpointArg }
   : process.env;
 
-/** What a local server ADVERTISES. Files on a disk somewhere, nothing more. */
-async function listedIds() {
-  let entry;
-  try {
-    entry = servedModelEntry(env);
-  } catch (err) {
-    console.error(`model-available: not probing a server - ${err.message}`);
-    return { entry: null, listed: [] };
-  }
-  if (!entry) return { entry: null, listed: [] };
-  try {
-    const result = await probeServedModels(entry, { timeoutMs: 4000, env });
-    const listed = result?.http === 'OK' && Array.isArray(result.models) ? result.models : [];
-    return { entry, listed };
-  } catch {
-    return { entry, listed: [] };
-  }
-}
-
-/**
- * Ask one model for one token. Only with --generate, and only when exactly one
- * model is listed: naming one of several would be a guess, and on a server
- * that loads on demand it would be an instruction to load it.
- */
-async function provedIds(entry, listed) {
-  if (!wantGeneration || !entry || listed.length !== 1) return [];
-  const proof = await probeGeneration(entry, { modelId: listed[0], timeoutMs: 5000, env });
-  if (!proof.generated) {
-    console.error(`model-available: ${listed[0]} did not generate - ${proof.reason}`);
-    return [];
-  }
-  return [proof.model];
-}
-
 const roots = defaultSearchRoots(env);
-const { entry, listed } = await listedIds();
-const served = await provedIds(entry, listed);
+
+// Exactly the wiring the daemon uses, so this prints what a card would say.
+// The disk scan runs FIRST because it is the served probe's veto: a model that
+// is incomplete or would not fit is never asked to generate, since asking a
+// load-on-demand server for a token is how you make it load one.
+const scan = new ModelAvailabilityProbe({ roots, env });
+await scan.refresh();
+
+const probeEnv = { ...env };
+if (argv.includes('--generate')) probeEnv.INTENT_MODEL_GENERATE = '1';
+if (argv.includes('--no-generate')) probeEnv.INTENT_MODEL_GENERATE = '0';
+
+let probe = null;
+try {
+  probe = new ServedModelProbe({ env: probeEnv, guard: id => scan.couldLoad(id) });
+  await probe.refresh();
+} catch (err) {
+  console.error(`model-available: not probing a server - ${err.message}`);
+}
+
+const listed = probe?.listed() ?? [];
+const proved = probe?.current();
+const served = proved ? [proved] : [];
+const verdict = probe?.lastResult() ?? null;
+
 const { budget, now, models } = await describeLocalModels({
   servedIds: served,
   listedIds: listed,
@@ -107,7 +100,7 @@ const { budget, now, models } = await describeLocalModels({
 });
 
 if (asJson) {
-  console.log(JSON.stringify({ budget, now, roots, listed, served, models }, null, 2));
+  console.log(JSON.stringify({ budget, now, roots, listed, served, verdict, models }, null, 2));
 } else {
   const gb = b => `${(b / 1e9).toFixed(1)} GB`;
   console.log(`memory budget: ${budget.bytes ? gb(budget.bytes) : 'unknown'} (${budget.source})`);
@@ -116,8 +109,10 @@ if (asJson) {
   if (now?.note) console.log(`               ${now.note}`);
   console.log(`search roots:  ${roots.join(', ')}`);
   console.log(`listed by server: ${listed.length ? listed.join(', ') : '(none)'}`);
-  if (listed.length && !wantGeneration) {
-    console.log('               a listing is not a loading; pass --generate to ask for a token');
+  console.log(`generation probe: ${probe?.generates ? 'on' : 'off'}${probe ? ` (${probe.describe()})` : ''}`);
+  if (listed.length && !proved) {
+    const why = verdict?.reason ? `: ${verdict.reason}` : '';
+    console.log(`               a listing is not a loading; nothing here is shown to be loaded${why}`);
   }
   console.log('');
   for (const m of models) {

@@ -45,6 +45,7 @@ import {
   parseWiredLimitMb,
   parseNvidiaTotalMib,
   parseVmStatAvailable,
+  parseVmStatBreakdown,
   largestFromPs,
   PARAM_SOURCES,
   paramsFromName,
@@ -57,57 +58,57 @@ import {
 const GiB = 1024 ** 3;
 const GB = 1e9;
 
-// --- the fixture the repo owner measured on this MacBook, 20 Sep 2026 -------
-// Not invented, and the reason the fit model is two states rather than one.
+// --- the machine these numbers came from, measured 20 Sep 2026 -------------
+//
+// An EARLIER fixture has been retired rather than kept beside this one. It put
+// "free plus reclaimable" at 45.9 GiB by summing free and inactive and
+// OMITTING the speculative queue, which is 59 GiB on this box and the largest
+// reclaimable category there is. It understated available memory by roughly
+// 59 GiB, and nothing noticed because nothing compared the parts against the
+// whole. The `fits-if-freed` arithmetic built on it - a 29.4 GiB shortfall -
+// was wrong, and the model was far closer to fitting than that said.
+//
+// The cross-check in parseVmStatBreakdown is the guard that catches this
+// class of error, and it is pinned below.
 const MACBOOK = Object.freeze({
-  budget: 107.5 * GiB,       // Metal's recommended working set
-  resident: 49.9 * GiB,      // in use right now
-  available: 45.9 * GiB,     // free plus reclaimable
-  model: 75.3 * GiB,         // ddalcu/Qwen3.8-Flash-Next-MLX-Serve-mixed-4-8bit
-  largestConsumer: 17.2 * GiB, // a colima VM
+  installed: 128 * GiB,
+  budget: 107.5 * GiB,        // Metal's recommended working set
+  inUse: 47.9 * GiB,          // active + wired + compressor
+  available: 59.4 * GiB,      // free + speculative + purgeable: claimable now
+  reclaimable: 79.1 * GiB,    // ...plus the inactive queue, the broad reading
+  model: 75.3 * GiB,          // ddalcu/Qwen3.8-Flash-Next-MLX-Serve-mixed-4-8bit
+  largestConsumer: 18.5 * GiB, // a colima VM
 });
 
 /** Installed RAM on that machine: 128 GiB, which the fleet prints as 137.4 GB. */
 const INSTALLED = 137438953472;
 
+/** The page counts behind those totals, at this machine's 16384-byte pages. */
+const PAGES = Object.freeze({
+  free: 26_214, active: 2_175_795, inactive: 1_291_059,
+  speculative: 3_866_624, wired: 465_306, purgeable: 0, compressor: 498_074,
+});
+
 /**
- * A vm_stat fixture built from the second set of numbers measured on the same
- * MacBook: page size 16384, 45.9 GiB in use, 80.9 GiB reclaimable. The page
- * counts below are exactly those totals.
- *
- * NOTE, and it is an open question rather than a resolved one: the two
- * fixtures in this file were handed over an hour apart and do not describe the
- * same moment - MACBOOK.available says 45.9 GiB free plus reclaimable, this
- * one says 45.9 GiB IN USE and 80.9 GiB reclaimable. Both are kept, deliberately
- * unaveraged: the first pins the fits-if-freed arithmetic that was signed off,
- * this one pins the parser.
+ * A vm_stat fixture. `drop` removes a category entirely, which is what a
+ * parser with a slightly wrong regex looks like from the outside.
  */
-function vmStat({
-  pageSize = 16384,
-  free = 2_000_000,
-  speculative = 3_301_862,
-  purgeable = 0,
-  active = 2_000_000,
-  inactive = 500_000,
-  wired = 300_000,
-  compressor = 208_102,
-  labels = {},
-} = {}) {
+function vmStat({ pageSize = 16384, labels = {}, drop = [], ...over } = {}) {
+  const n = { ...PAGES, ...over };
   const l = {
     free: 'Pages free', speculative: 'Pages speculative', purgeable: 'Pages purgeable',
     active: 'Pages active', inactive: 'Pages inactive', wired: 'Pages wired down',
     compressor: 'Pages occupied by compressor', ...labels,
   };
-  return [
-    pageSize === null ? 'Mach Virtual Memory Statistics:' : `Mach Virtual Memory Statistics: (page size of ${pageSize} bytes)`,
-    `${l.free}: ${free}.`,
-    `${l.active}: ${active}.`,
-    `${l.inactive}: ${inactive}.`,
-    `${l.speculative}: ${speculative}.`,
-    `${l.wired}: ${wired}.`,
-    `${l.purgeable}: ${purgeable}.`,
-    `${l.compressor}: ${compressor}.`,
-  ].join('\n');
+  const lines = [
+    pageSize === null
+      ? 'Mach Virtual Memory Statistics:'
+      : `Mach Virtual Memory Statistics: (page size of ${pageSize} bytes)`,
+  ];
+  for (const key of ['free', 'active', 'inactive', 'speculative', 'wired', 'purgeable', 'compressor']) {
+    if (!drop.includes(key)) lines.push(`${l[key]}: ${n[key]}.`);
+  }
+  return lines.join('\n');
 }
 
 // --- a real cache on disk --------------------------------------------------
@@ -255,23 +256,36 @@ test('the boundary is exact: usable fits, one byte more does not', () => {
 
 // --- THE TWO FIT STATES, on the numbers measured from this MacBook ---------
 
-test("the owner's measured MacBook: a 75.3 GiB model fits the box, not today", () => {
+test('the measured MacBook: a 75.3 GiB model fits the box, not today', () => {
   const fit = classifyFit(MACBOOK.model, MACBOOK.budget, MACBOOK.available);
 
   assert.equal(fit.state, AVAILABILITY.FITS_IF_FREED);
 
-  // "roughly 30 GB back" - the weights-alone floor the operator recognises.
-  assert.equal(Math.round((fit.weightsShortfallBytes / GiB) * 10) / 10, 29.4);
+  // RECOMPUTED against the corrected memory picture. The retired fixture
+  // omitted 59 GiB of speculative pages and put this shortfall at 29.4 GiB;
+  // with 59.4 GiB actually claimable the weights alone are 15.9 GiB short.
+  assert.equal(Math.round((fit.weightsShortfallBytes / GiB) * 10) / 10, 15.9);
 
   // And the honest headline: what it costs to actually SERVE it, KV included.
-  assert.equal(Math.round((fit.shortfallBytes / GiB) * 10) / 10, 45.5);
+  assert.equal(Math.round((fit.shortfallBytes / GiB) * 10) / 10, 32.0);
   assert.ok(fit.shortfallBytes > fit.weightsShortfallBytes);
 });
 
-test('the same model on the same box becomes fits-now once the memory is back', () => {
-  const freed = classifyFit(MACBOOK.model, MACBOOK.budget, 95 * GiB);
-  assert.equal(freed.state, AVAILABILITY.FITS_NOW);
-  assert.equal(freed.shortfallBytes, 0);
+test('the verdict survives the definition of reclaimable, only the price moves', () => {
+  // The conservative reading (59.4 GiB) and the broad one that also counts the
+  // inactive queue (79.1 GiB) disagree by 20 GiB and STILL agree on the state.
+  // Worth pinning: it is the reason this module can take the low end of a
+  // range it cannot narrow without changing what it tells anybody.
+  const tight = classifyFit(MACBOOK.model, MACBOOK.budget, MACBOOK.available);
+  const loose = classifyFit(MACBOOK.model, MACBOOK.budget, MACBOOK.reclaimable);
+
+  assert.equal(tight.state, AVAILABILITY.FITS_IF_FREED);
+  assert.equal(loose.state, AVAILABILITY.FITS_IF_FREED);
+
+  // Under the broad reading the weights alone already fit; only the KV
+  // reserve is short. That is what "far closer to fitting" looks like.
+  assert.equal(loose.weightsShortfallBytes, 0);
+  assert.equal(Math.round((loose.shortfallBytes / GiB) * 10) / 10, 12.3);
 });
 
 test('fits-if-freed always names its price, and never renders as "fits"', () => {
@@ -316,27 +330,29 @@ test('a model too large for the empty box is too-large, not fits-if-freed', () =
 // --- the live headroom instrument ------------------------------------------
 
 test('available memory is reclaimable pages, not free pages and not memory_pressure', () => {
-  const bytes = parseVmStatAvailable(vmStat(), INSTALLED);
+  const b = parseVmStatBreakdown(vmStat(), INSTALLED);
 
-  // free + speculative + purgeable: 80.9 GiB, reclaimable by the kernel with
-  // nobody quitting anything.
-  assert.equal(bytes, 86865707008);
-  assert.equal(Math.round((bytes / GiB) * 10) / 10, 80.9);
+  // free + speculative + purgeable: claimable now, without anybody quitting
+  // anything and without compressing a running process's pages.
+  assert.equal(Math.round((b.available / GiB) * 10) / 10, 59.4);
+  assert.equal(Math.round((b.inUse / GiB) * 10) / 10, 47.9);
+
+  // The broad reading, with the inactive queue added, reported separately
+  // rather than folded in: vm_stat cannot say how much of inactive is clean
+  // file cache and how much is dirty anonymous pages that get compressed.
+  assert.equal(Math.round((b.reclaimable / GiB) * 10) / 10, 79.1);
+  assert.ok(b.reclaimable > b.available);
+
+  // SPECULATIVE PAGES ARE THE POINT. Summing free and inactive alone - the
+  // retired fixture's arithmetic - loses 59 GiB on this machine.
+  const withoutSpeculative = (PAGES.free + PAGES.inactive) * 16384;
+  assert.ok(b.reclaimable - withoutSpeculative > 58 * GiB);
 
   // Active pages are running applications and are NOT counted: that is the
   // difference between this and memory_pressure, which reported 86% free on
   // this very machine while 34.8 GB sat in active pages.
-  assert.ok(bytes < INSTALLED);
-  // In use is the sum of the app-held queues, 45.9 GiB, and NOT installed
-  // minus available: vm_stat's queues account for 126.8 of the 128 GiB, and
-  // quietly attributing the 1.2 GiB gap to either side would be inventing a
-  // number to make two readings agree.
-  const inUse = (2_000_000 + 500_000 + 300_000 + 208_102) * 16384;
-  assert.equal(Math.round((inUse / GiB) * 10) / 10, 45.9);
-
-  // And it is not bare free memory either - the cache the OS hands back is in
-  // there, which is the rule host-telemetry.js sets out.
-  assert.ok(bytes > 2_000_000 * 16384);
+  assert.ok(b.available < INSTALLED);
+  assert.equal(parseVmStatAvailable(vmStat(), INSTALLED), b.available);
 });
 
 // --- THE PARSER MUST FAIL CLOSED -------------------------------------------
@@ -365,9 +381,10 @@ test('a missing page-size line yields unknown rather than an assumed 4096', () =
 test('the page size is read from the output, not hardcoded', () => {
   // The same page counts at 4096 describe a quarter of the memory. A
   // hardcoded 16384 would report 4x what the machine has.
+  const claimable = PAGES.free + PAGES.speculative + PAGES.purgeable;
   const small = parseVmStatAvailable(vmStat({ pageSize: 4096 }), INSTALLED / 4);
-  assert.equal(small, 5_301_862 * 4096);
-  assert.notEqual(small, 5_301_862 * 16384);
+  assert.equal(small, claimable * 4096);
+  assert.notEqual(small, claimable * 16384);
 });
 
 test('a reading that implies nothing is in use yields unknown', () => {
@@ -381,6 +398,50 @@ test('counters that do not account for installed RAM yield unknown', () => {
   // Half the machine missing from the queues means a counter was dropped, and
   // a plausible-looking number from a broken parse is the whole hazard.
   assert.equal(parseVmStatAvailable(vmStat(), INSTALLED * 2), null);
+});
+
+test('DROPPING ANY SUBSTANTIAL CATEGORY IS CAUGHT BY THE CROSS-CHECK', () => {
+  // This is the guard for the bug that produced the retired fixture: a sum
+  // that silently loses a bucket. It fails open in whichever direction the
+  // lost bucket pushed, so nothing downstream can notice - only comparing the
+  // parts against the whole can.
+  //
+  // Each of these is a category removed from vm_stat's output entirely.
+  for (const category of ['active', 'inactive', 'speculative', 'wired', 'compressor']) {
+    assert.equal(
+      parseVmStatAvailable(vmStat({ drop: [category] }), INSTALLED),
+      null,
+      `a parse missing the ${category} queue was accepted`
+    );
+  }
+
+  // The tolerance has to be tight enough to do it. At the 20% band this
+  // started with, three of those five sailed through: inactive is 15% of this
+  // box, wired 6%, the compressor 6%. Measured accounting is 99.2%, so 5% is
+  // five times the observed drift and still catches all three.
+  const accounted = Object.entries(PAGES)
+    .filter(([k]) => k !== 'purgeable')
+    .reduce((sum, [, n]) => sum + n, 0) * 16384;
+  assert.ok(accounted / INSTALLED > 0.95 && accounted / INSTALLED < 1.05);
+  assert.ok((accounted - PAGES.inactive * 16384) / INSTALLED > 0.8, 'a 20% band would have missed this');
+
+  // A category missing from the OUTPUT is caught whatever its size, by the
+  // presence requirement rather than the tolerance - free is 0.4 GiB here and
+  // still refused.
+  assert.equal(parseVmStatAvailable(vmStat({ drop: ['free'] }), INSTALLED), null);
+
+  // THE TOLERANCE ITSELF, pinned. Everything above is caught by the presence
+  // requirement, so at a 20% band this whole test still passed - a check that
+  // cannot fail. Here the counters are all present and simply do not add up:
+  // 107.3 GiB of a 128 GiB machine, 16% short, which is what a sum that has
+  // quietly lost the inactive queue looks like from the outside. 5% refuses
+  // it; the 20% band this started with accepted it.
+  const short = parseVmStatAvailable(vmStat({ inactive: 0 }), INSTALLED);
+  assert.equal(short, null, 'accepted a memory picture that does not add up');
+
+  const shortAccounted = (accounted - PAGES.inactive * 16384) / INSTALLED;
+  assert.ok(shortAccounted > 0.8 && shortAccounted < 0.95,
+    'this fixture must sit inside a 20% band and outside a 5% one, or it pins nothing');
 });
 
 test('a Linux MemAvailable that cannot be read is unknown, never plenty', async () => {
@@ -798,4 +859,43 @@ test('a name-derived count is published as unconfirmed, never as fact', async ()
   assert.equal(scan.paramsSource, PARAM_SOURCES.NAME);
   assert.equal(scan.params, 27e9);
   assert.equal(PARAM_SOURCES.NAME, 'name-unconfirmed', 'the source must say so in its own name');
+});
+
+test('the generation veto only clears a model that is complete and fits now', async () => {
+  // This is what the served-model probe consults before spending a token.
+  // Asking a load-on-demand server to generate with a model NAMES that model,
+  // which on such a server is an instruction to load it - so a half-downloaded
+  // or oversized candidate must never get through.
+  const root = cacheRoot();
+  repo(root, 'org/ready', { shards: ['model.safetensors'], size: 1024 });
+  repo(root, 'org/still-downloading', {
+    shards: ['model-00001.safetensors'], blobExtras: ['deadbeef.incomplete'],
+  });
+
+  const probe = new ModelAvailabilityProbe({ roots: [root] });
+  await probe.refresh({
+    budget: { bytes: MACBOOK.budget, source: BUDGET_SOURCES.METAL },
+    now: { bytes: MACBOOK.available, holder: null },
+  });
+
+  assert.equal(probe.couldLoad('org/ready'), true);
+  assert.equal(probe.couldLoad('org/still-downloading'), false);
+
+  // Unknowns fail closed here too: a model nobody scanned, and a box that has
+  // not scanned anything yet.
+  assert.equal(probe.couldLoad('org/never-heard-of-it'), false);
+  assert.equal(probe.couldLoad(''), false);
+  assert.equal(new ModelAvailabilityProbe({ roots: [cacheRoot()] }).couldLoad('org/ready'), false);
+});
+
+test('a budget this box cannot measure vetoes generation as well', async () => {
+  const root = cacheRoot();
+  repo(root, 'org/ready', { shards: ['model.safetensors'], size: 1024 });
+
+  const probe = new ModelAvailabilityProbe({ roots: [root] });
+  await probe.refresh({
+    budget: { bytes: null, source: BUDGET_SOURCES.UNKNOWN, note: 'nothing answered' },
+    now: { bytes: null, holder: null },
+  });
+  assert.equal(probe.couldLoad('org/ready'), false, 'an unmeasurable box authorised a load');
 });

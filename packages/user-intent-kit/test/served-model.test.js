@@ -455,7 +455,9 @@ test('readVerdict never invents a model from a result that has none', () => {
 // a 2.3 GiB one, and the dashboard said the MacBook was serving it.
 
 test('a server listing a model it has not loaded does NOT report it as served', async () => {
-  const probe = probeFor(serving(['ddalcu/Qwen3.8-Flash-Next-MLX-Serve-mixed-4-8bit']));
+  // The incident exactly: the listing is honest about what is in the cache,
+  // and the model cannot run.
+  const probe = probeFor(serving(['ddalcu/Qwen3.8-Flash-Next-MLX-Serve-mixed-4-8bit'], { generates: false }));
   await probe.refresh();
 
   assert.equal(probe.current(), undefined, 'published a served name from a listing alone');
@@ -467,19 +469,52 @@ test('a server listing a model it has not loaded does NOT report it as served', 
   assert.ok(!('model' in state), `a listing reached the model field: ${state.model}`);
 });
 
-test('the generation probe is OFF unless it is switched on', async () => {
-  const fetchImpl = serving(['a-model']);
-  const probe = probeFor(fetchImpl);
+test('the generation default is split by trust, not by on and off', async () => {
+  // LOOPBACK, nobody said: this box's own server, so one token is spent and a
+  // card may honestly say serving.
+  const own = serving(['a-model']);
+  const local = probeFor(own);
+  await local.refresh();
+  assert.equal(local.generates, true);
+  assert.equal(local.lastResult().verdict, VERDICTS.GENERATED);
+  assert.ok(own.calls.some(c => c.method === 'POST'));
+
+  // NOT LOOPBACK, nobody said: may be somebody else's compute, may bill per
+  // token, may be a load-on-demand server where asking IS loading.
+  const theirs = serving(['a-model']);
+  const [entry] = loadRegistry([{ id: 'remote', host: '10.0.0.5', port: 8080, kind: 'openai' }], { allowLan: true });
+  const remote = new ServedModelProbe({ entry, env: {}, fetchImpl: theirs, generateMinMs: 0 });
+  await remote.refresh();
+  assert.equal(remote.generates, false);
+  assert.equal(remote.lastResult().verdict, VERDICTS.LISTED);
+  assert.ok(!theirs.calls.some(c => c.method === 'POST'), 'spent somebody else\'s compute unasked');
+
+  // An explicit word wins in BOTH directions, including on loopback.
+  const muted = serving(['a-model']);
+  const off = probeFor(muted, { INTENT_MODEL_GENERATE: 'off' });
+  await off.refresh();
+  assert.equal(off.generates, false);
+  assert.equal(off.lastResult().verdict, VERDICTS.LISTED);
+  assert.ok(!muted.calls.some(c => c.method === 'POST'));
+
+  // ...and a named remote that was explicitly enabled may be asked.
+  const named = serving(['a-model']);
+  const opted = probeFor(named, { INTENT_MODEL_GENERATE: '1', INTENT_MODEL_ENDPOINT: '10.0.0.5:8080' }, { generateMinMs: 0 });
+  await opted.refresh();
+  assert.equal(opted.generates, true);
+  assert.equal(opted.lastResult().verdict, VERDICTS.GENERATED);
+});
+
+test('where generation is disabled the honest reading is listed, never serving', async () => {
+  const probe = probeFor(serving(['a-model']), { INTENT_MODEL_GENERATE: '0' });
   await probe.refresh();
 
   assert.equal(probe.lastResult().verdict, VERDICTS.LISTED);
-  assert.ok(!fetchImpl.calls.some(c => c.method === 'POST'), 'spent a token without being asked to');
+  assert.equal(probe.current(), undefined, 'a disabled probe must not promote a listing');
+  assert.deepEqual(probe.listed(), ['a-model']);
 
-  // INTENT_MODEL_GENERATE is the switch, and nothing else flips it.
-  const on = probeFor(serving(['a-model']), { INTENT_MODEL_GENERATE: '1' }, { generateMinMs: 0 });
-  await on.refresh();
-  assert.equal(on.lastResult().verdict, VERDICTS.GENERATED);
-  assert.equal(on.current(), 'a-model');
+  const state = await stateFrom({ modelProbe: probe });
+  assert.ok(!('model' in state));
 });
 
 test('a generation that errors DEGRADES to listed, never promotes to served', async () => {

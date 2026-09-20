@@ -36,12 +36,16 @@
  * such. "We asked and got no name" beats a configured name - it publishes
  * nothing.
  *
- * The generation probe is OFF by default. It costs a forward pass on
- * somebody's machine and, against a server that loads on demand, it can cause
- * a load. The consequence is deliberate and worth stating plainly: with it
- * off, no box publishes a served `model` at all. An unproven claim is not a
- * cheaper version of a proven one, and a blank field is the honest rendering
- * of "nobody asked".
+ * THE GENERATION PROBE'S DEFAULT IS SPLIT BY TRUST. On loopback it is ON: the
+ * server is this box's own, one token at max_tokens 1 every five minutes costs
+ * nothing worth counting, and it is the only way a card can honestly say
+ * "serving". Against any other host it is OFF until an operator enables it -
+ * that endpoint may be somebody else's compute, may bill per token, and may be
+ * a load-on-demand server where the request itself is a load.
+ *
+ * Where it is disabled, the honest reading is LISTED, not "serving", and the
+ * box publishes no served `model` at all. An unproven claim is not a cheaper
+ * version of a proven one.
  *
  * THE OMIT-NOT-FAKE CONTRACT, which is the whole point
  *
@@ -96,6 +100,9 @@ const DISABLED = new Set(['0', 'off', 'none', 'no', 'disabled', 'false']);
 
 /** Values of INTENT_MODEL_GENERATE that switch the generation probe ON. */
 const ENABLED = new Set(['1', 'on', 'yes', 'true', 'enabled']);
+
+/** ...and the words that switch it off, wherever the endpoint points. */
+const GENERATE_OFF = new Set(['0', 'off', 'no', 'false', 'disabled', 'none']);
 
 /**
  * The shortest gap between two generation probes.
@@ -325,11 +332,23 @@ export class ServedModelProbe {
 
     this.#entry = entry !== undefined ? entry : this.#entryFromEnv();
 
-    // OFF by default, and it takes an explicit word to turn on. The cost is
-    // real - one forward pass, and possibly a model load - and it is charged
-    // to whoever runs the daemon, not to whoever reads the dashboard.
+    // THE DEFAULT IS SPLIT BY TRUST, NOT BY ON AND OFF.
+    //
+    // An endpoint on loopback is this box's own server: the cost of one token
+    // at max_tokens 1, once every five minutes, is negligible, it is spent on
+    // the machine that benefits, and it is the ONLY way a card can honestly
+    // say "serving" rather than "listed". So loopback generates by default.
+    //
+    // Anything else may be somebody else's compute, may bill per token, and
+    // may be a load-on-demand server where the request itself is a load. That
+    // stays off until an operator says otherwise, in as many words.
+    //
+    // `null` here means "nobody said", which is what lets the two cases
+    // differ. An explicit word wins either way, in both directions.
     const wanted = String(env?.INTENT_MODEL_GENERATE ?? '').trim().toLowerCase();
-    this.#generate = typeof generate === 'boolean' ? generate : ENABLED.has(wanted);
+    this.#generate = typeof generate === 'boolean'
+      ? generate
+      : (ENABLED.has(wanted) ? true : (GENERATE_OFF.has(wanted) ? false : null));
 
     const minFromEnv = Number(env?.INTENT_MODEL_GENERATE_MIN_MS);
     this.#generateMinMs = Number.isFinite(generateMinMs) && generateMinMs >= 0
@@ -356,11 +375,32 @@ export class ServedModelProbe {
    * human-scale event and this costs a forward pass.
    */
   #mayGenerate() {
-    if (!this.#generate || !this.enabled) return false;
+    if (this.#generate === false || !this.enabled) return false;
+
     const host = String(this.#entry.host).toLowerCase().replace(/^\[|\]$/g, '');
-    if (!LOOPBACK_HOSTS.has(host) && !this.#endpointExplicit) return false;
+    const loopback = LOOPBACK_HOSTS.has(host);
+
+    if (this.#generate === null) {
+      // Nobody said. Only this box's own server is trusted that far.
+      if (!loopback) return false;
+    } else if (!loopback && !this.#endpointExplicit) {
+      // Switched on, but the host is one the operator never named: the default
+      // endpoint is a convenience for reading a listing on loopback, and
+      // silently turning it into "POST a prompt to whatever is on 8080 of some
+      // other machine" is not a convenience.
+      return false;
+    }
+
     if (this.#lastGenerationAt === null) return true;
     return this.#now() - this.#lastGenerationAt >= this.#generateMinMs;
+  }
+
+  /** Whether this probe will ever ask for a token, for a log line. */
+  get generates() {
+    if (this.#generate === false || !this.enabled) return false;
+    const host = String(this.#entry.host).toLowerCase().replace(/^\[|\]$/g, '');
+    const loopback = LOOPBACK_HOSTS.has(host);
+    return this.#generate === null ? loopback : (loopback || this.#endpointExplicit);
   }
 
   /**

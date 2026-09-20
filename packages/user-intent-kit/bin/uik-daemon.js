@@ -61,7 +61,9 @@
 
 import { hostname } from 'node:os';
 import { execSync } from 'node:child_process';
-import { IntentClient, IAKAdapter, DesktopAdapter, ServedModelProbe, defaultSearchRoots } from '../src/index.js';
+import {
+  IntentClient, IAKAdapter, DesktopAdapter, ServedModelProbe, ModelAvailabilityProbe, defaultSearchRoots,
+} from '../src/index.js';
 
 const baseUrl = process.env.INTENT_API_BASE || 'https://groupmind.one/api/v1';
 const apiKey = process.env.INTENT_API_KEY;
@@ -70,7 +72,13 @@ const agentHandle = process.env.INTENT_AGENT_HANDLE || '@agent';
 const deviceId = process.env.INTENT_DEVICE_ID || hostname();
 const deviceKind = process.env.INTENT_DEVICE_KIND || undefined;
 const deviceModel = process.env.INTENT_DEVICE_MODEL || undefined;
-const modelProbe = new ServedModelProbe();
+// Order matters, and the daemon has to build both because it logs both. The
+// disk scan is the served probe's VETO: a model that is incomplete or would
+// not fit is never asked to generate, because asking a load-on-demand server
+// for a token is how you make it load one. Constructing the served probe
+// alone would silently drop that guard.
+const availabilityProbe = new ModelAvailabilityProbe();
+const modelProbe = new ServedModelProbe({ guard: id => availabilityProbe.couldLoad(id) });
 const publishDevice = process.env.INTENT_DEVICE_PUBLISH !== '0';
 const pollIntervalMs = Number(process.env.POLL_INTERVAL_MS || 30000);
 
@@ -96,7 +104,7 @@ if (userId.toLowerCase() === agentHandle.replace(/^@/, '').toLowerCase()) {
 const client = new IntentClient({ baseUrl, apiKey, userId, deviceId });
 const iak = new IAKAdapter(client, { agentHandle, machine: deviceId });
 const desktop = new DesktopAdapter(client, {
-  pollIntervalMs, machine: deviceId, kind: deviceKind, model: deviceModel, modelProbe,
+  pollIntervalMs, machine: deviceId, kind: deviceKind, model: deviceModel, modelProbe, availabilityProbe,
 });
 
 if (publishDevice) desktop.start();
@@ -132,9 +140,10 @@ console.log(`uik-daemon: model probe -> ${modelProbe.describe()}`);
 console.log(`uik-daemon: model scan  -> ${defaultSearchRoots().join(', ')}`);
 // Whether this box will ever publish a SERVED model at all. A listing is not
 // a loading - mlx_lm lists the whole HuggingFace cache - so only a returned
-// token fills the `model` field, and asking for one is opt-in because it
-// spends a forward pass on this machine.
-console.log(`uik-daemon: generation  -> ${process.env.INTENT_MODEL_GENERATE ? 'on (INTENT_MODEL_GENERATE)' : 'off; models will report as listed, never served'}`);
+// token fills the `model` field. The default is split by trust: on for a
+// loopback endpoint, off for anything else. Where it is off the honest
+// reading is `listed`, and the card says so rather than saying serving.
+console.log(`uik-daemon: generation  -> ${modelProbe.generates ? 'on; a token proves what is loaded' : 'off; models report as listed, never served'}`);
 
 const shutdown = async (sig) => {
   console.log(`uik-daemon: ${sig}, shutting down`);

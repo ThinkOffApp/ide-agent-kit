@@ -425,7 +425,7 @@ export async function measureLargestConsumer({
  * cache-rich machine as full; this figure adds the reclaimable cache back in,
  * by name, which is exactly what the warning asks for.
  */
-export function parseVmStatAvailable(text, totalMemBytes = null) {
+export function parseVmStatBreakdown(text, totalMemBytes = null) {
   const body = String(text ?? '');
 
   // The page size is STATED, never assumed: 16384 on Apple Silicon, 4096
@@ -435,12 +435,12 @@ export function parseVmStatAvailable(text, totalMemBytes = null) {
   if (!Number.isFinite(pageSize) || pageSize <= 0) return null;
 
   const seen = new Map();
-  const pages = name => {
-    const m = new RegExp(`^Pages ${name}:\\s*(\\d+)`, 'm').exec(body);
+  const pages = (label) => {
+    const m = new RegExp(`^Pages ${label}:\\s*(\\d+)`, 'm').exec(body);
     if (!m) return null;
     const n = Number(m[1]);
     if (!Number.isFinite(n) || n < 0) return null;
-    seen.set(name, n);
+    seen.set(label, n);
     return n;
   };
 
@@ -450,7 +450,8 @@ export function parseVmStatAvailable(text, totalMemBytes = null) {
   const active = pages('active');
   const inactive = pages('inactive');
   const wired = pages('wired down');
-  const compressor = Number((body.match(/^Pages occupied by compressor:\s*(\d+)/m) || [])[1]);
+  const compressorMatch = /^Pages occupied by compressor:\s*(\d+)/m.exec(body);
+  const compressor = compressorMatch ? Number(compressorMatch[1]) : null;
 
   // An empty parse is an ERROR, not a machine with nothing in it. If the
   // labels move in a future macOS, or the regex is a character out, this is
@@ -459,35 +460,90 @@ export function parseVmStatAvailable(text, totalMemBytes = null) {
   if (!seen.size) return null;
 
   // Every counter the cross-check needs must be present. Matching three of
-  // six is a broken parser producing a plausible-looking number.
-  if (free === null || speculative === null || purgeable === null
-    || active === null || inactive === null || wired === null
+  // seven is a broken parser producing a plausible-looking number.
+  if ([free, speculative, purgeable, active, inactive, wired, compressor].some(n => n === null)
     || !Number.isFinite(compressor)) {
     return null;
   }
 
-  const available = (free + speculative + purgeable) * pageSize;
-  const accounted = (free + active + inactive + speculative + wired + compressor) * pageSize;
+  const gb = n => n * pageSize;
+
+  // `purgeable` is a SUBSET of the active and inactive queues, so it is added
+  // to what is claimable but never to the accounting total - counting it in
+  // both would inflate the machine.
+  const accounted = gb(free + active + inactive + speculative + wired + compressor);
+  const inUse = gb(active + wired + compressor);
+
+  // What a new allocation can have without anybody quitting anything, and
+  // WITHOUT the kernel having to compress a running process's pages.
+  const available = gb(free + speculative + purgeable);
+
+  // The broader reading, which counts the inactive queue as reclaimable too.
+  // Reported beside the conservative one rather than instead of it: inactive
+  // holds both clean file-backed pages, which are dropped for free, and dirty
+  // anonymous pages, which are COMPRESSED rather than returned - so the true
+  // figure is somewhere between these two and vm_stat alone cannot say where.
+  // FITS_NOW is judged on the conservative one, because a claim that must not
+  // overstate takes the low end of a range it cannot narrow.
+  const reclaimable = gb(free + inactive + speculative + purgeable);
+
   if (available <= 0) return null;
 
   if (Number.isFinite(totalMemBytes) && totalMemBytes > 0) {
-    // Two instruments must agree before a number is quoted. vm_stat's queues
-    // should account for very nearly all of installed RAM (measured here:
-    // 135.9 GB of 137.4 GB, 1.1% adrift). A parser that has silently dropped
-    // a counter lands far outside this band, and so does a page size that has
-    // been misread. 20% is loose enough for a queue this file does not know
-    // about and tight enough to catch a missing one.
-    if (accounted < totalMemBytes * 0.8 || accounted > totalMemBytes * 1.2) return null;
+    // THE CROSS-CHECK THAT WOULD HAVE CAUGHT THE BUG THIS GUARD EXISTS FOR.
+    // A reclaimable figure that omitted the speculative queue understated
+    // available memory by 59 GiB on this machine and nobody noticed, because
+    // nothing compared the parts against the whole.
+    //
+    // The band is 5%, not 20%. Two independent measurements here accounted for
+    // 99.1% and 99.2% of installed RAM, so 5% is five times the observed drift
+    // - and 20% was uselessly loose: dropping the inactive queue (15% of this
+    // box), wired (6%) or the compressor (6%) all sailed through it. A bucket
+    // that happens to be near-empty at measurement time still cannot be caught
+    // this way, but dropping a near-empty bucket also barely moves the answer.
+    if (accounted < totalMemBytes * 0.95 || accounted > totalMemBytes * 1.05) return null;
 
     // Zero bytes in use on a running macOS box is impossible, and so is more
     // in use than the machine has. Either means the parse is wrong, and the
     // honest answer is unknown - never a fit.
-    const inUse = totalMemBytes - available;
     if (inUse <= 0 || inUse > totalMemBytes) return null;
     if (available > totalMemBytes) return null;
   }
 
-  return available;
+  return { pageSize, available, reclaimable, inUse, accounted };
+}
+
+/**
+ * Bytes a new process could claim, from `vm_stat`'s named page counters.
+ *
+ * WHY NOT `memory_pressure`, WHICH IS WHAT host-telemetry PUBLISHES. Measured
+ * on this MacBook, 20 Sep 2026: `memory_pressure` reported 86% free while
+ * `vm_stat` showed 34.8 GB of ACTIVE pages and a 17.2 GiB VM resident. Its
+ * "System-wide memory free percentage" counts everything that is not wired or
+ * compressed, so it counts running applications as free. Using it here would
+ * make FITS_NOW true for anything that fits the box at all, and a fit state
+ * that cannot come out negative is not a check.
+ *
+ * So the figure is built from the counters that are reclaimable WITHOUT a
+ * human doing anything and without compressing a running process:
+ *
+ *   free         nobody has it
+ *   speculative  read-ahead file cache, dropped on demand
+ *   purgeable    volatile allocations the kernel may discard at will
+ *
+ * and excludes active and wired pages (an app must be quit), compressed pages
+ * (already paid for), and the inactive queue (part clean cache, part dirty
+ * anonymous pages that are compressed rather than freed - see
+ * parseVmStatBreakdown, which reports that broader figure separately).
+ *
+ * This is not the free-memory mistake host-telemetry.js warns about. That
+ * warning is against counting only free pages and thereby reporting a
+ * cache-rich machine as full; this figure adds the reclaimable cache back in,
+ * by name, which is exactly what the warning asks for. Speculative pages are
+ * 59 GiB of this box and omitting them is its own, opposite bug.
+ */
+export function parseVmStatAvailable(text, totalMemBytes = null) {
+  return parseVmStatBreakdown(text, totalMemBytes)?.available ?? null;
 }
 
 /**
