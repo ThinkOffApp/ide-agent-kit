@@ -103,3 +103,32 @@ true in both cities.
 `--allow-lan` exists for a deliberate single-site run (bringing a new box up
 before it is on the tailnet). It is not a default and the CLI says so on every
 run that uses it.
+
+## `~/.iak/model-selection.json` - what the picker writes
+
+`bin/model-picker.mjs` probes this registry, offers every entry that is UP as
+one button on the phone, and writes the tapped one here:
+
+```json
+{
+  "selectedId": "glm53-asus",
+  "baseUrl": "http://asus1:8888/v1",
+  "model": "GLM-5.3-Flash-EXL3",
+  "keyFile": "~/.iak/glm53_asus_api_key.txt",
+  "selectedAt": "2026-09-20T07:16:47.600Z",
+  "selectedFrom": "mb"
+}
+```
+
+Three things about that file, each of which is a rule and not a detail:
+
+* `keyFile` is a PATH, exactly as the registry carries it. The token is never
+  read, resolved or written by the picker, so this file can be copied around
+  and quoted in a room without leaking anything. Consumers read the file
+  themselves.
+* `selectedFrom` names the host that probed. Path and latency are per peer
+  pair, so a selection made on one box is not evidence about another.
+* `selectedAt` is the time of the RE-PROBE, not of the offer. The picker
+  probes the chosen entry again when the answer arrives and refuses to apply
+  an entry that stopped being UP while the human was deciding, which means the
+  previous selection survives a box that filled up mid-question.
