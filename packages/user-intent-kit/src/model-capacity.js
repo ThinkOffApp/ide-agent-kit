@@ -526,6 +526,47 @@ async function singleGet(entry, { fetchImpl, timeoutMs, now, token }) {
 }
 
 
+/**
+ * ONE model-list GET, with this entry's credential resolved the usual way.
+ *
+ * The switcher wants four axes and pays for them: five samples for a p90, an
+ * ssh round trip for free memory, a `tailscale ping` for the path. A device
+ * heartbeat asking "what is THIS box serving?" wants exactly one of those
+ * readings, from a server on loopback where latency and path are not
+ * questions, and it asks on every poll - so it must not pay the other three.
+ *
+ * So this is the whole probe for that caller, and deliberately a re-export of
+ * the same `singleGet` rather than a second implementation: same auth header
+ * rules, same refusal to follow a redirect, same 401-splits-into-two verdict,
+ * same per-kind parsing of the model list. A second prober would drift from
+ * this one silently, and the first thing it would drift on is the thing that
+ * matters most here - which answers count as "it named a model".
+ *
+ * Returns `singleGet`'s result plus the credential PROVENANCE (`auth`,
+ * `keySource`, `keyBlocked`, `keyWarning`). Never the token itself.
+ *
+ * @param {object} entry  a loadRegistry() entry
+ * @returns {Promise<{http: 'OK'|'DOWN'|'UNREACHABLE', models: string[],
+ *   httpStatus: number|null, authState: string|null, reason: string|null}>}
+ */
+export async function probeServedModels(entry, {
+  fetchImpl = fetch,
+  timeoutMs = DEFAULT_TIMEOUT_MS,
+  now = () => Date.now(),
+  env = process.env,
+} = {}) {
+  const credential = await resolveEntryToken(entry, { env });
+  const result = await singleGet(entry, { fetchImpl, timeoutMs, now, token: credential.token });
+  return {
+    ...result,
+    auth: credential.auth,
+    keySource: credential.keySource,
+    keyBlocked: Boolean(credential.keyBlocked),
+    keyWarning: credential.keyWarning ?? null,
+  };
+}
+
+
 // --- latency: several samples, a high percentile, and the spread ----------
 
 const sleep = ms => new Promise(r => setTimeout(r, ms));

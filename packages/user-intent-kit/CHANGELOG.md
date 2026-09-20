@@ -1,5 +1,18 @@
 # Changelog
 
+## Unreleased
+
+### Added
+- The device heartbeat now reports which LLM the machine is actually serving, as `model`. It is a live reading: `ServedModelProbe` asks a local OpenAI-compatible endpoint (`INTENT_MODEL_ENDPOINT`, default `127.0.0.1:8080`) and publishes the id it answers with, verbatim.
+- `probeServedModels()` in `model-capacity.js` - one model-list GET with the existing credential rules, for callers that want the name and not the switcher's p90/free-memory/path readings.
+- `INTENT_MODEL_KIND`, `INTENT_MODEL_KEY_FILE` (a **path**, never a token), `INTENT_MODEL_PROBE_MS`.
+
+### Changed
+- `INTENT_DEVICE_MODEL` is now a last resort rather than the first answer. A server that answered has just stated the truth; a setting can only be stale.
+
+### Why
+The dashboard has rendered this field since 17 Sep and the API has always accepted it - the publisher simply never put it in the payload. Detection rather than configuration because the failure that matters is a model name on a public screenshot that belongs to no running process: nothing serving, a 401, or a dead probe all publish **no `model` key at all**, never a placeholder.
+
 ## 0.2.0 (2026-04-07)
 
 ### Added

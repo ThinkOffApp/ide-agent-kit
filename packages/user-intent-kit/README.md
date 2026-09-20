@@ -89,6 +89,40 @@ For a persistent setup under launchd (macOS) or systemd (Linux), see `examples/c
 2. A shell wrapper that exports the required env vars and execs `node bin/uik-daemon.js`.
 3. Bootstrap with `launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.<agent>.uik.plist`.
 
+### Reporting which model the machine serves
+
+The daemon asks a local OpenAI-compatible endpoint what it is serving and puts
+the answer on the device card as `model`. It is a live reading, not a setting,
+because a setting cannot notice that somebody swapped the weights - and a model
+name nobody is running is the one field on this dashboard that is worse wrong
+than missing.
+
+```bash
+export INTENT_MODEL_ENDPOINT=127.0.0.1:8080
+```
+
+- **Nothing serving publishes no `model` field at all.** No `unknown`, no empty
+  string, no last-known-good. The dashboard already renders a card without a
+  label; that blank is the honest answer.
+- **A 401 also publishes nothing.** That box is serving something, but naming
+  it is the entire job and we do not have the name. Point
+  `INTENT_MODEL_KEY_FILE` at a **path** to a file holding the bearer token
+  (never the token itself - the check that refuses one is the same one
+  `config/models.json` uses) and the name appears.
+- **Whatever the server answers is published verbatim**, e.g.
+  `GLM-5.3-Flash-EXL3`.
+- **The probe is not on the heartbeat.** It runs on `INTENT_MODEL_PROBE_MS`
+  (default 5 minutes) and the heartbeat reads a cached value, so a dead model
+  server costs a label and never a whole machine. A reading that stops being
+  refreshed expires rather than being republished forever.
+- **Not Ollama's port by default.** Ollama's `/v1/models` lists what is
+  *pulled*, not what is *loaded* - measured 20 Sep 2026, it named `gpt-oss:20b`
+  on a machine whose `/api/ps` was empty. Point `INTENT_MODEL_ENDPOINT` there
+  deliberately if you want the catalogue.
+- `INTENT_MODEL_ENDPOINT=off` disables the probe. `INTENT_DEVICE_MODEL` remains
+  as a last resort for a box with no endpoint to ask; a server that answers
+  always outranks it.
+
 > Note: The older `examples/iak-integration.js` is a one-shot demo and will exit once its setInterval timer is unref'd. Use `uik-daemon` for long-running deployments.
 
 ## Quick start
