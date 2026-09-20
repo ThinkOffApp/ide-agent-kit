@@ -18,7 +18,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync, readFileSync, realpathSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, readdirSync, rmSync, symlinkSync, writeFileSync, readFileSync, realpathSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -361,4 +361,152 @@ test('both scanners use the same pattern list (fails if the lists diverge)', () 
     assert.ok(!/^\s*(?:export\s+)?const\s+\w*PATTERNS\s*=\s*\[/m.test(src),
       `${path.basename(file)} declares its own pattern list - that is the drift this test exists to stop`);
   }
+});
+
+// ---------------------------------------------------------------------------
+// Entry points must not be silent through a symlink.
+//
+// The failure this guards against is SILENCE: the script starts, the
+// run-only-if-invoked-directly guard evaluates false because node realpaths
+// import.meta.url and never realpaths process.argv[1], main() is skipped, and
+// node exits 0. For a security tool exit 0 means clean, so it blesses a repo it
+// never looked at. macOS /tmp IS a symlink to /private/tmp, so this fires for
+// every scratch dir, every worktree under /tmp and every ~/bin symlink.
+// ---------------------------------------------------------------------------
+
+/** Strip the one field that legitimately differs between two runs. */
+function stableReport(stdout) {
+  const report = JSON.parse(stdout);
+  delete report.durationMs;
+  delete report.examined.bytesExamined;
+  return report;
+}
+
+test('the history scanner behaves identically through a symlinked path', () => {
+  const fixture = newRepo('iak-hist-symlink-');
+  const secret = synthetic('SYMLINK');
+  writeFileSync(path.join(fixture, 'leaked-config.json'), `key=${secret}\n`);
+  commitAll(fixture, 'oops');
+  rmSync(path.join(fixture, 'leaked-config.json'));
+  commitAll(fixture, 'delete it');
+
+  // A real symlink made here, rather than relying on /tmp being one.
+  const linkDir = tempDir('iak-hist-linkroot-');
+  const linkedRepo = path.join(linkDir, 'repo-link');
+  symlinkSync(repoRoot, linkedRepo);
+  const linkedScanner = path.join(linkedRepo, 'scripts', 'scan-history-for-secrets.mjs');
+
+  const direct = spawnSync('node', [scanner, fixture, '--json'], { encoding: 'utf8', env: GIT_ENV });
+  const linked = spawnSync('node', [linkedScanner, fixture, '--json'], { encoding: 'utf8', env: GIT_ENV });
+
+  assert.ok(linked.stdout.length > 0,
+    'a scanner invoked through a symlink must not silently produce nothing');
+  assert.equal(linked.status, direct.status,
+    `exit code differs through a symlink: ${linked.status} vs ${direct.status}`);
+  assert.equal(linked.status, EXIT.FOUND, 'and it must still be the FOUND it would report directly');
+  assert.deepEqual(stableReport(linked.stdout), stableReport(direct.stdout));
+
+  // The same trap, one level down: the file itself symlinked into a ~/bin.
+  const binLink = path.join(linkDir, 'scan-history');
+  symlinkSync(scanner, binLink);
+  const viaBin = spawnSync('node', [binLink, fixture, '--json'], { encoding: 'utf8', env: GIT_ENV });
+  assert.equal(viaBin.status, EXIT.FOUND, 'a ~/bin-style symlink to the script must still run it');
+  assert.deepEqual(stableReport(viaBin.stdout), stableReport(direct.stdout));
+
+  // --help too: the original bug made even that produce nothing.
+  const help = spawnSync('node', [linkedScanner, '--help'], { encoding: 'utf8', env: GIT_ENV });
+  assert.equal(help.status, 0);
+  assert.match(help.stdout, /EXIT CODES/);
+});
+
+test('the pre-commit secret gate fires through a symlinked path', () => {
+  // If check-stageable-secrets.mjs no-ops, a commit carrying a credential walks
+  // straight through the hook. Same assertion, because the same trap applies.
+  const fixture = newRepo('iak-stage-symlink-');
+  writeFileSync(path.join(fixture, 'README.md'), '# fixture\n');
+  commitAll(fixture, 'initial');
+  writeFileSync(path.join(fixture, 'creds.json'), `{ "api_key": "${synthetic('STAGED')}" }\n`);
+
+  const linkDir = tempDir('iak-stage-linkroot-');
+  const linkedRepo = path.join(linkDir, 'repo-link');
+  symlinkSync(repoRoot, linkedRepo);
+
+  const run = (script) => spawnSync('node', [script], { cwd: fixture, encoding: 'utf8', env: GIT_ENV });
+  const direct = run(stageableScanner);
+  const linked = run(path.join(linkedRepo, 'scripts', 'check-stageable-secrets.mjs'));
+
+  assert.equal(direct.status, 1, 'the gate must fire on a stageable credential at all');
+  assert.equal(linked.status, direct.status,
+    'the pre-commit gate is a no-op through a symlink: a credential would pass the hook');
+  assert.equal(linked.stdout, direct.stdout);
+  assert.equal(linked.stderr, direct.stderr);
+  assert.ok(!`${linked.stdout}${linked.stderr}`.includes('TESTONLY'), 'and it still prints no value');
+});
+
+test('no entry point hand-rolls the main-module comparison', () => {
+  // We found this bug three times in one day by tripping over instances one at
+  // a time. This is the sweep, kept.
+  //
+  // The rule is PROXIMITY, not "the file mentions isMainModule somewhere": a
+  // first version of this test only checked the latter, and it passed happily
+  // when the guard was reverted to the broken comparison while the (now unused)
+  // import stayed behind. A check that cannot fail is not a check.
+  //
+  // The correct idiom never names process.argv[1] at the call site - the only
+  // place that does is the shared helper.
+  const helper = path.join('src', 'common', 'entrypoint.mjs'); // the one implementation
+  const offenders = [];
+  for (const dir of ['bin', 'scripts', 'src']) {
+    for (const name of readdirSync(path.join(repoRoot, dir))) {
+      if (!/\.(mjs|js|cjs)$/.test(name)) continue;
+      const rel = path.join(dir, name);
+      if (rel === helper) continue;
+      // Drop whole-line comments before looking: this file's own header quotes
+      // the broken idiom on purpose, and a doc comment is not an entry point.
+      // Lines with code plus a trailing comment are still scanned, so the
+      // check errs towards flagging rather than towards silence.
+      const src = readFileSync(path.join(repoRoot, rel), 'utf8')
+        .split('\n')
+        .filter((line) => !/^\s*(\/\/|\*|\/\*)/.test(line))
+        .join(' ')
+        .replace(/\s+/g, ' ');
+      for (let at = src.indexOf('process.argv[1]'); at !== -1; at = src.indexOf('process.argv[1]', at + 1)) {
+        const window = src.slice(Math.max(0, at - 200), at + 200);
+        if (/import\.meta\.url|fileURLToPath|pathToFileURL/.test(window)) {
+          offenders.push(rel);
+          break;
+        }
+      }
+    }
+  }
+  assert.deepEqual(offenders, [],
+    `these compare argv[1] against import.meta.url themselves, so they no-op through a symlink: ${offenders.join(', ')}`);
+});
+
+test('the scanner CLI has no main-module guard at all', () => {
+  // Structural, not behavioural: the safest guard is the one that is not there.
+  const src = readFileSync(scanner, 'utf8');
+  assert.ok(!/if\s*\([^)]*import\.meta\.url[^)]*\)\s*(\{|main\(\))/.test(src),
+    'the entry point must call main() unconditionally');
+  assert.match(src, /^main\(\);$/m);
+});
+
+test('isMainModule resolves symlinks on both sides', () => {
+  const dir = tempDir('iak-ismain-');
+  const real = path.join(dir, 'real-entry.mjs');
+  writeFileSync(real, [
+    "import { isMainModule } from " + JSON.stringify(path.join(repoRoot, 'src/common/entrypoint.mjs')) + ";",
+    'process.stdout.write(isMainModule(import.meta.url) ? "MAIN" : "NOT-MAIN");',
+  ].join('\n'));
+  const link = path.join(dir, 'linked-entry.mjs');
+  symlinkSync(real, link);
+
+  assert.equal(spawnSync('node', [real], { encoding: 'utf8' }).stdout, 'MAIN');
+  assert.equal(spawnSync('node', [link], { encoding: 'utf8' }).stdout, 'MAIN',
+    'a symlinked entry point is still the main module');
+
+  // And it must still say NOT-MAIN when actually imported.
+  const importer = path.join(dir, 'importer.mjs');
+  writeFileSync(importer, `import ${JSON.stringify(link)};\n`);
+  assert.equal(spawnSync('node', [importer], { encoding: 'utf8' }).stdout, 'NOT-MAIN');
 });
