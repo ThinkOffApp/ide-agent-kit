@@ -923,6 +923,76 @@ async function probeOne(entry, {
   };
 }
 
+/**
+ * A small cap, and it decides NOTHING.
+ *
+ * Small because the probe spends somebody's compute; 16 rather than 1 because
+ * a server that omits `usage` leaves only the text as evidence, and one token
+ * of a non-reasoning model's answer is a thinner thing to look for than a
+ * short phrase. The VERDICT never keys on the cap being reached - see
+ * generationEvidence, where `finish_reason: length` is success.
+ */
+export const DEFAULT_GENERATION_MAX_TOKENS = 16;
+
+/** Fields a provider may put its thinking in, none of them standard. */
+const THINKING_FIELDS = ['reasoning', 'reasoning_content', 'thinking', 'thought'];
+
+/**
+ * Did this response prove that a model ran?
+ *
+ * WHAT THIS GETS WRONG IF YOU LET IT. Measured on this machine against a
+ * freshly loaded Qwen3.8-27B-8bit: 40 completion tokens, `finish_reason:
+ * length`, and `message.content` of EMPTY STRING - the whole budget went into
+ * a `message.reasoning` block and visible output was never reached. On any
+ * thinking model, which is most current ones, a small cap returns empty
+ * content every single time.
+ *
+ * So a verdict that keys on non-empty `content` can NEVER succeed there. It
+ * degrades to LISTED forever and the failure is invisible, because degrading
+ * is precisely what the probe is supposed to do when something goes wrong. A
+ * probe that cannot succeed is the mirror image of a check that cannot fail,
+ * and this file has one of each to answer for.
+ *
+ * The honest signal is TOKENS PRODUCED. `usage.completion_tokens > 0` is true
+ * for a reasoning model that never emits a visible word, and `finish_reason:
+ * length` means it was still generating when the cap stopped it - success,
+ * not failure. Where a server omits `usage`, any text at all counts: visible
+ * content, a thinking field, or a legacy completion's `text`.
+ *
+ * And the negative has to stay reachable: a well-formed answer that produced
+ * NOTHING - zero completion tokens, no content, no reasoning - is not
+ * evidence. The previous version of this check accepted the mere presence of
+ * a `choices` array, which would have called that a loaded model.
+ *
+ * @returns {{generated: boolean, tokens: number|null, via: string|null}}
+ */
+export function generationEvidence(data) {
+  const choice = Array.isArray(data?.choices) ? data.choices[0] : null;
+
+  // Providers spell the same number `completion_tokens` or `output_tokens`.
+  const usage = data?.usage ?? {};
+  const raw = usage.completion_tokens ?? usage.output_tokens;
+  const tokens = Number.isFinite(Number(raw)) ? Number(raw) : null;
+  if (tokens !== null && tokens > 0) return { generated: true, tokens, via: 'usage' };
+
+  if (!choice) return { generated: false, tokens, via: null };
+
+  const message = choice.message ?? {};
+  const said = v => typeof v === 'string' && v.trim() !== '';
+
+  if (said(message.content)) return { generated: true, tokens, via: 'content' };
+  for (const field of THINKING_FIELDS) {
+    if (said(message[field])) return { generated: true, tokens, via: field };
+  }
+  // Legacy /v1/completions, and servers that answer chat with it anyway.
+  if (said(choice.text)) return { generated: true, tokens, via: 'text' };
+
+  // An answer-shaped response with nothing in it. `finish_reason` is not
+  // consulted at all: `length` with tokens already returned true above, and
+  // `length` with nothing produced is still nothing produced.
+  return { generated: false, tokens, via: null };
+}
+
 /** Where a generation probe posts. The chat route every OpenAI clone has. */
 export function generationPath(kind) {
   return kind === 'lmstudio' ? '/api/v1/chat/completions' : '/v1/chat/completions';
@@ -947,9 +1017,14 @@ export function generationPath(kind) {
  *
  * It is not free: it costs compute on somebody's box, and against a server
  * that has NOT loaded the model it may cause it to try. That is why the
- * caller is expected to keep it switched off by default, rate limit it, and
- * refuse candidates that are incomplete or would not fit - see
+ * caller is expected to rate limit it, refuse candidates that are incomplete
+ * or would not fit, and only trust a loopback endpoint by default - see
  * ServedModelProbe, which does all three.
+ *
+ * The evidence is TOKENS PRODUCED, not visible text: a reasoning model spends
+ * a small cap entirely inside its thinking block and returns empty content.
+ * See generationEvidence, which exists because keying on `content` would make
+ * this probe incapable of ever succeeding against most current models.
  *
  * Credentials resolve exactly as they do for the listing: `resolveEntryToken`,
  * a path never a value, and the token goes into one header and nowhere else.
@@ -963,11 +1038,11 @@ export async function probeGeneration(entry, {
   timeoutMs = 5000,
   now = () => Date.now(),
   env = process.env,
-  maxTokens = 1,
+  maxTokens = DEFAULT_GENERATION_MAX_TOKENS,
 } = {}) {
   const started = now();
   const fail = (reason, httpStatus = null) => ({
-    generated: false, model: null, reason, httpStatus, rttMs: Math.max(0, now() - started),
+    generated: false, model: null, reason, tokens: null, via: null, httpStatus, rttMs: Math.max(0, now() - started),
   });
 
   if (!modelId || typeof modelId !== 'string') return fail('no model id to ask about');
@@ -1023,12 +1098,27 @@ export async function probeGeneration(entry, {
     return fail('generation returned unparseable JSON', response.status);
   }
 
-  const choice = Array.isArray(data?.choices) ? data.choices[0] : null;
-  if (!choice) return fail('generation returned no choices', response.status);
+  const evidence = generationEvidence(data);
+  if (!evidence.generated) {
+    return fail(
+      evidence.tokens === 0
+        ? 'the server answered but the model produced no tokens'
+        : 'the server answered with nothing a model could have written',
+      response.status
+    );
+  }
 
   // The id is taken from the ANSWER, not from what we asked for. On a server
   // holding several models that is the only thing that names the one which
   // actually ran; when it says nothing, the id we asked about stands.
   const answered = typeof data?.model === 'string' && data.model.trim() ? data.model.trim() : modelId;
-  return { generated: true, model: answered, reason: null, httpStatus: response.status, rttMs: Math.max(0, now() - started) };
+  return {
+    generated: true,
+    model: answered,
+    reason: null,
+    tokens: evidence.tokens,
+    via: evidence.via,
+    httpStatus: response.status,
+    rttMs: Math.max(0, now() - started),
+  };
 }

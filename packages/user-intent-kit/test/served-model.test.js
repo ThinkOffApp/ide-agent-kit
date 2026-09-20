@@ -28,7 +28,7 @@ import {
   DEFAULT_PROBE_INTERVAL_MS,
   DEFAULT_GENERATION_MIN_MS,
 } from '../src/served-model.js';
-import { loadRegistry } from '../src/model-capacity.js';
+import { loadRegistry, generationEvidence, probeGeneration } from '../src/model-capacity.js';
 import { DesktopAdapter } from '../src/adapters/desktop.js';
 import { collectHostTelemetry } from '../src/host-telemetry.js';
 
@@ -628,3 +628,140 @@ async function stateFrom(opts) {
   desktop.stop();
   return patched[0];
 }
+
+
+// --- A PROBE THAT CANNOT SUCCEED ------------------------------------------
+//
+// Measured on this machine against a freshly loaded Qwen3.8-27B-8bit: the
+// model spent its whole token budget inside a reasoning block and returned
+// EMPTY content. On any thinking model - most current ones - a small cap
+// does that every time, so a verdict keyed on visible `content` could never
+// come out true there. It would degrade to LISTED forever, and the failure
+// would be invisible, because degrading is exactly what the probe is meant
+// to do when something goes wrong.
+
+/** The real captured response, not a plausible-looking invention. */
+const REASONING_RESPONSE = Object.freeze({
+  model: 'mlx-community/Qwen3.8-27B-8bit',
+  usage: { completion_tokens: 40, prompt_tokens: 12 },
+  choices: [{
+    message: {
+      role: 'assistant',
+      content: '',
+      reasoning: 'The user is asking me to reply with exactly the word "ALIVE"...',
+    },
+    finish_reason: 'length',
+  }],
+});
+
+/** The same model given room: visible content, and the thinking split out. */
+const FINISHED_RESPONSE = Object.freeze({
+  model: 'mlx-community/Qwen3.8-27B-8bit',
+  usage: { completion_tokens: 6, prompt_tokens: 12 },
+  choices: [{
+    message: { role: 'assistant', content: 'ALIVE', reasoning: 'The user wants one word.' },
+    finish_reason: 'stop',
+  }],
+});
+
+test('empty content with 40 tokens and finish_reason length is GENERATED', () => {
+  const evidence = generationEvidence(REASONING_RESPONSE);
+  assert.equal(evidence.generated, true, 'a reasoning model was recorded as not serving');
+  assert.equal(evidence.tokens, 40);
+  assert.equal(evidence.via, 'usage');
+
+  // Hitting the cap means it was still generating when we stopped it.
+  assert.equal(REASONING_RESPONSE.choices[0].finish_reason, 'length');
+  assert.equal(REASONING_RESPONSE.choices[0].message.content, '', 'the fixture must have empty content or it pins nothing');
+});
+
+test('zero completion tokens is NOT generated, however well-formed the answer', () => {
+  const evidence = generationEvidence({
+    model: 'x',
+    usage: { completion_tokens: 0, prompt_tokens: 12 },
+    choices: [{ message: { role: 'assistant', content: '' }, finish_reason: 'stop' }],
+  });
+  assert.equal(evidence.generated, false);
+  assert.equal(evidence.tokens, 0);
+
+  // The negative has to stay reachable. An earlier version of this check
+  // accepted the mere presence of a `choices` array, which would have called
+  // this a loaded model.
+  assert.equal(generationEvidence({ choices: [{}] }).generated, false);
+  assert.equal(generationEvidence({ choices: [] }).generated, false);
+  assert.equal(generationEvidence({}).generated, false);
+});
+
+test('a response carrying only a reasoning field is GENERATED', () => {
+  // No `usage` at all, so the text is the only evidence there is - and none
+  // of it is visible content.
+  for (const field of ['reasoning', 'reasoning_content', 'thinking']) {
+    const evidence = generationEvidence({
+      model: 'x',
+      choices: [{ message: { role: 'assistant', content: '', [field]: 'weighing the options' }, finish_reason: 'length' }],
+    });
+    assert.equal(evidence.generated, true, `${field} was not accepted as evidence`);
+    assert.equal(evidence.via, field);
+  }
+});
+
+test('visible content still counts, with or without a usage block', () => {
+  assert.equal(generationEvidence(FINISHED_RESPONSE).via, 'usage');
+  assert.equal(generationEvidence({ choices: [{ message: { content: 'ALIVE' } }] }).via, 'content');
+  // Whitespace is not a token anybody wrote.
+  assert.equal(generationEvidence({ choices: [{ message: { content: '   ' } }] }).generated, false);
+});
+
+test('CONTROL: the probe can actually succeed against a reasoning model', async () => {
+  // The positive arm. Without it the suite would pass just as happily against
+  // a probe that always degrades, which is the exact defect being fixed.
+  const [entry] = loadRegistry([{ id: 'local', host: '127.0.0.1', port: 8080, kind: 'openai' }], { allowLan: true });
+
+  const thinking = await probeGeneration(entry, {
+    modelId: 'mlx-community/Qwen3.8-27B-8bit',
+    env: {},
+    fetchImpl: async () => ({ ok: true, status: 200, json: async () => REASONING_RESPONSE }),
+  });
+  assert.equal(thinking.generated, true);
+  assert.equal(thinking.model, 'mlx-community/Qwen3.8-27B-8bit');
+  assert.equal(thinking.tokens, 40);
+
+  // ...and the same path still refuses a server that produced nothing.
+  const silent = await probeGeneration(entry, {
+    modelId: 'x',
+    env: {},
+    fetchImpl: async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({ usage: { completion_tokens: 0 }, choices: [{ message: { content: '' } }] }),
+    }),
+  });
+  assert.equal(silent.generated, false, 'idle arm must not produce a proof');
+  assert.match(silent.reason, /produced no tokens/);
+});
+
+test('a reasoning model reaches GENERATED through the whole probe', async () => {
+  // End to end, through ServedModelProbe: listing, guard, generation, verdict.
+  const probe = provingProbe(async (url, options) => (options?.method === 'POST'
+    ? { ok: true, status: 200, json: async () => REASONING_RESPONSE }
+    : { ok: true, status: 200, json: async () => ({ data: [{ id: 'mlx-community/Qwen3.8-27B-8bit' }] }) }));
+  await probe.refresh();
+
+  assert.equal(probe.lastResult().verdict, VERDICTS.GENERATED);
+  assert.equal(probe.current(), 'mlx-community/Qwen3.8-27B-8bit');
+});
+
+test('the token cap does not decide the verdict', async () => {
+  // Whatever the cap is, the answer comes from what came back.
+  let asked = null;
+  const [entry] = loadRegistry([{ id: 'local', host: '127.0.0.1', port: 8080, kind: 'openai' }], { allowLan: true });
+  await probeGeneration(entry, {
+    modelId: 'x',
+    env: {},
+    fetchImpl: async (url, options) => {
+      asked = JSON.parse(options.body);
+      return { ok: true, status: 200, json: async () => REASONING_RESPONSE };
+    },
+  });
+  assert.ok(asked.max_tokens > 0 && asked.max_tokens <= 32, 'the cap must stay small: this spends real compute');
+});
