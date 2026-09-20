@@ -728,6 +728,92 @@ Wire into Claude Desktop / Code:
 After install: restart the MCP client. The four tools above appear in the tool
 picker and can be called directly.
 
+### What is still waiting on you (`bin/iak-pending.mjs`)
+
+A confirmation request posts to the room the moment it is raised, and that part
+works. The problem is what happens next: a room is a stream, the card is visible
+for a few minutes, and then it scrolls away. On 2026-09-20 four approval
+requests sat pending on one machine for up to **9 hours 12 minutes** purely
+because nobody could see them any more, and the owner had to ask twice in one
+night what was waiting on him. A stream is not a queue. `iak-pending` is the
+queue.
+
+```bash
+node bin/iak-pending.mjs                      # oldest first, human readable
+node bin/iak-pending.mjs --json               # machine readable
+node bin/iak-pending.mjs --older-than 2h --room   # safe on a timer, see anti-nag
+```
+
+It asks every daemon the fleet knows about - this machine's, plus every
+`watchdog-roster.json` entry that has a `gate` - for its pending intents, and
+prints them **oldest first with the age in the leading column**, because a
+9-hour-old approval and a 2-minute-old one are different things and must not
+look the same.
+
+**Empty is not error.** Every way of *not knowing* is kept distinct from "the
+answer is none":
+
+- a daemon that did not answer is printed under its own `COULD NOT ASK` heading,
+  never folded into "nothing pending";
+- a gate that names another machine by LAN IP is refused rather than probed
+  (192.168.x is different hardware in different buildings) and is reported the
+  same way;
+- a daemon whose rows carry no `status` this version understands is reported as
+  a shape mismatch, not read as an empty queue - discarding rows we do not
+  recognise produced a confident all-clear while a pending item sat in the
+  response;
+- a fleet roster that **exists but cannot be parsed or read** exits `2`. Only a
+  *missing* roster means "single-machine install": a corrupt, NUL-truncated or
+  unreadable one used to shrink the fleet to this machine and then report
+  "nothing pending" with exit `0` while a real peer held approvals.
+
+An age that cannot be believed is treated the same way. A missing, future-dated
+or epoch-seconds `createdAt` renders as `age unknown`, sorts to the top and
+survives `--older-than`, because calling an un-ageable item fresh is the same
+under-report in a different costume.
+
+Exit codes keep these apart:
+
+| code | meaning |
+| ---- | ------- |
+| `0`  | nothing pending **anywhere**, and **every** host answered. The only all-clear. |
+| `10` | at least one item waiting, every host answered |
+| `11` | at least one host could not be asked: the list is incomplete |
+| `12` | **no** host could be asked: there is no list, and this is not all-clear |
+| `2`  | cannot run: bad usage, or a fleet roster that could not be read |
+
+Precedence is `12 > 11 > 10 > 0`, because a list assembled from hosts that did
+not all answer is an incomplete list whether or not it had items in it.
+
+`--older-than` narrows what is **printed** and what is **announced**. It cannot
+produce a `0`: a 59-minute-old `Approve: rm -rf the backups` under
+`--older-than 1h` still exits `10`, and the text says how many items the
+threshold hid. Anything wired on the exit code alone therefore never reads an
+all-clear while something is waiting.
+
+**Anti-nag.** `--room` is built to sit on a timer without becoming noise.
+`--older-than` is required for it, so only genuinely stale items are considered,
+and each item is announced at most once per escalation: once at the threshold,
+then once more each time its age doubles (1h, 2h, 4h, 8h with `--older-than 1h`).
+The ledger of what has already been said lives in `~/.iak/pending-announced.json`
+(`--state-file` / `IAK_PENDING_STATE_FILE`), is written atomically **before** the
+post goes out, and holds only currently-pending items so decided ones are pruned
+every run - except for hosts that did not answer this run, whose entries are
+carried forward so a peer that flaps cannot re-announce the same item at the
+same level. If that ledger is missing or corrupt the tool posts **nothing** and
+rebuilds it from the current state: treating "no record" as "never announced"
+would post every pending item on the fleet at once the first time the file is
+lost, and a storm is worse than a missed escalation. If the ledger cannot be
+written, nothing is posted either. If the post itself fails, the ledger is
+rolled back so the next run retries that escalation rather than going quiet
+until the item's age doubles again.
+
+To put it on a timer, see `examples/pending-launchd.plist`.
+
+The daemon gate token comes from the shared resolver (`resolveGateToken`), is
+sent only to hosts that resolver already trusts, and is never printed and never
+passed on the command line.
+
 ### GitHub Webhooks (`src/webhook-server.mjs`)
 
 Receives GitHub webhook events, verifies HMAC signatures, normalizes them to a stable JSON schema, and appends to a local JSONL queue. Optionally nudges a tmux session when events arrive.
