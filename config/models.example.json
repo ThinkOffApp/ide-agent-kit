@@ -1,0 +1,22 @@
+{
+  "models": [
+    {
+      "id": "asus1-vllm-qwen3-coder",
+      "host": "asus1",
+      "port": 8000,
+      "kind": "vllm",
+      "box": "ASUS Ascent GX10 (Berlin)",
+      "sharing": "exclusive",
+      "owner": "@petrus"
+    },
+    {
+      "id": "mini-lmstudio",
+      "host": "mini",
+      "port": 1234,
+      "kind": "lmstudio",
+      "box": "Mac mini M4 Pro (Helsinki)",
+      "sharing": "shared",
+      "owner": "@claudemm"
+    }
+  ]
+}
