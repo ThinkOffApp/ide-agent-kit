@@ -54,14 +54,69 @@
 // probe that cannot tell must say it cannot tell rather than report a
 // comfortable default. Same for the path: `unknown`, never an assumed
 // `direct`.
+//
+// CREDENTIALS, AND WHY 401 IS THREE ANSWERS AND NOT ONE.
+//
+// The first version of this file sent `accept: application/json` and nothing
+// else, and its comment said "never sends credentials" as though that were a
+// virtue. Then it met a real server. The GLM endpoint on asus1:8888 requires
+// `Authorization: Bearer <token>`, so every run reported
+// `DOWN ... HTTP 401` - with a key configured and without one, byte for byte
+// the same line. A check whose two arms cannot differ is not a check, and
+// this one was sending an operator to restart a server that was serving fine.
+//
+// So a 401 or 403 now resolves to one of two DIFFERENT verdicts, and the
+// difference is the thing the operator has to act on:
+//
+//   no token available   "needs auth: no key configured for this entry"
+//                        -> configure a key. The server is probably healthy.
+//   token was sent       "auth rejected: key present but refused"
+//                        -> the key is wrong, expired, or for another box.
+//
+// Both are DOWN, because neither can serve us a model right now, and both say
+// which of the two repairs to attempt.
+//
+// CREDENTIALS ARE PATHS, NEVER VALUES. config/models.json is shared, is
+// committed, and this repository is public. A token written into it is
+// published the moment somebody clones. So the registry may carry
+// `auth: "bearer"` and `keyFile` - a PATH to a file holding the token - and
+// loadRegistry REFUSES any entry with a field named `key`, `token`, `apiKey`,
+// `bearer`, `secret`, `headers` and the rest of that family. The rejection is
+// the same mechanism that already refuses measurement fields, for the same
+// reason: some things must not live in that file.
+//
+// Resolution order for one entry, first hit wins:
+//   1. the entry's own `keyFile` (mode-checked: warns if group/world readable)
+//   2. env LLM_API_KEY_FILE   (a path)
+//   3. env LLM_API_KEY        (a value, and it says so - an env value is
+//                              visible to every child process)
+//
+// The token is read in-process and goes straight into one request header. It
+// is never interpolated into a reason, a note, a warning, a thrown error or
+// any field of the result. `keySource` names WHERE a token came from; nothing
+// anywhere reports WHAT it was.
 
 import { execFile } from 'node:child_process';
-import { hostname } from 'node:os';
-import { readFile } from 'node:fs/promises';
+import { hostname, homedir } from 'node:os';
+import { readFile, stat } from 'node:fs/promises';
+import { join } from 'node:path';
 
 export const STATES = Object.freeze(['UP', 'BUSY', 'DOWN', 'UNREACHABLE']);
 export const KINDS = Object.freeze(['openai', 'vllm', 'lmstudio']);
 export const SHARING = Object.freeze(['exclusive', 'shared']);
+export const AUTH_MODES = Object.freeze(['none', 'bearer']);
+
+// The two verdicts a 401/403 splits into. Exported because the CLI, the tests
+// and any switcher UI must all say the same words for the same fault.
+export const AUTH_MISSING_REASON = 'needs auth: no key configured for this entry';
+export const AUTH_REJECTED_REASON = 'auth rejected: key present but refused';
+
+/** Where a token came from. Never what it was. */
+export const KEY_SOURCES = Object.freeze({
+  ENTRY_FILE: 'entry keyFile',
+  ENV_FILE: 'env LLM_API_KEY_FILE',
+  ENV_VALUE: 'env LLM_API_KEY',
+});
 
 export const DEFAULT_TIMEOUT_MS = 8000;
 export const DEFAULT_FREE_MEM_THRESHOLD_GIB = 8;
@@ -96,6 +151,24 @@ export async function resolveCallerHost({ exec = defaultExec } = {}) {
 // Fields that describe the MEASUREMENT, not the target. A registry file that
 // carries one is stale by construction: it was true for whoever wrote it.
 const MEASUREMENT_ONLY_FIELDS = Object.freeze(['path', 'latencyMs', 'p90Ms', 'jitterMs', 'freeMemGiB', 'state']);
+
+// Fields that would carry a credential BY VALUE. Refused outright: this file
+// is shared and committed, and the repository is public, so a token in it is
+// published rather than configured. `keyFile` (a path) is the supported way.
+// `headers` is in the list because an arbitrary header bag is just a slower
+// way to write `Authorization: Bearer ...` into the registry.
+const CREDENTIAL_VALUE_FIELDS = Object.freeze([
+  'key', 'apiKey', 'api_key', 'apikey', 'token', 'apiToken', 'api_token',
+  'accessToken', 'access_token', 'bearer', 'bearerToken', 'bearer_token',
+  'secret', 'apiSecret', 'password', 'passwd', 'authorization', 'auth_token',
+  'credential', 'credentials', 'headers',
+]);
+
+// A `keyFile` with no path separator in it that looks like a token rather than
+// a filename. The whole point of keyFile is that it is a PATH, so pasting the
+// token there has to fail loudly instead of being read as a relative filename
+// and reported as ENOENT.
+const LOOKS_LIKE_A_TOKEN = /^(sk-|sk_|xfb_|antfarm_|ghp_|github_pat_|Bearer\s)|^[A-Za-z0-9+/_-]{40,}={0,2}$/;
 
 // Command names that mean "this box is taken". Matched against the process
 // NAME (basename of argv[0]), never against the whole command line, so that a
@@ -188,6 +261,36 @@ export function loadRegistry(source, { allowLan = false } = {}) {
     if (!SHARING.includes(sharing)) {
       throw new RegistryError(`registry entry "${id}": sharing "${sharing}" must be one of ${SHARING.join(', ')}`);
     }
+    for (const field of CREDENTIAL_VALUE_FIELDS) {
+      if (raw[field] !== undefined) {
+        throw new RegistryError(
+          `registry entry "${id}": remove "${field}". A credential is never a VALUE in this file - it is ` +
+          'shared, it is committed, and the repository is public, so a token written here is published ' +
+          'rather than configured. Set "auth": "bearer" and point "keyFile" at a PATH to a file holding ' +
+          'the token (mode 0600), or set LLM_API_KEY_FILE / LLM_API_KEY in the environment instead.');
+      }
+    }
+    const auth = raw.auth === undefined ? (raw.keyFile === undefined ? 'none' : 'bearer') : raw.auth;
+    if (!AUTH_MODES.includes(auth)) {
+      throw new RegistryError(`registry entry "${id}": auth "${auth}" must be one of ${AUTH_MODES.join(', ')}`);
+    }
+    let keyFile = null;
+    if (raw.keyFile !== undefined) {
+      if (typeof raw.keyFile !== 'string' || !raw.keyFile.trim()) {
+        throw new RegistryError(`registry entry "${id}": "keyFile" must be a non-empty string path`);
+      }
+      keyFile = raw.keyFile.trim();
+      if (!keyFile.includes('/') && LOOKS_LIKE_A_TOKEN.test(keyFile)) {
+        throw new RegistryError(
+          `registry entry "${id}": "keyFile" must be a PATH to a file containing the token, not the token ` +
+          'itself. Write the token to a file, chmod 600 it, and put that path here.');
+      }
+      if (auth === 'none') {
+        throw new RegistryError(
+          `registry entry "${id}": "keyFile" is set but "auth" is "none", so the key would never be sent. ` +
+          'Set "auth": "bearer", or drop the keyFile.');
+      }
+    }
     for (const field of MEASUREMENT_ONLY_FIELDS) {
       if (raw[field] !== undefined) {
         throw new RegistryError(
@@ -207,7 +310,7 @@ export function loadRegistry(source, { allowLan = false } = {}) {
         'Pass --allow-lan for a deliberate single-site run.');
     }
     return {
-      id, host, port, kind, sharing,
+      id, host, port, kind, sharing, auth, keyFile,
       box: typeof raw.box === 'string' ? raw.box : null,
       owner: typeof raw.owner === 'string' ? raw.owner : null,
       lanOverride: Boolean(lan),
@@ -229,6 +332,83 @@ export async function readRegistryFile(path, options = {}) {
     throw new RegistryError(`registry ${path} is not valid JSON: ${err.message}`);
   }
   return loadRegistry(parsed, options);
+}
+
+// --- credentials -----------------------------------------------------------
+
+function expandHome(path) {
+  const s = String(path);
+  if (s === '~') return homedir();
+  if (s.startsWith('~/')) return join(homedir(), s.slice(2));
+  return s;
+}
+
+/**
+ * Read a token out of a file. Returns the token, where it came from, and a
+ * warning about the file's MODE - never anything derived from the contents.
+ *
+ * A key file the whole machine can read is a key that has already leaked, so
+ * a group/world-readable mode is reported rather than silently accepted. It
+ * is a warning and not a refusal: the operator, not this probe, decides
+ * whether a throwaway local credential is worth a run.
+ */
+async function readKeyFile(rawPath, keySource, { readFileImpl, statImpl }) {
+  const path = expandHome(rawPath);
+  let warning = null;
+  try {
+    const perm = (await statImpl(path)).mode & 0o777;
+    if (perm & 0o077) {
+      warning = `key file ${path} is mode 0${perm.toString(8).padStart(3, '0')} - readable beyond its owner; chmod 600 it`;
+    }
+  } catch { /* an unreadable file is reported by the read below, with a better message */ }
+  let text;
+  try {
+    text = await readFileImpl(path, 'utf8');
+  } catch (err) {
+    return { token: null, keySource: null, keyBlocked: true, keyWarning: `cannot read key file ${path} (${err.code || err.message})` };
+  }
+  // .trim() and then never touched again: not logged, not returned, not
+  // interpolated into any message on any path out of this function.
+  const token = text.trim();
+  if (!token) {
+    return { token: null, keySource: null, keyBlocked: true, keyWarning: `key file ${path} is empty` };
+  }
+  return { token, keySource, keyBlocked: false, keyWarning: warning };
+}
+
+const NO_TOKEN = Object.freeze({ token: null, keySource: null, keyBlocked: false, keyWarning: null });
+
+/**
+ * The token for one entry, or none. Sources in priority order, first hit
+ * wins: the entry's `keyFile`, then env `LLM_API_KEY_FILE` (a path), then env
+ * `LLM_API_KEY` (a value).
+ *
+ * A keyFile that is configured but unreadable does NOT fall through to the
+ * environment. Quietly substituting a different credential for the one the
+ * operator named would make "which key was refused?" unanswerable.
+ */
+export async function resolveEntryToken(entry, {
+  env = process.env, readFileImpl = readFile, statImpl = stat,
+} = {}) {
+  const auth = entry?.auth ?? (entry?.keyFile ? 'bearer' : 'none');
+  if (auth !== 'bearer') return { ...NO_TOKEN, auth };
+  const io = { readFileImpl, statImpl };
+  if (entry?.keyFile) {
+    return { ...(await readKeyFile(entry.keyFile, KEY_SOURCES.ENTRY_FILE, io)), auth };
+  }
+  const envPath = typeof env?.LLM_API_KEY_FILE === 'string' ? env.LLM_API_KEY_FILE.trim() : '';
+  if (envPath) {
+    return { ...(await readKeyFile(envPath, KEY_SOURCES.ENV_FILE, io)), auth };
+  }
+  const envValue = typeof env?.LLM_API_KEY === 'string' ? env.LLM_API_KEY.trim() : '';
+  if (envValue) {
+    return {
+      token: envValue, keySource: KEY_SOURCES.ENV_VALUE, keyBlocked: false, auth,
+      keyWarning: 'LLM_API_KEY holds the token as an environment VALUE, which every child process inherits; ' +
+        'prefer LLM_API_KEY_FILE pointing at a 0600 file',
+    };
+  }
+  return { ...NO_TOKEN, auth };
 }
 
 // --- HTTP probe ------------------------------------------------------------
@@ -258,16 +438,25 @@ export function modelsPath(kind) {
   return kind === 'lmstudio' ? '/api/v1/models' : '/v1/models';
 }
 
-/** One GET of the model list. Never sends credentials, never follows a redirect. */
-async function singleGet(entry, { fetchImpl, timeoutMs, now }) {
+/**
+ * One GET of the model list.
+ *
+ * Sends `Authorization: Bearer <token>` when a token was resolved for this
+ * entry and nothing at all when one was not, which is what makes the two runs
+ * distinguishable. Still NEVER follows a redirect: a 302 is an unknown
+ * destination, and following one would hand this header to it.
+ */
+async function singleGet(entry, { fetchImpl, timeoutMs, now, token }) {
   const started = now();
   const bracket = entry.host.includes(':') && !entry.host.startsWith('[') ? `[${entry.host}]` : entry.host;
   const url = `http://${bracket}:${entry.port}${modelsPath(entry.kind)}`;
+  const headers = { accept: 'application/json' };
+  if (token) headers.authorization = `Bearer ${token}`;
   let response;
   try {
     response = await fetchImpl(url, {
       method: 'GET',
-      headers: { accept: 'application/json' },
+      headers,
       redirect: 'error',
       signal: AbortSignal.timeout(timeoutMs),
     });
@@ -276,17 +465,30 @@ async function singleGet(entry, { fetchImpl, timeoutMs, now }) {
     const rttMs = Math.max(0, now() - started);
     const hit = codes.find(c => UNREACHABLE_CODES.has(c)) || all.find(c => UNREACHABLE_CODES.has(c));
     if (hit) {
-      return { http: 'UNREACHABLE', models: [], rttMs, reason: `connect failed (${hit})` };
+      return { http: 'UNREACHABLE', models: [], rttMs, httpStatus: null, authState: null, reason: `connect failed (${hit})` };
     }
     if (all.includes('TimeoutError') || all.includes('AbortError')) {
-      return { http: 'UNREACHABLE', models: [], rttMs, reason: `no response within ${timeoutMs} ms` };
+      return { http: 'UNREACHABLE', models: [], rttMs, httpStatus: null, authState: null, reason: `no response within ${timeoutMs} ms` };
     }
     // Reached something and it misbehaved (redirect refusal, TLS, protocol).
-    return { http: 'DOWN', models: [], rttMs, reason: `request failed (${best || err.message})` };
+    return { http: 'DOWN', models: [], rttMs, httpStatus: null, authState: null, reason: `request failed (${best || err.message})` };
+  }
+  // An auth failure is its own fault, with its own repair. Which repair
+  // depends entirely on whether we had a key to offer, so the verdict does
+  // too - the whole reason this branch exists.
+  if (response.status === 401 || response.status === 403) {
+    return {
+      http: 'DOWN', models: [], rttMs: Math.max(0, now() - started),
+      httpStatus: response.status,
+      authState: token ? 'rejected' : 'no-key',
+      reason: token ? AUTH_REJECTED_REASON : AUTH_MISSING_REASON,
+    };
   }
   if (!response.ok) {
     return {
       http: 'DOWN', models: [], rttMs: Math.max(0, now() - started),
+      httpStatus: response.status,
+      authState: null,
       reason: `GET ${modelsPath(entry.kind)} returned HTTP ${response.status}`,
     };
   }
@@ -296,13 +498,17 @@ async function singleGet(entry, { fetchImpl, timeoutMs, now }) {
   } catch {
     return {
       http: 'DOWN', models: [], rttMs: Math.max(0, now() - started),
+      httpStatus: response.status, authState: token ? 'sent' : 'open',
       reason: `GET ${modelsPath(entry.kind)} returned unparseable JSON`,
     };
   }
   const rttMs = Math.max(0, now() - started);
   const rows = entry.kind === 'lmstudio' ? data?.models : data?.data;
   if (!Array.isArray(rows)) {
-    return { http: 'DOWN', models: [], rttMs, reason: `GET ${modelsPath(entry.kind)} had no model list` };
+    return {
+      http: 'DOWN', models: [], rttMs, httpStatus: response.status, authState: token ? 'sent' : 'open',
+      reason: `GET ${modelsPath(entry.kind)} had no model list`,
+    };
   }
   // LM Studio lists downloaded models too; only loaded instances can serve.
   const ids = entry.kind === 'lmstudio'
@@ -311,9 +517,12 @@ async function singleGet(entry, { fetchImpl, timeoutMs, now }) {
     : rows.map(m => m?.id);
   const models = ids.filter(id => typeof id === 'string' && id.trim());
   if (!models.length) {
-    return { http: 'DOWN', models: [], rttMs, reason: 'endpoint answered but lists no loaded model' };
+    return {
+      http: 'DOWN', models: [], rttMs, httpStatus: response.status, authState: token ? 'sent' : 'open',
+      reason: 'endpoint answered but lists no loaded model',
+    };
   }
-  return { http: 'OK', models, rttMs, reason: null };
+  return { http: 'OK', models, rttMs, httpStatus: response.status, authState: token ? 'sent' : 'open', reason: null };
 }
 
 
@@ -361,8 +570,8 @@ export function summariseLatency(samples) {
  * not reach a server, and it never eats into the ssh budget: the window is
  * clamped so the whole entry still fits inside timeoutMs.
  */
-async function probeHttp(entry, { fetchImpl, timeoutMs, now, latencySamples, latencySpreadMs }) {
-  const first = await singleGet(entry, { fetchImpl, timeoutMs, now });
+async function probeHttp(entry, { fetchImpl, timeoutMs, now, latencySamples, latencySpreadMs, token }) {
+  const first = await singleGet(entry, { fetchImpl, timeoutMs, now, token });
   // How long a refused connection took to bounce is not a round trip to a
   // server, so it is not a latency sample. A DOWN endpoint DID answer, and
   // its response time is real, so that one counts.
@@ -374,7 +583,7 @@ async function probeHttp(entry, { fetchImpl, timeoutMs, now, latencySamples, lat
     const deadline = now() + window;
     for (let i = 1; i < latencySamples && now() < deadline; i++) {
       await sleep(Math.max(0, Math.min(gap, deadline - now())));
-      const again = await singleGet(entry, { fetchImpl, timeoutMs: Math.max(250, timeoutMs), now });
+      const again = await singleGet(entry, { fetchImpl, timeoutMs: Math.max(250, timeoutMs), now, token });
       // A later sample that fails is a real observation of the link, but it
       // must not silently rewrite the state the first sample established.
       if (again.http === 'OK') samples.push(again.rttMs);
@@ -542,21 +751,26 @@ export async function probeModels(registry, {
   latencySamples = DEFAULT_LATENCY_SAMPLES,
   latencySpreadMs = DEFAULT_LATENCY_SPREAD_MS,
   callerHost = defaultCallerHost(),
+  env = process.env,
 } = {}) {
   const entries = Array.isArray(registry) ? registry : loadRegistry(registry);
   const options = {
-    fetchImpl, exec, now, timeoutMs, freeMemThresholdGiB, latencySamples, latencySpreadMs, callerHost,
+    fetchImpl, exec, now, timeoutMs, freeMemThresholdGiB, latencySamples, latencySpreadMs, callerHost, env,
   };
   return Promise.all(entries.map(entry => probeOne(entry, options)));
 }
 
 async function probeOne(entry, {
-  fetchImpl, exec, now, timeoutMs, freeMemThresholdGiB, latencySamples, latencySpreadMs, callerHost,
+  fetchImpl, exec, now, timeoutMs, freeMemThresholdGiB, latencySamples, latencySpreadMs, callerHost, env,
 }) {
   const base = {
     id: entry.id, host: entry.host, port: entry.port, kind: entry.kind,
     box: entry.box ?? null, sharing: entry.sharing ?? 'shared', owner: entry.owner ?? null,
   };
+  // Resolved once per entry, before the samples, so five GETs do not open the
+  // key file five times. `credential` never leaves this function: only the
+  // header built from it does, and only `keySource` describes it afterwards.
+  const credential = await resolveEntryToken(entry, { env });
   // Three axes, measured together, EACH WITH ITS OWN DEADLINE. One shared
   // deadline looked simpler and was wrong: a live run against four fleet
   // boxes had ssh and `tailscale ping` contending, the entry hit the shared
@@ -572,7 +786,7 @@ async function probeOne(entry, {
   const pathBudget = Math.min(timeoutMs, TAILSCALE_PING_TIMEOUT_MS + 500);
   const [http, capacity, pathInfo] = await Promise.all([
     withDeadline(
-      probeHttp(entry, { fetchImpl, timeoutMs, now, latencySamples, latencySpreadMs }).catch(err => ({
+      probeHttp(entry, { fetchImpl, timeoutMs, now, latencySamples, latencySpreadMs, token: credential.token }).catch(err => ({
         http: 'DOWN', models: [], latencyMs: null, latency: summariseLatency([]), reason: `probe error: ${err.message}`,
       })),
       timeoutMs,
@@ -619,10 +833,26 @@ async function probeOne(entry, {
   if (http.latency?.singleSample && (state === 'UP' || state === 'BUSY')) {
     reason = `${reason}; latency from 1 sample only, spread unmeasured`;
   }
+  // A key that was CONFIGURED and could not be read changes the verdict - the
+  // entry reports "no key configured" while a keyFile sits right there in the
+  // registry - so that one goes into the reason rather than only into a
+  // warning field. A mode warning does not change the verdict and stays out
+  // of the reason, where it would push the real fault off the line.
+  if (credential.keyBlocked) {
+    reason = `${reason}; ${credential.keyWarning}`;
+  }
   return {
     ...base,
     state,
     models: http.models,
+    // What we offered and what came back. Never the token: `keySource` says
+    // which of the three sources it came from, `authState` says what the
+    // server did with it, and neither can contain a secret.
+    auth: credential.auth,
+    keySource: credential.keySource,
+    keyWarning: credential.keyWarning ?? null,
+    authState: http.authState ?? null,
+    httpStatus: http.httpStatus ?? null,
     // p90 of the samples, not a lucky single ping. Rank on this.
     latencyMs: http.latencyMs ?? null,
     p90Ms: http.latency?.p90Ms ?? null,

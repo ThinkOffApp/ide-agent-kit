@@ -2,16 +2,29 @@
 //
 // One test per state, plus the negative controls that make the states mean
 // something: an unreachable host must not render as DOWN, a busy box must not
-// render as UP, and a LAN IP must not load at all.
+// render as UP, a LAN IP must not load at all, and - the one that failed live
+// - a 401 with a key must not print the same line as a 401 without one.
+//
+// Every credential test uses DUMMY_TOKEN, a made-up string, and the suite
+// asserts it appears in no output anywhere. A test fixture that carried a real
+// key would publish it: this repository is public and the fixtures are in it.
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
 import { once } from 'node:events';
 
+import { mkdtemp, writeFile, chmod, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+
 import {
   probeModels,
   loadRegistry,
+  resolveEntryToken,
+  AUTH_MISSING_REASON,
+  AUTH_REJECTED_REASON,
+  KEY_SOURCES,
   lanIpReason,
   parseFreeMemGiB,
   findExclusiveProcess,
@@ -74,6 +87,56 @@ const entry = (port, extra = {}) => ({
 });
 
 const ONE_MODEL = { data: [{ id: 'qwen3-coder-30b' }] };
+
+// --- credential helpers ----------------------------------------------------
+
+// Made up on the spot. Nothing in this repository may contain a real one, and
+// `assertNoToken` below is what keeps that from degrading into a promise.
+const DUMMY_TOKEN = 'dummy-token-not-a-real-key-7f3a';
+
+/** A key file on disk with a mode, because the mode check is a real stat(2). */
+async function keyFileWith(contents, mode = 0o600, name = 'key.txt') {
+  const dir = await mkdtemp(join(tmpdir(), 'mc-auth-'));
+  const path = join(dir, name);
+  await writeFile(path, contents);
+  await chmod(path, mode);
+  return { dir, path, cleanup: () => rm(dir, { recursive: true, force: true }) };
+}
+
+/**
+ * An endpoint that wants a bearer token: 401 without the right one, the model
+ * list with it. It also records every Authorization header it saw, so a test
+ * can assert what was on the wire rather than what the result claims.
+ */
+async function bearerEndpoint(expected, { body = ONE_MODEL, status = 401 } = {}) {
+  const seen = [];
+  const server = await endpoint((req, res) => {
+    seen.push(req.headers.authorization ?? null);
+    if (expected !== null && req.headers.authorization === `Bearer ${expected}`) {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify(body));
+      return;
+    }
+    res.writeHead(status, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({ error: 'Unauthorized' }));
+  });
+  server.seen = seen;
+  return server;
+}
+
+/**
+ * The rule the whole feature rests on: a token is read in-process and goes
+ * into one header. It must not be reachable from any string the probe hands
+ * back - not the reason, not a warning, not a nested field, not the JSON the
+ * CLI prints.
+ */
+function assertNoToken(...values) {
+  for (const v of values) {
+    const text = typeof v === 'string' ? v : JSON.stringify(v);
+    assert.ok(!text.includes(DUMMY_TOKEN), `the token leaked into output: ${text}`);
+    assert.ok(!/Bearer\s/.test(text), `an Authorization header leaked into output: ${text}`);
+  }
+}
 
 // --- one test per state ----------------------------------------------------
 
@@ -351,7 +414,7 @@ test('entries are probed in parallel and no entry outlives timeoutMs', async () 
   } finally { await slow.close(); }
 });
 
-test('probeModels never sends credentials and refuses redirects', async () => {
+test('with no key configured, probeModels sends no Authorization header, and never follows a redirect', async () => {
   const seen = [];
   const server = await endpoint((req, res) => {
     seen.push(req.headers);
@@ -359,11 +422,35 @@ test('probeModels never sends credentials and refuses redirects', async () => {
     res.end();
   });
   try {
-    const [r] = await probe([entry(server.port)], { exec: fakeExec({ mem: GPU_IDLE }) });
+    const [r] = await probe([entry(server.port)], { exec: fakeExec({ mem: GPU_IDLE }), env: {} });
     assert.equal(r.state, 'DOWN', 'a redirecting endpoint is not serving models');
+    // An entry with no auth mode and no key gets no header. The header is
+    // sent when a token exists FOR THAT ENTRY, never as a blanket default.
     assert.equal(seen[0].authorization, undefined);
     assert.equal(seen[0].cookie, undefined);
+    assert.equal(r.keySource, null);
+    assert.equal(r.auth, 'none');
   } finally { await server.close(); }
+});
+
+test('a redirect is still refused when a token IS configured, so the header never reaches the new host', async () => {
+  // `redirect: "error"` matters more once there is something to leak: a 302
+  // to an arbitrary host would otherwise be handed the Authorization header.
+  const hits = [];
+  const server = await endpoint((req, res) => {
+    hits.push(req.headers.authorization);
+    res.writeHead(302, { location: 'http://example.com/v1/models' });
+    res.end();
+  });
+  const key = await keyFileWith(DUMMY_TOKEN);
+  try {
+    const [r] = await probe([entry(server.port, { auth: 'bearer', keyFile: key.path })],
+      { exec: fakeExec({ mem: GPU_IDLE }), env: {} });
+    assert.equal(r.state, 'DOWN');
+    assert.match(r.reason, /request failed/);
+    assert.equal(hits.length, 1, 'exactly one request: the redirect was not followed');
+    assertNoToken(r);
+  } finally { await server.close(); await key.cleanup(); }
 });
 
 test('every result carries exactly one known state and a reason', async () => {
@@ -612,4 +699,332 @@ test('a slow tailscale ping does not delay or alter the other two axes', async (
   assert.match(r.pathReason, /path read exceeded/);
   assert.equal(r.state, 'UNREACHABLE');
   assert.equal(r.freeMemGiB, 79, 'the capacity axis survived a stuck path probe');
+});
+
+// --- credentials: the check that could not distinguish its cases -----------
+//
+// Found live at 04:18 against the GLM server on asus1:8888. The probe sent no
+// Authorization header and printed `DOWN ... HTTP 401` whether or not a key
+// was available, so the with-key and without-key runs were byte-identical
+// while the server was serving fine. These tests are the negative control
+// that failure lacked.
+
+test('401 with NO key available: DOWN, and the reason says a key is missing', async () => {
+  const server = await bearerEndpoint(DUMMY_TOKEN);
+  try {
+    const [r] = await probe([entry(server.port)], { exec: fakeExec({ mem: GPU_IDLE }), env: {} });
+    assert.equal(r.state, 'DOWN');
+    assert.equal(r.reason, AUTH_MISSING_REASON);
+    assert.equal(r.reason, 'needs auth: no key configured for this entry');
+    assert.equal(r.authState, 'no-key');
+    assert.equal(r.httpStatus, 401);
+    assert.equal(r.keySource, null);
+    assert.equal(server.seen[0], null, 'nothing to send, so nothing was sent');
+    // NEGATIVE CONTROL: the old generic line must be gone. "HTTP 401" tells
+    // the operator to go restart a server that is healthy.
+    assert.doesNotMatch(r.reason, /returned HTTP 401/);
+  } finally { await server.close(); }
+});
+
+test('401 WITH a key: DOWN, and the reason says the key was refused', async () => {
+  const server = await bearerEndpoint('some-other-token');
+  const key = await keyFileWith(DUMMY_TOKEN);
+  try {
+    const [r] = await probe([entry(server.port, { auth: 'bearer', keyFile: key.path })],
+      { exec: fakeExec({ mem: GPU_IDLE }), env: {} });
+    assert.equal(r.state, 'DOWN');
+    assert.equal(r.reason, AUTH_REJECTED_REASON);
+    assert.equal(r.reason, 'auth rejected: key present but refused');
+    assert.equal(r.authState, 'rejected');
+    assert.equal(r.keySource, KEY_SOURCES.ENTRY_FILE);
+    assert.equal(server.seen[0], `Bearer ${DUMMY_TOKEN}`, 'the header really went on the wire');
+    assertNoToken(r);
+  } finally { await server.close(); await key.cleanup(); }
+});
+
+test('NEGATIVE CONTROL: against a 401 server, the with-key run and the without-key run DIFFER', async () => {
+  // THIS IS THE TEST THAT THE LIVE RUN FAILED. Before the fix both arms
+  // produced the identical line, which is what a check that cannot fail looks
+  // like from the outside: confident, well formatted and uninformative.
+  const server = await bearerEndpoint('a-token-this-probe-will-never-have');
+  const key = await keyFileWith(DUMMY_TOKEN);
+  const strip = r => JSON.stringify({ ...r, checkedAt: null, latencyMs: null, p90Ms: null, medianMs: null, minMs: null });
+  try {
+    const opts = { exec: fakeExec({ mem: GPU_IDLE }), env: {} };
+    const [without] = await probe([entry(server.port, { id: 'same' })], opts);
+    const [with_] = await probe([entry(server.port, { id: 'same', auth: 'bearer', keyFile: key.path })], opts);
+    assert.notEqual(with_.reason, without.reason, 'the two runs must not print the same reason');
+    assert.notEqual(strip(with_), strip(without), 'the two runs must not be byte-identical');
+    // Both are still DOWN: neither can serve a model right now. It is the
+    // REPAIR that differs, and that is what the reason has to carry.
+    assert.equal(with_.state, 'DOWN');
+    assert.equal(without.state, 'DOWN');
+    assert.equal(without.authState, 'no-key');
+    assert.equal(with_.authState, 'rejected');
+    assertNoToken(with_, without);
+    // ...and the difference must be grounded in what went ON THE WIRE, not
+    // merely in what the probe knew about its own configuration. Asserting
+    // only on the two reasons is not enough: with the header send deleted,
+    // "key present but refused" would still be printed, and would be a lie
+    // about a request that carried nothing. So check the server's record.
+    assert.deepEqual(server.seen, [null, `Bearer ${DUMMY_TOKEN}`]);
+  } finally { await server.close(); await key.cleanup(); }
+});
+
+test('the SAME server answers the two runs differently: 401 without the key, its model list with it', async () => {
+  // The strongest form of the control above. This can only pass if the header
+  // actually leaves the process: the verdicts differ by STATE, which no
+  // amount of local bookkeeping can fake.
+  const server = await bearerEndpoint(DUMMY_TOKEN);
+  const key = await keyFileWith(DUMMY_TOKEN);
+  try {
+    const opts = { exec: fakeExec({ mem: GPU_IDLE }), env: {} };
+    const [without] = await probe([entry(server.port, { id: 'same' })], opts);
+    const [with_] = await probe([entry(server.port, { id: 'same', auth: 'bearer', keyFile: key.path })], opts);
+    assert.equal(without.state, 'DOWN');
+    assert.equal(without.reason, AUTH_MISSING_REASON);
+    assert.deepEqual(without.models, []);
+    assert.equal(with_.state, 'UP');
+    assert.deepEqual(with_.models, ['qwen3-coder-30b']);
+    assert.notEqual(with_.state, without.state);
+    assertNoToken(with_, without);
+  } finally { await server.close(); await key.cleanup(); }
+});
+
+test('200 WITH a token: the auth step gets out of the way and normal UP logic runs', async () => {
+  const server = await bearerEndpoint(DUMMY_TOKEN);
+  const key = await keyFileWith(DUMMY_TOKEN);
+  try {
+    const [r] = await probe([entry(server.port, { auth: 'bearer', keyFile: key.path })],
+      { exec: fakeExec({ mem: GPU_IDLE }), env: {} });
+    assert.equal(r.state, 'UP');
+    assert.deepEqual(r.models, ['qwen3-coder-30b']);
+    assert.equal(r.freeMemGiB, 79);
+    assert.equal(r.authState, 'sent');
+    assert.equal(r.httpStatus, 200);
+    assertNoToken(r);
+  } finally { await server.close(); await key.cleanup(); }
+});
+
+test('200 WITH a token on a busy box is still BUSY: auth does not outrank capacity', async () => {
+  // NEGATIVE CONTROL: "the key worked" must not short-circuit into UP. The
+  // 200 hands control back to the ordinary rules, it does not replace them.
+  const server = await bearerEndpoint(DUMMY_TOKEN);
+  const key = await keyFileWith(DUMMY_TOKEN);
+  try {
+    const exec = fakeExec({ mem: GPU_IDLE, proc: '4711 /opt/ltx/bin/ltx --render scene.yaml' });
+    const [r] = await probe([entry(server.port, { auth: 'bearer', keyFile: key.path })], { exec, env: {} });
+    assert.notEqual(r.state, 'UP');
+    assert.equal(r.state, 'BUSY');
+    assert.match(r.busyReason, /exclusive job running: ltx/);
+    assert.equal(r.authState, 'sent');
+  } finally { await server.close(); await key.cleanup(); }
+});
+
+test('200 on an open server with no token: normal UP, and no header was sent', async () => {
+  const seen = [];
+  const server = await endpoint((req, res) => {
+    seen.push(req.headers.authorization ?? null);
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end(JSON.stringify(ONE_MODEL));
+  });
+  try {
+    const [r] = await probe([entry(server.port)], { exec: fakeExec({ mem: GPU_IDLE }), env: {} });
+    assert.equal(r.state, 'UP');
+    assert.equal(r.authState, 'open');
+    assert.equal(r.auth, 'none');
+    assert.equal(seen[0], null);
+  } finally { await server.close(); }
+});
+
+test('the token goes on every latency sample, not just the first', async () => {
+  const server = await bearerEndpoint(DUMMY_TOKEN);
+  const key = await keyFileWith(DUMMY_TOKEN);
+  try {
+    const [r] = await probeModels([entry(server.port, { auth: 'bearer', keyFile: key.path })], {
+      exec: fakeExec({ mem: GPU_IDLE }), env: {}, latencySamples: 3, latencySpreadMs: 200, timeoutMs: 8000,
+    });
+    assert.equal(r.state, 'UP');
+    assert.ok(server.seen.length >= 2, `sampled more than once, got ${server.seen.length}`);
+    // An unauthenticated later sample would come back 401 and silently stop
+    // counting as a latency sample, quietly halving the measurement.
+    for (const header of server.seen) assert.equal(header, `Bearer ${DUMMY_TOKEN}`);
+    assert.equal(r.latencySamples, server.seen.length);
+  } finally { await server.close(); await key.cleanup(); }
+});
+
+// --- where a token may come from, and where it may not --------------------
+
+test('credential sources resolve in priority order: entry keyFile, then LLM_API_KEY_FILE, then LLM_API_KEY', async () => {
+  const entryKey = await keyFileWith(DUMMY_TOKEN, 0o600, 'entry.txt');
+  const envKey = await keyFileWith(`${DUMMY_TOKEN}-from-env-file`, 0o600, 'env.txt');
+  const env = { LLM_API_KEY_FILE: envKey.path, LLM_API_KEY: `${DUMMY_TOKEN}-from-env-value` };
+  try {
+    const first = await resolveEntryToken({ auth: 'bearer', keyFile: entryKey.path }, { env });
+    assert.equal(first.token, DUMMY_TOKEN, 'the entry keyFile wins');
+    assert.equal(first.keySource, KEY_SOURCES.ENTRY_FILE);
+
+    const second = await resolveEntryToken({ auth: 'bearer' }, { env });
+    assert.equal(second.token, `${DUMMY_TOKEN}-from-env-file`, 'then LLM_API_KEY_FILE');
+    assert.equal(second.keySource, KEY_SOURCES.ENV_FILE);
+
+    const third = await resolveEntryToken({ auth: 'bearer' }, { env: { LLM_API_KEY: `${DUMMY_TOKEN}-value` } });
+    assert.equal(third.token, `${DUMMY_TOKEN}-value`, 'then LLM_API_KEY');
+    assert.equal(third.keySource, KEY_SOURCES.ENV_VALUE);
+    assert.match(third.keyWarning, /environment VALUE/);
+
+    // NEGATIVE CONTROL: an entry that never asked for auth takes no token,
+    // however much the environment is offering. A key belongs to the lock it
+    // opens, not to every box in the registry.
+    const none = await resolveEntryToken({ auth: 'none' }, { env });
+    assert.equal(none.token, null);
+    assert.equal(none.keySource, null);
+    const empty = await resolveEntryToken({ auth: 'bearer' }, { env: {} });
+    assert.equal(empty.token, null);
+    assert.equal(empty.keySource, null);
+  } finally { await entryKey.cleanup(); await envKey.cleanup(); }
+});
+
+test('a group/world readable key file warns, and a 0600 one does not', async () => {
+  const loose = await keyFileWith(DUMMY_TOKEN, 0o644);
+  const tight = await keyFileWith(DUMMY_TOKEN, 0o600);
+  try {
+    const warned = await resolveEntryToken({ auth: 'bearer', keyFile: loose.path }, { env: {} });
+    assert.equal(warned.token, DUMMY_TOKEN, 'a warning, not a refusal');
+    assert.match(warned.keyWarning, /mode 0644/);
+    assert.match(warned.keyWarning, /chmod 600/);
+    assert.ok(warned.keyWarning.includes(loose.path), 'the warning names the file');
+    assertNoToken(warned.keyWarning);
+    // NEGATIVE CONTROL: if it warned about everything the check would prove
+    // nothing.
+    const quiet = await resolveEntryToken({ auth: 'bearer', keyFile: tight.path }, { env: {} });
+    assert.equal(quiet.keyWarning, null);
+    assert.equal(quiet.token, DUMMY_TOKEN);
+  } finally { await loose.cleanup(); await tight.cleanup(); }
+});
+
+test('a keyFile that cannot be read does not silently fall back to the environment', async () => {
+  // Substituting a different credential for the one the operator named makes
+  // "which key was refused?" unanswerable.
+  const env = { LLM_API_KEY: `${DUMMY_TOKEN}-from-env-value` };
+  const resolved = await resolveEntryToken({ auth: 'bearer', keyFile: '/nonexistent/iak/key.txt' }, { env });
+  assert.equal(resolved.token, null);
+  assert.equal(resolved.keySource, null);
+  assert.equal(resolved.keyBlocked, true);
+  assert.match(resolved.keyWarning, /cannot read key file \/nonexistent\/iak\/key\.txt/);
+
+  const server = await bearerEndpoint(DUMMY_TOKEN);
+  try {
+    const [r] = await probe([entry(server.port, { auth: 'bearer', keyFile: '/nonexistent/iak/key.txt' })],
+      { exec: fakeExec({ mem: GPU_IDLE }), env });
+    assert.equal(r.state, 'DOWN');
+    // The verdict is "no key", and the reason also says the configured one
+    // could not be read - otherwise "no key configured" contradicts the
+    // keyFile sitting in the registry.
+    assert.match(r.reason, new RegExp(`^${AUTH_MISSING_REASON}`));
+    assert.match(r.reason, /cannot read key file/);
+    assert.equal(server.seen[0], null);
+  } finally { await server.close(); }
+});
+
+test('an empty key file is reported, not sent as an empty bearer token', async () => {
+  const blank = await keyFileWith('   \n', 0o600);
+  try {
+    const resolved = await resolveEntryToken({ auth: 'bearer', keyFile: blank.path }, { env: {} });
+    assert.equal(resolved.token, null);
+    assert.equal(resolved.keyBlocked, true);
+    assert.match(resolved.keyWarning, /is empty/);
+  } finally { await blank.cleanup(); }
+});
+
+test('a ~ in keyFile is expanded rather than taken literally', async () => {
+  const resolved = await resolveEntryToken({ auth: 'bearer', keyFile: '~/.iak/definitely-not-here.txt' }, { env: {} });
+  assert.equal(resolved.token, null);
+  assert.ok(!resolved.keyWarning.includes('~/'), `the ~ was not expanded: ${resolved.keyWarning}`);
+  assert.match(resolved.keyWarning, /\/\.iak\/definitely-not-here\.txt/);
+});
+
+// --- the registry may name a key file; it may never hold a key ------------
+
+test('a registry entry carrying a literal credential is rejected with a message that says why', () => {
+  // config/models.json is committed and this repository is public, so a token
+  // written into it is published rather than configured.
+  const fields = ['key', 'apiKey', 'api_key', 'token', 'apiToken', 'accessToken',
+    'bearer', 'bearerToken', 'secret', 'password', 'authorization', 'credentials', 'headers'];
+  for (const field of fields) {
+    assert.throws(
+      () => loadRegistry([{ id: 'x', host: 'asus1', port: 8888, kind: 'openai', [field]: 'sk-literal-value' }]),
+      err => {
+        assert.ok(err instanceof RegistryError);
+        assert.match(err.message, new RegExp(`remove "${field}"`));
+        assert.match(err.message, /never a VALUE/);
+        assert.match(err.message, /keyFile/);
+        return true;
+      },
+      `${field} must be refused in the registry`);
+  }
+});
+
+test('NEGATIVE CONTROL: the credential check accepts auth + keyFile, which is the supported way', () => {
+  // If it rejected every entry, or every entry mentioning a key at all, the
+  // test above would prove nothing.
+  const [e] = loadRegistry([{
+    id: 'glm53-asus', host: 'asus1', port: 8888, kind: 'openai',
+    box: 'asus1+asus2', sharing: 'exclusive', owner: '@codexmb',
+    auth: 'bearer', keyFile: '~/.iak/example_api_key.txt',
+  }]);
+  assert.equal(e.auth, 'bearer');
+  assert.equal(e.keyFile, '~/.iak/example_api_key.txt');
+  // ...and an entry that mentions neither still loads, defaulting to no auth.
+  const [plain] = loadRegistry([{ id: 'y', host: 'mini', port: 1234, kind: 'lmstudio' }]);
+  assert.equal(plain.auth, 'none');
+  assert.equal(plain.keyFile, null);
+});
+
+test('keyFile must be a PATH, and auth must be a known mode', () => {
+  const ok = { id: 'x', host: 'asus1', port: 8888, kind: 'openai' };
+  // A pasted token in the keyFile slot has to fail loudly rather than be read
+  // as a relative filename and reported as a missing file.
+  assert.throws(() => loadRegistry([{ ...ok, auth: 'bearer', keyFile: 'sk-abcdef0123456789' }]),
+    /must be a PATH to a file containing the token/);
+  assert.throws(() => loadRegistry([{ ...ok, auth: 'bearer', keyFile: 'A'.repeat(48) }]),
+    /must be a PATH to a file containing the token/);
+  assert.throws(() => loadRegistry([{ ...ok, auth: 'bearer', keyFile: '' }]), /non-empty string path/);
+  // A keyFile nothing would ever send is a configuration that lies.
+  assert.throws(() => loadRegistry([{ ...ok, auth: 'none', keyFile: '/tmp/k.txt' }]), /would never be sent/);
+  assert.throws(() => loadRegistry([{ ...ok, auth: 'basic' }]), /auth "basic"/);
+  // NEGATIVE CONTROL: ordinary paths, including the fake-looking ones, load.
+  for (const path of ['/Users/p/.iak/glm.txt', '~/.iak/example_api_key.txt', './secrets/key', 'key.txt']) {
+    const [e] = loadRegistry([{ ...ok, auth: 'bearer', keyFile: path }]);
+    assert.equal(e.keyFile, path);
+  }
+  // keyFile alone implies bearer: a key nobody sends is a silent misconfig.
+  const [implied] = loadRegistry([{ ...ok, keyFile: '/tmp/k.txt' }]);
+  assert.equal(implied.auth, 'bearer');
+});
+
+test('the token appears in NO output string, whatever the endpoint does', async () => {
+  const key = await keyFileWith(DUMMY_TOKEN, 0o644); // loose mode, so the warning path runs too
+  const refusing = await bearerEndpoint('not-the-configured-one');
+  const accepting = await bearerEndpoint(DUMMY_TOKEN);
+  try {
+    const opts = { exec: fakeExec({ mem: GPU_IDLE }), env: { LLM_API_KEY: DUMMY_TOKEN } };
+    const results = await probe([
+      entry(refusing.port, { id: 'refused', auth: 'bearer', keyFile: key.path }),
+      entry(accepting.port, { id: 'accepted', auth: 'bearer', keyFile: key.path }),
+      entry(8000, { id: 'gone', host: 'nowhere.invalid', auth: 'bearer', keyFile: key.path }),
+      entry(8001, { id: 'env-key', host: 'nowhere.invalid', auth: 'bearer' }),
+    ], { ...opts, timeoutMs: 6000 });
+    assert.equal(results.length, 4);
+    // The whole payload, exactly as the CLI would print it with --json.
+    assertNoToken(JSON.stringify({ results }, null, 2));
+    for (const r of results) {
+      assertNoToken(r, r.reason, r.keyWarning ?? '', r.busyReason ?? '', r.pathReason ?? '');
+      // What it may say is WHERE the key came from.
+      if (r.keySource) assert.ok(Object.values(KEY_SOURCES).includes(r.keySource));
+    }
+    assert.equal(results[0].authState, 'rejected');
+    assert.equal(results[1].authState, 'sent');
+    assert.equal(results[3].keySource, KEY_SOURCES.ENV_VALUE);
+  } finally { await refusing.close(); await accepting.close(); await key.cleanup(); }
 });

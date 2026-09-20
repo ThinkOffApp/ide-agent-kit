@@ -18,7 +18,7 @@ not two, because the operator action differs in each case.
 | ----- | ----------------- | ---------- |
 | `UP` | `GET /v1/models` listed at least one model, and the box reports room | switch here |
 | `BUSY` | the endpoint serves models, but the box has a live exclusive job or less free memory than the threshold (default 8 GiB) | do not switch; `busyReason` says which |
-| `DOWN` | something answered on that port and is not serving models: an error status, unparseable JSON, a refused redirect, or an empty list | start or fix the server on that box |
+| `DOWN` | something answered on that port and is not serving models: an error status, unparseable JSON, a refused redirect, an empty list, or an auth failure | start or fix the server - or configure a key; the `reason` says which |
 | `UNREACHABLE` | the name did not resolve, the TCP connect failed, or nothing answered inside the budget | fix the network, the tailnet, or the name |
 
 These distinctions are the whole point of the file:
@@ -62,6 +62,101 @@ virtualenv. Matching the whole command line would mark every box with a
 `sharing: "exclusive" | "shared"` is metadata the switcher can rank on. The
 probe applies the same BUSY rules to both, and this paragraph exists so that is
 a documented decision rather than a silent one.
+
+## Authentication: a 401 is three answers, not one
+
+Found live at 04:18 on 20 Sep 2026. The probe sent `accept: application/json`
+and nothing else, and its comment said "never sends credentials" as though that
+settled the matter. The GLM server on `asus1:8888` requires
+`Authorization: Bearer <token>`, so every run printed:
+
+```
+glm53-asus  DOWN  asus1:8888  ...  GET /v1/models returned HTTP 401
+```
+
+**with a key configured and without one, byte for byte the same line** - while
+the server was serving perfectly. That is the shape of a check that cannot
+fail: confident, well formatted, and incapable of telling its two cases apart.
+It was also actively misleading, because `HTTP 401` reads as "go fix the
+server" and the server was fine.
+
+A 401 or 403 now resolves to one of two verdicts, chosen by whether a token was
+available for that entry:
+
+| observed | `state` | `authState` | `reason` | repair |
+| -------- | ------- | ----------- | -------- | ------ |
+| 401/403, no token available | `DOWN` | `no-key` | `needs auth: no key configured for this entry` | configure a key; the server is probably healthy |
+| 401/403, token was sent | `DOWN` | `rejected` | `auth rejected: key present but refused` | the key is wrong, expired, or for another box |
+| 200, token was sent | normal | `sent` | the ordinary UP / BUSY rules run | - |
+| 200, no token (open server) | normal | `open` | the ordinary UP / BUSY rules run | - |
+
+Both auth failures are `DOWN`, because neither can serve a model right now.
+The state was never the informative part; the *repair* is, and the two repairs
+are opposite.
+
+`200` with a working key hands control straight back to the ordinary rules and
+does not short-circuit into `UP`: a box whose key works and whose GPU is
+halfway through an LTX render is still `BUSY`. There is a test for that, because
+"the key worked" is exactly the kind of good news that invites a short-circuit.
+
+### Credentials are paths, never values
+
+`config/models.json` is shared, is committed, and this repository is public. A
+token written into it is published rather than configured. So:
+
+- The registry may carry `"auth": "bearer"` and `"keyFile": "<path>"`.
+- `loadRegistry` **refuses** an entry with `key`, `apiKey`, `api_key`, `token`,
+  `apiToken`, `accessToken`, `bearer`, `bearerToken`, `secret`, `password`,
+  `authorization`, `credentials` or `headers` - the same mechanism that already
+  refuses measurement fields, for the same reason: some things must not live in
+  that file.
+- A `keyFile` whose value looks like a pasted token rather than a path is
+  refused too, instead of being read as a relative filename and reported as a
+  missing file.
+
+Resolution order for one entry, first hit wins:
+
+1. the entry's `keyFile` (a path; `~` expanded)
+2. env `LLM_API_KEY_FILE` (a path)
+3. env `LLM_API_KEY` (a value - it works, and warns, because an environment
+   value is inherited by every child process)
+
+The key file's mode is checked: group or world readable produces a warning
+naming the path, not a refusal - a throwaway local credential is the
+operator's call, not the probe's. A `keyFile` that is configured but unreadable
+does **not** fall through to the environment: substituting a different
+credential for the one the entry named would make "which key was refused?"
+unanswerable. That run reports `needs auth: no key configured for this entry;
+cannot read key file <path> (ENOENT)`.
+
+**The token never appears in any output.** Not in a reason, a warning, an
+error, `--json`, or a test fixture - the tests use a dummy string and assert it
+is absent from every output string, because a fixture with a real key in a
+public repository is a published key. The result says `keySource` (`entry
+keyFile` / `env LLM_API_KEY_FILE` / `env LLM_API_KEY`) and `authState`, which
+describe the credential without being able to contain it.
+
+The probe still **never follows a redirect**, and that matters more now than it
+did: a `302` to an arbitrary host would otherwise be handed the Authorization
+header. There is a test that a redirecting endpoint with a token configured is
+hit exactly once.
+
+### For integrators: budget for the reasoning field
+
+Measured against `GLM-5.3-Flash-EXL3` on `asus1:8888`, 20 Sep 2026. The model
+emits a `reasoning` field **before** any visible content, so a small
+`max_tokens` is spent entirely on reasoning and the response comes back with:
+
+```
+"content": null, "finish_reason": "length"
+```
+
+That is not an empty answer, a broken endpoint or a bad prompt - it is the
+budget running out before the visible part started. A health check or a
+switcher smoke test that asks for `max_tokens: 8` will conclude the model is
+broken every single time. Either budget for the reasoning tokens as well, or
+disable reasoning server side. The capacity probe itself is unaffected: it only
+calls `GET /v1/models` and never generates.
 
 ## Path and capacity are different axes
 
@@ -146,10 +241,35 @@ box answering, or a model list from the wrong machine. A MagicDNS name resolves
 to the same box over WireGuard from either flat, from a hotel, or from a phone
 hotspot, with its own encryption and authentication on top.
 
+### The live case, measured 20 Sep 2026
+
+The same GLM box has two addresses: `asus1` (MagicDNS) and `192.168.0.45` (its
+address on the Berlin flat's LAN). Both were tried from both cities:
+
+| from | `asus1:8888` | `192.168.0.45:8888` |
+| ---- | ------------ | ------------------- |
+| MacBook, Berlin - same flat as the box | answers (401 without a key, model list with one) | answers; it is on that LAN |
+| mini, Helsinki | answers | **no route at all** |
+
+This is the rule with the abstraction taken out. `192.168.0.45` is not a typo
+and not a dead box; it is a *Berlin* address that stops being an address when
+the laptop moves, or when a teammate in Helsinki reads the same registry file.
+And in Helsinki `192.168.0.45` is not merely absent - it is whatever that
+subnet hands out there, which is how a registry entry ends up quietly probing
+a stranger's hardware.
+
+If a registry entry works for you and nobody else, check whether you are the
+one person on the right LAN.
+
 This module accepts plain `http://` because it dials only the tailnet or
 loopback, never an arbitrary URL, and WireGuard already encrypts and
 authenticates the hop. Loopback is allowed and is not treated as a LAN address
 - "this box" means the same thing in both cities.
+
+Over the tailnet the same hop also carries the bearer token, when an entry has
+one. That is the other reason the LAN-IP rule is not tidiness: `http://` plus
+an `Authorization` header is only acceptable because the hop underneath is
+WireGuard to a box you own.
 
 ## How the switcher should use it
 
@@ -169,10 +289,14 @@ authenticates the hop. Loopback is allowed and is not treated as a LAN address
 5. **Rank on the p90, not the minimum.** `latencyMs` IS the p90 for exactly
    this reason. A box that is fast once and slow four times must not outrank a
    steady one.
-6. **Refuse a `BUSY` pick out loud, with its `busyReason`.** "asus1 is BUSY:
+6. **Show the two auth failures differently.** `authState: "no-key"` means
+   "configure a key for this entry"; `authState: "rejected"` means "the key is
+   wrong or expired". Collapsing them back into "401" undoes the fix. Never
+   render the token: `keySource` is what a UI may show.
+7. **Refuse a `BUSY` pick out loud, with its `busyReason`.** "asus1 is BUSY:
    exclusive job running: ltx (pid 4711)" tells the operator whether to wait or
    go ask `owner`. A bare "unavailable" does not.
-7. **Treat `UNREACHABLE` as an alert, not a filter.** The CLI exits 3 when any
+8. **Treat `UNREACHABLE` as an alert, not a filter.** The CLI exits 3 when any
    entry is unreachable, matching `scripts/lead-desk.py`, so a wrapper can
    notice without parsing text.
 

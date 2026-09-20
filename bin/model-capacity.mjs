@@ -27,6 +27,20 @@
 //     sample of that link is wrong most of the time, and CAPACITY AND PATH
 //     ARE SEPARATE AXES: an idle box on a bad path is still a bad switch, so
 //     both are printed and neither is folded into the state.
+//   * "Needs a key" and "the key was refused" are different lines. An earlier
+//     version sent no credentials at all and printed `DOWN ... HTTP 401` for
+//     both, identically, against a GLM server that was serving perfectly -
+//     the run with a key and the run without were byte for byte the same. A
+//     check whose arms cannot differ is not a check.
+//
+// CREDENTIALS ARE PATHS, NEVER VALUES. The registry may carry
+// `"auth": "bearer"` and `"keyFile": "/path/to/token"`; it may not carry the
+// token, and the loader refuses `key` / `token` / `apiKey` / `bearer` /
+// `headers` and friends outright, because config/models.json is committed to
+// a public repository. Fallbacks, in order: the entry's `keyFile`, then
+// `LLM_API_KEY_FILE` (a path), then `LLM_API_KEY` (a value). Nothing this
+// program prints - table, `--json`, warning or error - ever contains the
+// token. `keySource` names where it came from; that is all.
 //
 // RUN THIS ON THE HOST THAT WILL CONSUME THE MODEL. Path and latency are per
 // peer pair, not per target: M5 and mini sit behind the same Helsinki router
@@ -115,6 +129,13 @@ if (opts['allow-lan'] && registry.some(e => e.lanOverride)) {
 
 const callerHost = await resolveCallerHost();
 const results = await probeModels(registry, { timeoutMs, freeMemThresholdGiB, latencySamples, callerHost });
+
+// A key file the whole machine can read, or a token passed as an environment
+// value, is worth one line on stderr whatever the verdict was. These name the
+// PATH and the source, never the secret.
+for (const r of results) {
+  if (r.keyWarning) process.stderr.write(`model-capacity: ${r.id}: ${r.keyWarning}\n`);
+}
 
 if (opts.json) {
   process.stdout.write(JSON.stringify({
