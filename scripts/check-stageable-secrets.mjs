@@ -38,7 +38,7 @@
 
 import { execFileSync } from 'node:child_process';
 import { readFileSync, statSync } from 'node:fs';
-import { MAX_BYTES, SKIP_EXT, matchSecret, ruleLabels } from '../src/secret-patterns.mjs';
+import { MAX_BYTES, SKIP_EXT, decodeUtf8, matchSecret, ruleLabels } from '../src/secret-patterns.mjs';
 
 // The pattern list, the binary-extension skip list and the size cap now live
 // in src/secret-patterns.mjs, shared with scripts/scan-history-for-secrets.mjs.
@@ -76,14 +76,19 @@ function stageableFiles() {
 
 function scan(path) {
   if (SKIP_EXT.test(path)) return null;
-  let text;
+  let bytes;
   try {
     if (statSync(path).size > MAX_BYTES) return null;
-    text = readFileSync(path, 'utf8');
+    bytes = readFileSync(path);
   } catch {
     return null; // unreadable, gone, or a directory: not our problem
   }
-  if (text.includes('\0')) return null; // binary
+  // Read as bytes and decode strictly, rather than the old "readFileSync utf8
+  // then look for a NUL". A NUL is not a proof of binary - bin/iak-pending.mjs
+  // uses one as a field separator inside 26 kB of valid JavaScript - and the
+  // lossy utf8 read could not tell a real binary from text anyway.
+  const text = decodeUtf8(bytes);
+  if (text === null) return null; // genuinely not text
   // Report WHERE and WHICH RULE, never the value itself. This output ends up
   // in CI logs and terminal scrollback, and a scanner that prints the secret it
   // found has simply moved the leak.

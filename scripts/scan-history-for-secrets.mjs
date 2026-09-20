@@ -36,7 +36,14 @@
 //      old ones - which is precisely where a deleted-but-reachable key lives.
 //      Shallow exits 4 and says so at the top of the report.
 //
-//   4. It always says how much it looked at. A freshly created snapshot repo
+//   4. It scans anything that DECODES. "Contains a NUL byte" is not the same
+//      question as "is not text", and an early version of this file failed
+//      that distinction: it refused 26 kB of valid UTF-8 JavaScript over one
+//      NUL used as a field separator, and called the refusal an error instead
+//      of scanning the other 26 kB. Fail-closed is about what you could not
+//      read, not about bytes that merely look alarming.
+//
+//   5. It always says how much it looked at. A freshly created snapshot repo
 //      has one commit; "history clean" after examining one commit is not
 //      reassurance, it is the false confidence this tool exists to prevent.
 //
@@ -50,6 +57,7 @@ import { fileURLToPath } from 'node:url';
 import {
   MAX_BYTES,
   SKIP_EXT,
+  decodeUtf8,
   matchSecret,
   ruleLabels,
 } from '../src/secret-patterns.mjs';
@@ -90,7 +98,8 @@ WHAT IS SCANNED
   anyone who clones the repo.
 
   Blobs whose path has a known binary media extension are skipped by policy and
-  counted separately as NOT examined. Everything else is decoded as UTF-8 and
+  counted separately as NOT examined. Everything else is decoded as UTF-8 (in
+  fatal mode - a stray NUL in otherwise valid text is scanned, not refused) and
   matched against the shared pattern list in src/secret-patterns.mjs - the same
   list scripts/check-stageable-secrets.mjs uses.
 
@@ -258,14 +267,21 @@ function readBatch(git, shas, onBlob) {
   }
 }
 
-/** Is `body` something we can honestly claim to have read as text? */
-function undecodableReason(body) {
-  if (body.includes(0)) return 'nul-bytes';
-  // A lossy decode means we scanned something other than what is stored, so
-  // "no match" would be a claim about the wrong bytes.
-  const text = body.toString('utf8');
-  if (Buffer.byteLength(text, 'utf8') !== body.length) return 'invalid-utf8';
-  return null;
+/**
+ * Decode a blob, or say why it cannot be scanned.
+ *
+ * Returns { text } or { reason }. The ONLY disqualifier is bytes that do not
+ * decode as UTF-8: a lossy decode means we scanned something other than what
+ * is stored, so "no match" would be a claim about the wrong bytes.
+ *
+ * A stray NUL is deliberately NOT a disqualifier, see decodeUtf8's note. A
+ * file can hold a NUL as a field separator and still be 26 kB of readable
+ * source that could carry a key - refusing it skips the scan AND mislabels the
+ * skip as an error, which is the worst of both answers.
+ */
+function decodeBlob(body) {
+  const text = decodeUtf8(body);
+  return text === null ? { reason: 'invalid-utf8' } : { text };
 }
 
 /**
@@ -374,14 +390,14 @@ function scanRepo(opts) {
       readBatch(git, chunk.map((b) => b.sha), (sha, body) => {
         const blob = bySha.get(sha);
         if (!blob) return;
-        const bad = undecodableReason(body);
-        if (bad) {
-          report.unexamined.push({ path: blob.path, blob: sha, reason: bad });
+        const { text, reason } = decodeBlob(body);
+        if (reason) {
+          report.unexamined.push({ path: blob.path, blob: sha, reason });
           return;
         }
         report.examined.blobsExamined += 1;
         report.examined.bytesExamined += body.length;
-        const hit = matchSecret(body.toString('utf8'));
+        const hit = matchSecret(text);
         if (hit) {
           // label + line + length only. The value stays in the repo, which is
           // the one place it is already.

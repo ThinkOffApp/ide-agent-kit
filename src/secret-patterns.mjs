@@ -75,6 +75,30 @@ export function matchSecret(text) {
   return null;
 }
 
+/**
+ * Decode `buf` as text, or return null if it genuinely is not UTF-8.
+ *
+ * NOT a NUL check. Those are two different questions and conflating them cost
+ * us a real scan: bin/iak-pending.mjs carries ONE NUL byte, 12,684 bytes in,
+ * as a deliberate field separator between a host and an id (NUL cannot occur
+ * in either, so neither component can forge a collision). The file is valid
+ * UTF-8, `node --check` passes, and it is 26 kB of perfectly readable
+ * JavaScript. The old "contains a NUL, therefore binary" rule refused to look
+ * at any of it and reported could-not-complete - so a credential sitting after
+ * that byte would have been missed, and the miss would have been dressed up as
+ * a scanning error rather than a finding.
+ *
+ * The only thing that justifies refusing to scan is bytes that do not decode.
+ * TextDecoder in fatal mode answers exactly that question and nothing else.
+ */
+export function decodeUtf8(buf) {
+  try {
+    return new TextDecoder('utf-8', { fatal: true }).decode(buf);
+  } catch {
+    return null;
+  }
+}
+
 /** Rule names in order. Used by --print-rules in both scanners. */
 export function ruleLabels() {
   return SECRET_PATTERNS.map(([, label]) => label);

@@ -210,13 +210,14 @@ test('a shallow clone is reported shallow and does NOT exit clean', () => {
   assert.equal(JSON.parse(after.stdout).findings[0].path, 'leaked-config.json');
 });
 
-test('an undecodable object is could-not-complete, never clean', () => {
+test('a genuinely undecodable object is could-not-complete, never clean', () => {
   const dir = newRepo('iak-hist-binary-');
   writeFileSync(path.join(dir, 'README.md'), '# fixture\n');
-  // NUL bytes: cannot be read as text, so it cannot be claimed as checked.
-  writeFileSync(path.join(dir, 'payload.dat'), Buffer.from([0x68, 0x00, 0x69, 0x00]));
-  // Not valid UTF-8 either, and no NULs: the lossy-decode path.
+  // Invalid UTF-8 byte sequences, NOT merely a NUL: 0xff/0xfe cannot start a
+  // UTF-8 sequence, and 0xc3 here is a truncated two-byte lead. These really
+  // cannot be read as text, so they cannot be claimed as checked.
   writeFileSync(path.join(dir, 'latin.dat'), Buffer.from([0xff, 0xfe, 0x41, 0x42]));
+  writeFileSync(path.join(dir, 'truncated.dat'), Buffer.from([0x41, 0xc3]));
   commitAll(dir, 'binary things');
 
   const r = runScanner([dir, '--json']);
@@ -225,13 +226,48 @@ test('an undecodable object is could-not-complete, never clean', () => {
   assert.equal(report.verdict, 'incomplete');
   assert.equal(report.examined.blobsUnexamined, 2);
   const reasons = Object.fromEntries(report.unexamined.map((u) => [u.path, u.reason]));
-  assert.equal(reasons['payload.dat'], 'nul-bytes');
   assert.equal(reasons['latin.dat'], 'invalid-utf8');
+  assert.equal(reasons['truncated.dat'], 'invalid-utf8');
 
   const human = runScanner([dir]);
   assert.equal(human.status, EXIT.INCOMPLETE);
   assert.match(human.stderr, /COULD NOT COMPLETE/);
   assert.ok(!/^PASS/m.test(human.stdout), '"could not check" must never render as a pass');
+});
+
+test('a stray NUL in valid UTF-8 is SCANNED, not refused as binary', () => {
+  // Regression for a real miss. bin/iak-pending.mjs in this repo's history
+  // carries exactly one NUL, 12,684 bytes in, as a deliberate field separator
+  // between a host and an id - NUL cannot occur in either, so neither half can
+  // forge a collision. The file is valid UTF-8, `node --check` passes, and it
+  // is 26 kB of readable JavaScript. The first version of this scanner refused
+  // to look at any of it and called that could-not-complete, so a key sitting
+  // after that byte would have been missed AND the miss would have been
+  // reported as a scanning error rather than a finding.
+  const dir = newRepo('iak-hist-nul-');
+  const secret = synthetic('AFTERNUL');
+  const body = Buffer.concat([
+    Buffer.from('export function itemKey(item) { return `${item.host}'),
+    Buffer.from([0x00]),
+    Buffer.from(`\${item.id}\`; }\n\n// leaked below the separator\nconst apiKey = "${secret}";\n`),
+  ]);
+  writeFileSync(path.join(dir, 'pending.mjs'), body);
+  commitAll(dir, 'a NUL separator and, later in the same file, a key');
+
+  const r = runScanner([dir, '--json']);
+  assert.equal(r.status, EXIT.FOUND,
+    `a file that decodes must be scanned, not refused; got ${r.status}: ${r.stderr}`);
+  const report = JSON.parse(r.stdout);
+  assert.equal(report.verdict, 'found');
+  assert.equal(report.unexamined.length, 0, 'a decodable file must not count as unexamined');
+  assert.equal(report.findings.length, 1);
+  assert.equal(report.findings[0].path, 'pending.mjs');
+  // The match is AFTER the NUL, which is the whole point.
+  assert.ok(body.indexOf(Buffer.from(secret)) > body.indexOf(0),
+    'fixture must place the secret after the NUL');
+
+  // And the value still never appears in the output.
+  assert.ok(!`${r.stdout}${r.stderr}`.includes('TESTONLY'));
 });
 
 test('a blob over the size cap is unexamined, not passed', () => {
@@ -261,7 +297,7 @@ test('a findable secret still wins over a shallow or incomplete verdict', () => 
   const dir = newRepo('iak-hist-precedence-');
   const secret = synthetic('PRECEDENCE');
   writeFileSync(path.join(dir, 'leaked-config.json'), `key=${secret}\n`);
-  writeFileSync(path.join(dir, 'payload.dat'), Buffer.from([0x00, 0x01]));
+  writeFileSync(path.join(dir, 'payload.dat'), Buffer.from([0xff, 0xfe, 0x00, 0x01]));
   commitAll(dir, 'both at once');
 
   const r = runScanner([dir, '--json']);
