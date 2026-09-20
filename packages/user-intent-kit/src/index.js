@@ -6,3 +6,4 @@ export { OpenClawAdapter } from './adapters/openclaw.js';
 export { DesktopAdapter } from './adapters/desktop.js';
 export { BrowserAdapter } from './adapters/browser.js';
 export { collectHostTelemetry } from './host-telemetry.js';
+export { ServedModelProbe, servedModelEntry, readVerdict, parseEndpoint, VERDICTS } from './served-model.js';

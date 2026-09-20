@@ -18,12 +18,39 @@
  *                        devices view (mac-mini, car-pi, linux-server).
  *                        Without it a row renders with a blank type,
  *                        which is how the M5 first appeared (2026-08-29).
- *   INTENT_DEVICE_MODEL  default: unset - what this box serves, shown on
- *                        its device card next to the Pi's GGUF name. Leave
- *                        unset on Linux to read it from the running
- *                        llama-server's command line on every poll (a
- *                        model swap shows within one heartbeat); set it
- *                        where nothing on the box can be asked.
+ *   INTENT_MODEL_ENDPOINT default: 127.0.0.1:8080 - a local
+ *                        OpenAI-compatible server, asked on its own timer
+ *                        what it is serving; whatever it names goes on the
+ *                        device card VERBATIM. Nothing listening, or a
+ *                        server listing nothing loaded, publishes no model
+ *                        field at all - the dashboard renders a card
+ *                        without a label, which is the honest picture. Set
+ *                        to `off` to disable the probe.
+ *                        NOT Ollama's 11434 by default: its /v1/models is
+ *                        the PULLED catalogue, so it names a model on a
+ *                        machine running none (measured 20 Sep 2026).
+ *   INTENT_MODEL_KIND    default: openai - openai | vllm | lmstudio, only
+ *                        to pick the models path LM Studio spells
+ *                        differently.
+ *   INTENT_MODEL_KEY_FILE default: unset - a PATH to a file holding the
+ *                        bearer token, never the token itself. Without it
+ *                        an endpoint that wants auth answers 401, and a
+ *                        401 publishes NO model: that box is serving
+ *                        something we cannot name, and a placeholder on a
+ *                        public dashboard is worse than a blank field.
+ *   INTENT_MODEL_PROBE_MS default: 300000 - the probe's own interval,
+ *                        deliberately slower than POLL_INTERVAL_MS. The
+ *                        heartbeat reads a cached value and never waits on
+ *                        the model endpoint, so a dead LLM costs a label
+ *                        and never a whole machine.
+ *   INTENT_DEVICE_MODEL  default: unset - the operator's statement of what
+ *                        this box serves. LAST RESORT: it applies only
+ *                        when nothing answered the probe, because a server
+ *                        that answered has just told us the truth and a
+ *                        setting can only be stale. On Linux a running
+ *                        llama-server's own argv is still read on every
+ *                        poll when neither of the two above produced a
+ *                        name.
  *   INTENT_DEVICE_PUBLISH default: 1 - set to 0 on a SECONDARY daemon (a
  *                        second agent's presence beat on the same machine)
  *                        so exactly one daemon owns the device row; two
@@ -34,7 +61,7 @@
 
 import { hostname } from 'node:os';
 import { execSync } from 'node:child_process';
-import { IntentClient, IAKAdapter, DesktopAdapter } from '../src/index.js';
+import { IntentClient, IAKAdapter, DesktopAdapter, ServedModelProbe } from '../src/index.js';
 
 const baseUrl = process.env.INTENT_API_BASE || 'https://groupmind.one/api/v1';
 const apiKey = process.env.INTENT_API_KEY;
@@ -43,6 +70,7 @@ const agentHandle = process.env.INTENT_AGENT_HANDLE || '@agent';
 const deviceId = process.env.INTENT_DEVICE_ID || hostname();
 const deviceKind = process.env.INTENT_DEVICE_KIND || undefined;
 const deviceModel = process.env.INTENT_DEVICE_MODEL || undefined;
+const modelProbe = new ServedModelProbe();
 const publishDevice = process.env.INTENT_DEVICE_PUBLISH !== '0';
 const pollIntervalMs = Number(process.env.POLL_INTERVAL_MS || 30000);
 
@@ -67,7 +95,9 @@ if (userId.toLowerCase() === agentHandle.replace(/^@/, '').toLowerCase()) {
 
 const client = new IntentClient({ baseUrl, apiKey, userId, deviceId });
 const iak = new IAKAdapter(client, { agentHandle, machine: deviceId });
-const desktop = new DesktopAdapter(client, { pollIntervalMs, machine: deviceId, kind: deviceKind, model: deviceModel });
+const desktop = new DesktopAdapter(client, {
+  pollIntervalMs, machine: deviceId, kind: deviceKind, model: deviceModel, modelProbe,
+});
 
 if (publishDevice) desktop.start();
 
@@ -93,6 +123,10 @@ const agentTimer = setInterval(() => {
 }, pollIntervalMs);
 
 console.log(`uik-daemon: device=${deviceId} agent=${agentHandle} interval=${pollIntervalMs}ms`);
+// Which endpoint the model label comes from, so a blank label on the
+// dashboard can be traced to a port rather than guessed at. Never a token:
+// describe() reports only that a keyFile is configured.
+console.log(`uik-daemon: model probe -> ${modelProbe.describe()}`);
 
 const shutdown = async (sig) => {
   console.log(`uik-daemon: ${sig}, shutting down`);

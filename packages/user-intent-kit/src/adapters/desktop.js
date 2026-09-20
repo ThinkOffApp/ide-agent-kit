@@ -6,6 +6,7 @@ import { platform } from 'node:os';
 /** Idle longer than this and the user is not at this machine. */
 const IDLE_AFTER_SEC = 300;
 import { collectHostTelemetry } from '../host-telemetry.js';
+import { ServedModelProbe } from '../served-model.js';
 
 /**
  * Desktop Adapter - detects active window and context on macOS.
@@ -20,20 +21,57 @@ export class DesktopAdapter {
   #machine;
   #kind;
   #model;
+  #modelProbe;
   #pollIntervalMs;
 
   /**
    * @param {import('../client.js').IntentClient} client
    * @param {object} [opts]
    * @param {number} [opts.pollIntervalMs=30000] - How often to publish state
+   * @param {string} [opts.model] - the operator's statement of what this box
+   *   serves. A LAST RESORT: see #servedModel().
+   * @param {import('../served-model.js').ServedModelProbe|null} [opts.modelProbe]
+   *   - asks a local endpoint what it is actually serving. Pass null to turn
+   *   the probe off entirely; omit it for the environment's configuration.
    */
-  constructor(client, { pollIntervalMs = 30000, machine, kind, model } = {}) {
+  constructor(client, { pollIntervalMs = 30000, machine, kind, model, modelProbe } = {}) {
     this.#client = client;
     this.#machine = machine ?? client?.deviceId ?? undefined;
     this.#kind = kind;
     this.#model = model;
+    this.#modelProbe = modelProbe === undefined ? new ServedModelProbe() : modelProbe;
     this.#pollIntervalMs = pollIntervalMs;
     this.#pollTimer = null;
+  }
+
+  /**
+   * Which model name, if any, goes into this heartbeat.
+   *
+   * A SERVER THAT ANSWERED OUTRANKS A SETTING, including when what it
+   * answered is "nothing". The three cases:
+   *
+   *   named        publish it, verbatim.
+   *   reached, unnamed   (401, or serving nothing) - publish NO model, and
+   *                do not fall back to `model`. We have live evidence about
+   *                that port and the configured name is either contradicted
+   *                by it or unverifiable against it. A guess on a public
+   *                dashboard is the failure this whole change exists to
+   *                avoid; a blank field is not.
+   *   no server    nothing is listening, so there is nothing to contradict
+   *                the operator. `INTENT_DEVICE_MODEL` is documented for
+   *                exactly this box - one that cannot be asked - so their
+   *                word stands, and on Linux collectHostTelemetry still
+   *                falls through to the running llama-server's own argv.
+   *
+   * Synchronous and network-free by construction: the probe caches, and a
+   * heartbeat must go out whether or not the model probe is healthy.
+   */
+  #servedModel() {
+    if (!this.#modelProbe) return this.#model;
+    const seen = this.#modelProbe.lastResult();
+    if (seen?.model) return seen.model;
+    if (seen?.reachedServer) return undefined;
+    return this.#model;
   }
 
   /**
@@ -52,6 +90,10 @@ export class DesktopAdapter {
     // Publish immediately
     this.publishState().catch(() => {});
     this.#client.startHeartbeat();
+    // Started AFTER the first publish and never awaited, so the machine
+    // appears on the dashboard at once with whatever vitals it has, label or
+    // no label. The first probe fills the label in for the next beat.
+    this.#modelProbe?.start();
     this.#pollTimer = setInterval(() => {
       this.publishState().catch(() => {});
     }, this.#pollIntervalMs);
@@ -63,6 +105,7 @@ export class DesktopAdapter {
       clearInterval(this.#pollTimer);
       this.#pollTimer = null;
     }
+    this.#modelProbe?.stop();
     this.#client.stopHeartbeat();
   }
 
@@ -102,7 +145,7 @@ export class DesktopAdapter {
       screen_active: active,
       context: active ? 'active' : 'idle',
       ...(idleSec === undefined ? {} : { idle_sec: idleSec }),
-      ...collectHostTelemetry({ machine: this.#machine, kind: this.#kind, model: this.#model }),
+      ...collectHostTelemetry({ machine: this.#machine, kind: this.#kind, model: this.#servedModel() }),
     };
 
     try {
