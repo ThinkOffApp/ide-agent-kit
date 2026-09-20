@@ -3,6 +3,8 @@
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
 
+import { createServer } from 'node:http';
+
 import {
   createIntent,
   decideIntent,
@@ -12,6 +14,9 @@ import {
   startConfirmationsServer,
   startChatReplyPoller,
   composeAnnouncers,
+  makeCodewatchAnnouncer,
+  announceStateOf,
+  ANNOUNCE_STATES,
   defaultCallbackBase,
   _resetForTests,
 } from '../src/confirmations.mjs';
@@ -616,4 +621,264 @@ test('HTTP POST /intent carries options, and a bad option list is 400 not 500', 
   });
   assert.equal(plain.status, 201);
   assert.equal(getIntent((await plain.json()).id).options, null);
+});
+
+
+// --- announcement receipts --------------------------------------------------
+//
+// Measured on a live daemon on 2026-09-20: four intents pending for up to 9.2
+// hours with `channels: ['groupmind']`. The record said they were created and
+// not yet decided, and nothing anywhere said whether the card that asks the
+// human had ever posted. "The owner is ignoring it" and "the card never went
+// out" need opposite reactions and looked identical, so these tests are about
+// one thing: those states must be told apart from the record alone.
+
+test('a successful announcement records the message id and when it POSTED', async () => {
+  _resetForTests();
+  const before = Date.now();
+  const id = await createIntent({
+    prompt: 'ship it?',
+    channels: ['groupmind'],
+    announce: composeAnnouncers({
+      groupmind: async () => ({ messageId: 'gm-4711', statusCode: 201 }),
+    }),
+  });
+  const after = Date.now();
+
+  const i = getIntent(id);
+  assert.equal(i.announceState, 'posted');
+  const rec = i.announcements.groupmind;
+  assert.equal(rec.status, 'posted');
+  assert.equal(rec.messageId, 'gm-4711', 'the id the channel handed back is kept');
+  assert.equal(rec.error, null);
+  assert.ok(Number.isInteger(rec.postedAt), 'postedAt is a timestamp');
+  assert.ok(rec.postedAt >= before && rec.postedAt <= after, 'and it is this post, not some other time');
+  assert.ok(rec.attemptedAt <= rec.postedAt, 'the attempt precedes the acceptance');
+});
+
+test('three readable states: never announced, announce failed, and posted-and-waiting', async () => {
+  // This is the core of the change. All three are `status: 'pending'`, which
+  // is exactly why status alone was never enough.
+  _resetForTests();
+
+  const never = await createIntent({
+    prompt: 'nobody is wired to post this',
+    channels: ['groupmind'],
+    // No announcer registered for the channel: the card definitively did not
+    // go out, and nothing broke while not sending it.
+    announce: composeAnnouncers({}),
+  });
+  const failed = await createIntent({
+    prompt: 'the room refused this',
+    channels: ['groupmind'],
+    announce: composeAnnouncers({
+      groupmind: async () => { throw new Error('groupmind POST /messages returned 401'); },
+    }),
+  });
+  const waiting = await createIntent({
+    prompt: 'the room took this, the human has not answered',
+    channels: ['groupmind'],
+    announce: composeAnnouncers({ groupmind: async () => ({ messageId: 'gm-1' }) }),
+  });
+
+  const by = Object.fromEntries(listIntents().map((i) => [i.id, i]));
+  assert.deepEqual(
+    [by[never].status, by[failed].status, by[waiting].status],
+    ['pending', 'pending', 'pending'],
+    'all three are pending - that is the whole problem',
+  );
+  assert.equal(by[never].announceState, 'skipped');
+  assert.equal(by[failed].announceState, 'failed');
+  assert.equal(by[waiting].announceState, 'posted');
+  assert.equal(
+    new Set([by[never].announceState, by[failed].announceState, by[waiting].announceState]).size,
+    3,
+    'three distinct readable states',
+  );
+  assert.match(by[failed].announcements.groupmind.error, /401/, 'the failure carries why');
+  assert.equal(by[never].announcements.groupmind.postedAt, null, 'nothing was posted');
+  assert.equal(by[failed].announcements.groupmind.postedAt, null, 'nothing was posted');
+});
+
+test('an announcer that throws does not leave the intent looking normally pending', async () => {
+  // The old behaviour: catch, write a receipt line, return. The intent then
+  // sat in the queue indistinguishable from one the owner had simply not
+  // answered yet.
+  _resetForTests();
+  const id = await createIntent({
+    prompt: 'p',
+    channels: ['groupmind', 'codewatch'],
+    announce: async () => { throw new Error('chat down'); },
+  });
+  const i = getIntent(id);
+  assert.equal(i.status, 'pending', 'the intent is still decidable - an announce failure must not block it');
+  assert.equal(i.announceState, 'failed', 'but it does NOT read as a normal pending card');
+  assert.notEqual(i.announceState, 'posted');
+  for (const ch of ['groupmind', 'codewatch']) {
+    assert.equal(i.announcements[ch].status, 'failed', `${ch} is recorded as failed`);
+    assert.match(i.announcements[ch].error, /chat down/);
+  }
+});
+
+test('an announcer that reports nothing reads as unreported, never as posted', async () => {
+  _resetForTests();
+  const id = await createIntent({
+    prompt: 'p',
+    channels: ['groupmind'],
+    // Resolves cleanly, says nothing about what happened. The absence of an
+    // error is not evidence of a post.
+    announce: async () => {},
+  });
+  const i = getIntent(id);
+  assert.equal(i.announceState, 'unreported');
+  assert.notEqual(i.announceState, 'posted');
+  assert.equal(i.announcements.groupmind.postedAt, null);
+});
+
+test('an intent from before announcement receipts reads unknown, never announced', async () => {
+  // A restart replaying an old log is how such a record actually arrives, so
+  // that is how it is tested: a fresh module instance replays a hand-written
+  // line with none of the new fields on it.
+  const { mkdtempSync, writeFileSync } = await import('node:fs');
+  const { tmpdir } = await import('node:os');
+  const { join } = await import('node:path');
+  const dir = mkdtempSync(join(tmpdir(), 'iak-announce-compat-'));
+  const statePath = join(dir, 'old-state.jsonl');
+  writeFileSync(statePath, JSON.stringify({
+    kind: 'intent',
+    id: 'old01234',
+    intent: {
+      prompt: 'written by a build that never recorded announcements',
+      session: 's',
+      channels: ['groupmind'],
+      status: 'pending',
+      createdAt: 1758000000000,
+      decidedAt: null,
+      decision: null,
+    },
+    at: 1758000000000,
+  }) + '\n');
+
+  const m = await import('../src/confirmations.mjs?v=' + Math.random());
+  const summary = m.loadPersistedState(statePath);
+  assert.equal(summary.intents, 1, 'the old intent replayed');
+  const old = m.listIntents().find((i) => i.id === 'old01234');
+  assert.equal(old.announceState, 'unknown', 'absent reads as unknown');
+  assert.notEqual(old.announceState, 'posted', 'absent must never read as announced');
+  assert.notEqual(old.announceState, 'failed', 'and must never read as a failure either');
+  assert.equal(old.announcements, null, 'there is nothing to show, and it does not invent anything');
+  // And the bare predicate, directly.
+  assert.equal(announceStateOf({ status: 'pending' }), 'unknown');
+});
+
+test('the announcement record never claims the human saw anything', async () => {
+  // A 2xx proves the channel ACCEPTED the message. It does not prove it was
+  // rendered, notified or read. If a field were ever named deliveredAt or
+  // seenAt, this fix would have committed the overclaim it exists to correct.
+  _resetForTests();
+  const id = await createIntent({
+    prompt: 'p',
+    channels: ['groupmind'],
+    announce: composeAnnouncers({ groupmind: async () => ({ messageId: 'gm-2' }) }),
+  });
+  const rec = getIntent(id).announcements.groupmind;
+  assert.deepEqual(
+    Object.keys(rec).sort(),
+    ['attemptedAt', 'channel', 'error', 'messageId', 'postedAt', 'status'].sort(),
+  );
+  for (const k of Object.keys(rec)) {
+    assert.doesNotMatch(k, /deliver|seen|read|viewed|acknowledg/i, `field "${k}" claims more than a POST proves`);
+  }
+  for (const state of ANNOUNCE_STATES) {
+    assert.doesNotMatch(state, /deliver|seen|read/i, `state "${state}" claims more than a POST proves`);
+  }
+  assert.equal(getIntent(id).announceState, 'posted', 'the strongest thing it says is "posted"');
+});
+
+test('a non-2xx from the channel is a failed announcement, not a silent success', async () => {
+  // The announcers used to drain the response and resolve regardless of the
+  // status code, so a 401 from a rotated key looked exactly like a delivered
+  // card. Driven through a real listener rather than a stub, because the
+  // swallowing lived in the response handler.
+  _resetForTests();
+  let mode = 'fail';
+  const gate = createServer((req, res) => {
+    req.resume();
+    req.on('end', () => {
+      if (mode === 'fail') {
+        res.writeHead(401, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'bad token' }));
+      } else {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ id: 'cw-77' }));
+      }
+    });
+  });
+  await new Promise((r) => gate.listen(0, '127.0.0.1', r));
+  const gateUrl = `http://127.0.0.1:${gate.address().port}/gate`;
+  try {
+    const announce = composeAnnouncers({ codewatch: makeCodewatchAnnouncer({ gateUrl }) });
+
+    const bad = await createIntent({ prompt: 'rejected', channels: ['codewatch'], announce });
+    const badRec = getIntent(bad);
+    assert.equal(badRec.announceState, 'failed', 'a 401 is a failed announcement');
+    assert.match(badRec.announcements.codewatch.error, /401/);
+
+    mode = 'ok';
+    const good = await createIntent({ prompt: 'accepted', channels: ['codewatch'], announce });
+    const goodRec = getIntent(good);
+    assert.equal(goodRec.announceState, 'posted');
+    assert.equal(goodRec.announcements.codewatch.messageId, 'cw-77');
+  } finally {
+    gate.close();
+  }
+});
+
+test('an unconfigured announcer records skipped, not posted', async () => {
+  _resetForTests();
+  const id = await createIntent({
+    prompt: 'p',
+    channels: ['codewatch'],
+    // No gate url: nothing was posted and nothing failed.
+    announce: composeAnnouncers({ codewatch: makeCodewatchAnnouncer({}) }),
+  });
+  const i = getIntent(id);
+  assert.equal(i.announceState, 'skipped');
+  assert.match(i.announcements.codewatch.error, /gate url/);
+});
+
+test('GET /intents?announce= separates never-announced from waiting-on-a-human, and rejects unknown values', async () => {
+  _resetForTests();
+  const waiting = await createIntent({
+    prompt: 'posted, waiting on petrus',
+    channels: ['groupmind'],
+    announce: composeAnnouncers({ groupmind: async () => ({ messageId: 'gm-3' }) }),
+  });
+  const broken = await createIntent({
+    prompt: 'never landed anywhere',
+    channels: ['groupmind'],
+    announce: composeAnnouncers({ groupmind: async () => { throw new Error('402 unpaid invoice'); } }),
+  });
+
+  const server = startConfirmationsServer({ port: 0, host: '127.0.0.1' });
+  await new Promise((r) => server.listening ? r() : server.once('listening', r));
+  const base = `http://127.0.0.1:${server.address().port}`;
+  try {
+    const all = await (await fetch(`${base}/intents`)).json();
+    assert.equal(all.length, 2);
+    assert.deepEqual(all.map((i) => i.status), ['pending', 'pending'], 'status cannot tell them apart');
+
+    const stuck = await (await fetch(`${base}/intents?status=pending&announce=failed`)).json();
+    assert.deepEqual(stuck.map((i) => i.id), [broken], 'the one nobody was actually asked about');
+
+    const asked = await (await fetch(`${base}/intents?status=pending&announce=posted`)).json();
+    assert.deepEqual(asked.map((i) => i.id), [waiting]);
+
+    const bad = await fetch(`${base}/intents?announce=delivered`);
+    assert.equal(bad.status, 400, 'an unknown filter must fail loudly, not list everything');
+    const err = await bad.json();
+    assert.match(err.error, /unknown announce state/);
+  } finally {
+    server.close();
+  }
 });

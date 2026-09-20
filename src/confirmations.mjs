@@ -160,6 +160,73 @@ function pushStatus(intentId, rawStatus, fields = {}) {
   }
 }
 
+// --- announcement receipts --------------------------------------------------
+//
+// An intent used to record that it was CREATED and that it was DECIDED, and
+// nothing at all about whether the card that ASKS the human ever reached
+// anywhere. That left a pending intent with two readings that call for
+// opposite reactions - the owner saw the card and has not answered yet, or the
+// card never posted - and no way to tell them apart. Measured on a live daemon
+// on 2026-09-20: four intents pending for up to 9.2 hours with
+// `channels: ['groupmind']`, unanswerable from the record.
+//
+// WHAT A RECORD PROVES, EXACTLY. `postedAt` is the moment a channel's
+// transport ACCEPTED the message (a 2xx from the room API), and `messageId` is
+// the id that transport handed back. Neither one is evidence that the message
+// rendered, that a notification fired, or that a human read it. There is
+// deliberately no `deliveredAt` and no `seenAt` here: nothing in this process
+// can observe either, and naming a field for something it does not measure is
+// the exact overclaim this code exists to correct. A real read-receipt, if one
+// ever exists, arrives from the phone as its own event and gets its own field.
+//
+// SHAPE. `intent.announcements` is a MAP keyed by channel name, so adding a
+// channel adds a key and no consumer changes. Each entry:
+//   {channel, status, attemptedAt, postedAt, messageId, error}
+//
+// STATES (`announceStateOf`), summarised across channels:
+//   'unknown'    - the intent predates announcement receipts. It is NOT a
+//                  claim that the card posted, and NOT a claim that it failed.
+//   'none'       - no channels were asked for, so no card was ever meant to go.
+//   'skipped'    - a channel was asked for but nothing was configured to post
+//                  it. The card definitively did not go out.
+//   'attempting' - a post was started and never settled (e.g. the process died
+//                  mid-flight). Nothing proves it landed.
+//   'unreported' - the announce hook returned without saying what happened.
+//                  Absence of an error is not a success.
+//   'posted'     - every attempted channel accepted the post. See above for
+//                  what that does and does not prove.
+//   'partial'    - some channels posted, others did not.
+//   'failed'     - it was attempted and nothing landed.
+export const ANNOUNCE_STATES = [
+  'unknown', 'none', 'skipped', 'attempting', 'unreported', 'posted', 'partial', 'failed',
+];
+
+/** Collapse an intent's per-channel announcement records into one readable
+ * state. An intent with no `announcements` map at all is an OLD record: it
+ * reads 'unknown', never 'posted' and never 'failed'. */
+export function announceStateOf(intent) {
+  const a = intent && intent.announcements;
+  if (!a || typeof a !== 'object') return 'unknown';
+  const statuses = Object.values(a).map((r) => (r && r.status) || 'unknown');
+  if (statuses.length === 0) return 'none';
+  const has = (s) => statuses.includes(s);
+  if (statuses.every((v) => v === 'posted')) return 'posted';
+  if (has('failed')) return has('posted') ? 'partial' : 'failed';
+  if (has('attempting')) return 'attempting';
+  if (has('posted')) return 'partial';
+  if (statuses.every((v) => v === 'skipped')) return 'skipped';
+  return 'unreported';
+}
+
+/** Public view of the announcement records: a copy, so a caller cannot edit
+ * the registry through it. `null` for an old intent that has none. */
+function announcementsView(i) {
+  if (!i || !i.announcements) return null;
+  const out = {};
+  for (const [ch, r] of Object.entries(i.announcements)) out[ch] = { ...r };
+  return out;
+}
+
 export function listIntents() {
   return [...intents.entries()].map(([id, i]) => ({
     id,
@@ -170,6 +237,11 @@ export function listIntents() {
     createdAt: i.createdAt,
     decidedAt: i.decidedAt,
     decision: i.decision,
+    // Whether the asking card actually POSTED, per channel, plus the one-word
+    // summary. This is what makes "pending because nobody answered yet"
+    // distinguishable from "pending because nothing was ever sent".
+    announceState: announceStateOf(i),
+    announcements: announcementsView(i),
   }));
 }
 
@@ -186,6 +258,8 @@ export function getIntent(id) {
     createdAt: i.createdAt,
     decidedAt: i.decidedAt,
     decision: i.decision,
+    announceState: announceStateOf(i),
+    announcements: announcementsView(i),
   };
 }
 
@@ -323,6 +397,9 @@ export async function createIntent({
   if (cleanOptions && cleanOptions.length < 2) {
     throw new Error('a choice intent needs at least two distinct options');
   }
+  // `channels` is the list we will try. Normalise it once: everything below
+  // reconciles the announcement records against exactly this list.
+  const wantChannels = Array.isArray(channels) ? channels : [];
   const intent = {
     prompt,
     session,
@@ -334,6 +411,11 @@ export async function createIntent({
     decision: null,
     resolvers: [],
     timeoutSec,
+    // Per-channel announcement records. Present-and-empty (this object) means
+    // "recorded, nothing attempted yet"; ABSENT means an old intent from
+    // before this existed, which reads as 'unknown'. The distinction is the
+    // backward-compatibility rule, so do not drop this to save a few bytes.
+    announcements: {},
   };
   intents.set(id, intent);
   persistIntent(id, intent);
@@ -341,13 +423,69 @@ export async function createIntent({
     kind: 'intent.created', id, prompt, session, options: cleanOptions, channels, createdAt: intent.createdAt,
   });
   pushStatus(id, 'pending', { target_summary: prompt });
-  // Side effects — never let an announce failure block the intent itself.
+  // Record what happens to each channel's post. Handed DOWN to the announcer,
+  // because the layer that knows a channel's result is the layer that must
+  // report it: a fan-out that swallows a 401 and returns cleanly is how a
+  // never-posted card came to look like a patiently pending one.
+  const recordAnnouncement = (channel, patch = {}) => {
+    if (!channel) return null;
+    const prev = intent.announcements[channel] || {
+      channel, status: 'attempting', attemptedAt: null, postedAt: null, messageId: null, error: null,
+    };
+    const next = { ...prev, ...patch, channel };
+    intent.announcements[channel] = next;
+    persistIntent(id, intent);
+    if (next.status === 'posted') {
+      // 'posted' = the channel ACCEPTED it. Not delivered, not seen.
+      postReceipt(receiptsPath, {
+        kind: 'intent.announced', id, channel, postedAt: next.postedAt, messageId: next.messageId,
+      });
+    } else if (next.status === 'failed') {
+      postReceipt(receiptsPath, {
+        kind: 'intent.announce_failed', id, channel, error: next.error,
+      });
+      // Loud on the way out as well as recorded on the intent. A failure that
+      // only exists in a log file is the same bug one layer down.
+      process.stderr.write(`[confirmations] intent ${id}: announce to ${channel} FAILED: ${next.error}\n`);
+    }
+    return next;
+  };
+
+  // Side effects - never let an announce failure block the intent itself, and
+  // never let one vanish either. The intent stays decidable; the outcome is
+  // written onto it so a human or a monitor can find the ones nobody was asked
+  // about.
   try {
-    await announce({ id, prompt, session, channels, fromHandle, options: cleanOptions });
-  } catch (e) {
-    postReceipt(receiptsPath, {
-      kind: 'intent.announce_failed', id, error: e.message,
+    await announce({
+      id, prompt, session, channels, fromHandle, options: cleanOptions, recordAnnouncement,
     });
+  } catch (e) {
+    // The hook threw as a whole (a composed announcer reports per channel and
+    // does not reach here). Anything still unsettled is a failure - NOT a
+    // pending card, which is the confusion being removed.
+    const msg = e.message || String(e);
+    for (const ch of wantChannels) {
+      const cur = intent.announcements[ch];
+      if (!cur || cur.status === 'attempting') {
+        recordAnnouncement(ch, {
+          status: 'failed', error: msg, attemptedAt: (cur && cur.attemptedAt) || Date.now(),
+        });
+      }
+    }
+    postReceipt(receiptsPath, {
+      kind: 'intent.announce_failed', id, error: msg,
+    });
+  }
+  // A hook that returned without reporting a channel leaves no evidence either
+  // way, so the channel reads 'unreported'. It must NOT read as posted: the
+  // absence of an error is not a success.
+  for (const ch of wantChannels) {
+    const cur = intent.announcements[ch];
+    if (!cur) {
+      recordAnnouncement(ch, { status: 'unreported', error: 'announcer reported no outcome for this channel' });
+    } else if (cur.status === 'attempting') {
+      recordAnnouncement(ch, { status: 'unreported', error: 'announcer started a post and never reported the outcome' });
+    }
   }
   return id;
 }
@@ -755,6 +893,24 @@ export function startConfirmationsServer({
         }
         out = out.filter((i) => i.status === want);
       }
+      // ?announce=<state> narrows by whether the ASKING CARD actually posted.
+      // `?status=pending&announce=failed` is the query that answers the
+      // question the record could not answer before: which of these are
+      // waiting on a human, and which were never successfully asked. Same
+      // rule as above - an unknown value is an error, because a filter that
+      // quietly matches nothing is indistinguishable from a healthy queue.
+      const wantAnnounce = url.searchParams.get('announce');
+      if (wantAnnounce !== null) {
+        if (!ANNOUNCE_STATES.includes(wantAnnounce)) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({
+            ok: false,
+            error: `unknown announce state '${wantAnnounce}' - use one of: ${ANNOUNCE_STATES.join(', ')}`,
+          }));
+          return;
+        }
+        out = out.filter((i) => i.announceState === wantAnnounce);
+      }
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify(out));
       return;
@@ -1054,6 +1210,10 @@ function renderIntentsHtml() {
   .decided .pill { display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: 10px; font-weight: 700; text-transform: uppercase; }
   .decided .pill.approve { background: var(--accent); color: #06120a; }
   .decided .pill.deny    { background: var(--hot); color: #fff; }
+  .ann { display: inline-block; padding: 1px 6px; border-radius: 4px; font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.04em; margin-bottom: 6px; }
+  .ann.posted { background: rgba(34,197,94,0.15); color: var(--accent); }
+  .ann.bad    { background: var(--hot); color: #fff; }
+  .ann.iffy   { background: rgba(245,158,11,0.18); color: var(--warn); }
   .toast { position: fixed; left: 50%; bottom: 18px; transform: translateX(-50%); background: rgba(20,26,38,0.95); border: 1px solid var(--line); padding: 6px 10px; border-radius: 6px; font-size: 11px; opacity: 0; transition: opacity 0.2s; pointer-events: none; }
   .toast.on { opacity: 1; }
 </style>
@@ -1071,7 +1231,7 @@ function renderIntentsHtml() {
     let intents = [];
     try { intents = await (await fetch('/intents', { cache: 'no-store' })).json(); } catch { return; }
     intents.sort((a, b) => b.createdAt - a.createdAt);
-    const sig = intents.map(i => i.id + i.status).join('|');
+    const sig = intents.map(i => i.id + i.status + (i.announceState || '')).join('|');
     if (sig === lastSig) return;
     lastSig = sig;
     list.innerHTML = '';
@@ -1085,13 +1245,23 @@ function renderIntentsHtml() {
       const el = document.createElement('div');
       el.className = 'intent' + (i.status === 'pending' ? '' : ' decided');
       const meta = [i.session ? 'session: ' + i.session : null, 'id: ' + i.id, 'channels: ' + (i.channels || []).join(', ')].filter(Boolean).join(' · ');
+      // Announcement state, on the card itself. A pending intent that was
+      // never successfully announced is not the same thing as one waiting on
+      // a person, and the page used to render them identically.
+      const ann = i.announceState || 'unknown';
+      const annClass = ann === 'posted' ? 'posted' : (ann === 'failed' || ann === 'partial' ? 'bad' : 'iffy');
+      // "posted", never "delivered" or "seen": the daemon knows the room
+      // accepted the message and nothing more than that.
+      const annText = ann === 'posted' ? 'card posted' : 'card not posted: ' + ann;
       el.innerHTML =
         '<div class="prompt"></div>' +
+        '<div class="ann ' + annClass + '"></div>' +
         '<div class="meta"></div>' +
         (i.status === 'pending'
           ? '<div class="row"><div class="btn ok" data-d="approve">Approve</div><div class="btn no" data-d="deny">Deny</div></div>'
           : '<span class="pill ' + i.decision + '">' + i.decision + '</span>');
       el.querySelector('.prompt').textContent = i.prompt;
+      el.querySelector('.ann').textContent = annText;
       el.querySelector('.meta').textContent = meta;
       for (const b of el.querySelectorAll('.btn')) {
         b.addEventListener('click', async () => {
@@ -1182,7 +1352,9 @@ export function makeGroupmindAnnouncer({ apiKey, room, callbackBase, apiKeys }) 
   // ORIGINATING agent rather than always by the daemon owner.
   // Falls back to the default `apiKey` when no match is found.
   return async ({ id, prompt, session, fromHandle, options }) => {
-    if (!apiKey || !room) return;
+    // Not configured is not the same as posted. Say so, so the intent records
+    // 'skipped' instead of a silent success.
+    if (!apiKey || !room) return { skipped: true, reason: 'groupmind announcer has no api key or room configured' };
     // Per-agent key override.
     const effectiveKey = (fromHandle && apiKeys && apiKeys[fromHandle]) || apiKey;
     const uiLink = callbackBase ? `${callbackBase}/` : null;
@@ -1217,9 +1389,31 @@ export function makeGroupmindAnnouncer({ apiKey, room, callbackBase, apiKeys }) 
         'https://groupmind.one/api/v1/messages',
         { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-API-Key': effectiveKey } },
         (res) => {
-          // drain + resolve regardless; the message-id isn't useful here.
-          res.resume();
-          res.on('end', () => resolve());
+          // This used to drain the body and resolve REGARDLESS of the status
+          // code, so a 401 from a rotated key or a 402 from an unpaid invoice
+          // announced nothing and reported success. A non-2xx is now a
+          // failure, and the body is read because the message id lives in it.
+          let raw = '';
+          res.setEncoding('utf8');
+          res.on('data', (c) => { raw += c; });
+          res.on('end', () => {
+            const code = res.statusCode || 0;
+            if (code < 200 || code >= 300) {
+              reject(new Error(`groupmind POST /messages returned ${code}: ${raw.slice(0, 200)}`));
+              return;
+            }
+            // The id of the message the ROOM ACCEPTED. It is not evidence that
+            // anyone was notified, and it is certainly not evidence anyone
+            // read it. Null when the response carries no id, which is honest:
+            // accepted, no handle given back.
+            let messageId = null;
+            try {
+              const j = JSON.parse(raw);
+              const cand = (j && (j.id ?? (j.message && j.message.id) ?? (j.data && j.data.id))) ?? null;
+              messageId = cand == null ? null : String(cand);
+            } catch { /* a 2xx with an unparseable body is still accepted */ }
+            resolve({ channel: 'groupmind', statusCode: code, messageId });
+          });
           res.on('error', reject);
         }
       );
@@ -1235,7 +1429,7 @@ export function makeGroupmindAnnouncer({ apiKey, room, callbackBase, apiKeys }) 
 // buttons that POST back to this server's /intent/:id/decision.
 export function makeCodewatchAnnouncer({ gateUrl, gateToken }) {
   return async ({ id, prompt, session }) => {
-    if (!gateUrl) return;
+    if (!gateUrl) return { skipped: true, reason: 'codewatch announcer has no gate url configured' };
     const data = JSON.stringify({ id, prompt, session });
     const url = new URL(gateUrl);
     const lib = await import(url.protocol === 'https:' ? 'node:https' : 'node:http');
@@ -1243,8 +1437,26 @@ export function makeCodewatchAnnouncer({ gateUrl, gateToken }) {
       const headers = { 'Content-Type': 'application/json' };
       if (gateToken) headers.Authorization = `Bearer ${gateToken}`;
       const r = lib.request(gateUrl, { method: 'POST', headers }, (res) => {
-        res.resume();
-        res.on('end', () => resolve());
+        // Same rule as the room announcer: a non-2xx from the gate is a failed
+        // announcement, not a quiet success. The gate accepting the push is
+        // still only that - the notification may never render on the phone.
+        let raw = '';
+        res.setEncoding('utf8');
+        res.on('data', (c) => { raw += c; });
+        res.on('end', () => {
+          const code = res.statusCode || 0;
+          if (code < 200 || code >= 300) {
+            reject(new Error(`codewatch gate returned ${code}: ${raw.slice(0, 200)}`));
+            return;
+          }
+          let messageId = null;
+          try {
+            const j = JSON.parse(raw);
+            const cand = (j && (j.id ?? (j.notification && j.notification.id))) ?? null;
+            messageId = cand == null ? null : String(cand);
+          } catch { /* accepted, no id */ }
+          resolve({ channel: 'codewatch', statusCode: code, messageId });
+        });
         res.on('error', reject);
       });
       r.on('error', reject);
@@ -1255,13 +1467,54 @@ export function makeCodewatchAnnouncer({ gateUrl, gateToken }) {
 }
 
 // Fan-out: build a single announce function from per-channel announcers.
+//
+// This is the layer that knows WHICH channel produced which result, so it is
+// the layer that reports the outcome back onto the intent through
+// `recordAnnouncement`. It still continues to the other channels after a
+// failure - one dead channel must not mute the rest - but the failure is now
+// recorded rather than only logged.
+//
+// An announcer signals its result three ways:
+//   throw                     -> 'failed', with the message
+//   {skipped: true, reason}   -> 'skipped', nothing was posted, nothing broke
+//   {messageId} | anything    -> 'posted', with the id when the channel gave one
 export function composeAnnouncers(map) {
   return async (intent) => {
-    for (const ch of intent.channels) {
+    const record = typeof intent.recordAnnouncement === 'function'
+      ? intent.recordAnnouncement
+      // Older callers (and tests) may invoke the fan-out directly with no
+      // recorder. Degrade to a no-op rather than throwing: losing the receipt
+      // is bad, refusing to announce at all is worse.
+      : () => {};
+    for (const ch of intent.channels || []) {
       const fn = map[ch];
-      if (!fn) continue;
-      try { await fn(intent); } catch (e) {
-        // log but continue to other channels
+      if (!fn) {
+        // Asked for, but nothing is wired to post it. The card definitively
+        // did not go out, and "nothing configured" needs a different fix from
+        // "the post failed", so the two are recorded differently.
+        record(ch, {
+          status: 'skipped', attemptedAt: null,
+          error: `no announcer configured for channel '${ch}'`,
+        });
+        continue;
+      }
+      record(ch, { status: 'attempting', attemptedAt: Date.now() });
+      try {
+        const res = await fn(intent);
+        if (res && res.skipped) {
+          record(ch, { status: 'skipped', error: res.reason || 'announcer skipped this channel' });
+          continue;
+        }
+        const rawId = res && (res.messageId != null ? res.messageId : res.id);
+        record(ch, {
+          // postedAt: the channel accepted it. Says nothing about a human.
+          status: 'posted',
+          postedAt: Date.now(),
+          messageId: rawId == null ? null : String(rawId),
+          error: null,
+        });
+      } catch (e) {
+        record(ch, { status: 'failed', error: e.message || String(e) });
         process.stderr.write(`[iak-mcp] announce ${ch} failed: ${e.message}\n`);
       }
     }
