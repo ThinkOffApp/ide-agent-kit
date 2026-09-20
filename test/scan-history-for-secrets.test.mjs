@@ -680,3 +680,82 @@ test('two different credentials in one blob are both reported', () => {
   assert.ok(rules.some((r) => /JWT/.test(r)));
   assert.ok(rules.some((r) => /OpenAI/.test(r)));
 });
+
+// ---------------------------------------------------------------------------
+// An encoding problem must never suppress a match.
+//
+// Regression for a false PASS this branch introduced and codexmb's security
+// review of #123 caught: after the decode-not-sniff change, the stageable gate
+// SKIPPED any file that failed strict UTF-8 decoding, so a file holding a plain
+// ASCII credential beside one stray 0xff byte reported PASS - while the
+// pre-branch baseline at 9b8aa8c reported FAIL on the same file. The fix for a
+// could-not-check-reads-as-clean bug had reintroduced the same bug one file
+// over.
+// ---------------------------------------------------------------------------
+
+test('the stageable gate still finds an ASCII credential beside an invalid byte', () => {
+  // codexmb's fixture, exactly: config.txt, ASCII dummy credential, one 0xff.
+  const dir = newRepo('iak-stage-lossy-');
+  writeFileSync(path.join(dir, 'config.txt'), Buffer.concat([
+    Buffer.from('# notes\n'),
+    Buffer.from(`api_key = "${synthetic('LOSSY')}"\n`),
+    Buffer.from([0xff]),
+    Buffer.from('\ntrailing ascii\n'),
+  ]));
+
+  const r = spawnSync('node', [stageableScanner], { cwd: dir, encoding: 'utf8', env: GIT_ENV });
+  assert.equal(r.status, 1,
+    'a stray byte must not hide a credential from the commit gate');
+  assert.match(r.stderr, /config\.txt/);
+  assert.match(r.stderr, /OpenAI-style secret key/);
+  // The operator is told the decode was lossy rather than it being swallowed.
+  assert.match(r.stderr, /not valid UTF-8/);
+  assert.ok(!`${r.stdout}${r.stderr}`.includes('TESTONLY'), 'and still no value printed');
+});
+
+test('the history scanner finds an ASCII credential in an undecodable blob AND reports it unexamined', () => {
+  const dir = newRepo('iak-hist-lossy-');
+  writeFileSync(path.join(dir, 'config.dat'), Buffer.concat([
+    Buffer.from(`api_key = "${synthetic('LOSSYBLOB')}"\n`),
+    Buffer.from([0xff, 0xfe]),
+  ]));
+  commitAll(dir, 'a credential in bytes that do not decode');
+
+  const r = runScanner([dir, '--json']);
+  assert.equal(r.status, EXIT.FOUND, `expected FOUND, got ${r.status}: ${r.stderr}`);
+  const report = JSON.parse(r.stdout);
+  // Both claims, and they are not in tension: the ASCII was read, the bytes
+  // as a whole were not.
+  assert.equal(report.findings.length, 1, 'the credential must still be found');
+  assert.equal(report.findings[0].path, 'config.dat');
+  assert.equal(report.unexamined.length, 1, 'and the blob is still not fully examined');
+  assert.equal(report.unexamined[0].reason, 'invalid-utf8');
+  assert.ok(!`${r.stdout}${r.stderr}`.includes('TESTONLY'));
+});
+
+test('a media extension cannot hide text content from the scan', () => {
+  // The filename is whatever git handed us: rev-list --objects names a blob
+  // once, so identical content committed as both notes.txt and logo.png arrives
+  // under one name, and the extension filter used to decide the blob's fate
+  // from that accident.
+  const dir = newRepo('iak-hist-alias-');
+  const body = `key = "${synthetic('ALIAS')}"\n`;
+  writeFileSync(path.join(dir, 'a-alias.png'), body); // sorts first, wins the name
+  writeFileSync(path.join(dir, 'z-real.txt'), body);
+  commitAll(dir, 'same content at two paths');
+
+  const report = JSON.parse(runScanner([dir, '--json']).stdout);
+  assert.equal(report.findings.length, 1, 'text content named .png must still be scanned');
+  assert.equal(report.examined.blobsSkippedBinaryMedia, 0);
+
+  // ...while a real binary image is still skipped quietly, not reported as a
+  // scanning failure. Otherwise every repo with an icon exits could-not-complete.
+  const imageDir = newRepo('iak-hist-realpng-');
+  writeFileSync(path.join(imageDir, 'logo.png'),
+    Buffer.from('89504e470d0a1a0a0000000d49484452ffd8ffe000104a46', 'hex'));
+  commitAll(imageDir, 'an actual image');
+  const imageReport = JSON.parse(runScanner([imageDir, '--json']).stdout);
+  assert.equal(imageReport.examined.blobsSkippedBinaryMedia, 1);
+  assert.equal(imageReport.unexamined.length, 0);
+  assert.equal(imageReport.verdict, 'clean');
+});

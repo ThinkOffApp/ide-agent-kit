@@ -38,7 +38,7 @@
 
 import { execFileSync } from 'node:child_process';
 import { readFileSync, statSync } from 'node:fs';
-import { MAX_BYTES, SKIP_EXT, decodeUtf8, matchSecrets, ruleLabels } from '../src/secret-patterns.mjs';
+import { MAX_BYTES, SKIP_EXT, decodeForScanning, matchSecrets, ruleLabels } from '../src/secret-patterns.mjs';
 
 // The pattern list, the binary-extension skip list and the size cap now live
 // in src/secret-patterns.mjs, shared with scripts/scan-history-for-secrets.mjs.
@@ -74,6 +74,11 @@ function stageableFiles() {
   return files;
 }
 
+// Files that had to be decoded lossily. Reported at the end: the ASCII scan is
+// sound, but "this was not valid UTF-8" is something the operator should see
+// rather than something the tool swallows.
+const lossyFiles = [];
+
 function scan(path) {
   if (SKIP_EXT.test(path)) return [];
   let bytes;
@@ -83,12 +88,21 @@ function scan(path) {
   } catch {
     return []; // unreadable, gone, or a directory: not our problem
   }
-  // Read as bytes and decode strictly, rather than the old "readFileSync utf8
-  // then look for a NUL". A NUL is not a proof of binary - bin/iak-pending.mjs
-  // uses one as a field separator inside 26 kB of valid JavaScript - and the
-  // lossy utf8 read could not tell a real binary from text anyway.
-  const text = decodeUtf8(bytes);
-  if (text === null) return []; // genuinely not text
+  // Read as bytes and decode for scanning. NOT "decode strictly, else skip":
+  // that is what this file did for one commit, and it printed PASS on a file
+  // holding a plain ASCII key beside a single stray 0xff byte - the baseline
+  // scanner caught that file, so the encoding check made the gate WORSE. An
+  // encoding problem must never suppress a match.
+  //
+  // Lossy is right here specifically. This scanner's job is to block a commit,
+  // not to classify encodings; credential formats are ASCII and survive a lossy
+  // decode byte for byte. Making an undecodable file exit non-zero instead was
+  // the other option, and it was wrong for THIS tool: stageable binaries are
+  // routine, blocking every commit that touches one gets the hook disabled, and
+  // a disabled scanner is worse than none. The history scanner, which reports
+  // rather than blocks, does mark such blobs could-not-complete AND scans them.
+  const { text, strict } = decodeForScanning(bytes);
+  if (!strict) lossyFiles.push(path);
   // Report WHERE and WHICH RULE, never the value itself. This output ends up
   // in CI logs and terminal scrollback, and a scanner that prints the secret it
   // found has simply moved the leak.
@@ -124,10 +138,21 @@ for (const f of stageableFiles()) {
   for (const hit of scan(f)) findings.push({ file: f, ...hit });
 }
 
+function reportLossy() {
+  if (lossyFiles.length === 0) return;
+  console.error(`NOTE: ${lossyFiles.length} stageable file(s) are not valid UTF-8 and were`);
+  console.error('      scanned as ASCII. Credential shapes are ASCII, so this finds them,');
+  console.error('      but text in another encoding would not have been read:');
+  for (const f of lossyFiles.slice(0, 10)) console.error(`        ${f}`);
+}
+
 if (findings.length === 0) {
+  reportLossy();
   console.log('PASS: nothing `git add -A` would stage looks like a credential.');
   process.exit(0);
 }
+
+reportLossy();
 
 console.error(`FAIL: ${findings.length} stageable file(s) contain credential-shaped data\n`);
 for (const f of findings) {

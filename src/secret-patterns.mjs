@@ -185,6 +185,26 @@ export function matchSecrets(text) {
 }
 
 /**
+ * Decode `buf` for SCANNING. Always returns text.
+ *
+ * Returns { text, strict }. When the bytes are valid UTF-8, `text` is exact and
+ * `strict` is true. When they are not, `text` is a lossy decode - every invalid
+ * byte becomes U+FFFD and every ASCII byte survives untouched - and `strict` is
+ * false.
+ *
+ * Why lossy rather than refusing: credential formats are ASCII, and a lossy
+ * decode preserves ASCII byte for byte. Refusing the file instead is how the
+ * stageable gate came to print PASS on a file holding a plain ASCII key next to
+ * one stray 0xff. An encoding problem must never suppress a match - the caller
+ * decides separately what a non-strict decode means for its verdict.
+ */
+export function decodeForScanning(buf) {
+  const text = decodeUtf8(buf);
+  if (text !== null) return { text, strict: true };
+  return { text: Buffer.from(buf).toString('utf8'), strict: false };
+}
+
+/**
  * Decode `buf` as text, or return null if it genuinely is not UTF-8.
  *
  * NOT a NUL check. Those are two different questions and conflating them cost

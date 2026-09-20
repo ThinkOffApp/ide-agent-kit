@@ -59,7 +59,7 @@ import path from 'node:path';
 import {
   MAX_BYTES,
   SKIP_EXT,
-  decodeUtf8,
+  decodeForScanning,
   matchSecrets,
   ruleLabels,
 } from '../src/secret-patterns.mjs';
@@ -123,18 +123,28 @@ function makeGit(repo, deadline) {
  */
 function reachableObjects(git) {
   const out = git(['rev-list', '--objects', '--all']);
-  const pathBySha = new Map();
+  const pathsBySha = new Map();
   const order = [];
   for (const line of out.split('\n')) {
     if (!line) continue;
     const sp = line.indexOf(' ');
     if (sp === -1) continue; // commit or tag object: no path
     const sha = line.slice(0, sp);
-    if (pathBySha.has(sha)) continue;
-    pathBySha.set(sha, line.slice(sp + 1));
-    order.push(sha);
+    const blobPath = line.slice(sp + 1);
+    // One name per object is ALL git gives us here: rev-list --objects emits a
+    // blob once, under whichever path it met first. Identical content living at
+    // both logo.png and notes.txt arrives as a single sha named logo.png, and
+    // no amount of collecting can recover the other name from this output.
+    //
+    // That is why the extension filter below no longer decides anything on its
+    // own: a name we were handed by chance must not be able to exclude content
+    // from the scan. The content decides.
+    if (!pathsBySha.has(sha)) {
+      pathsBySha.set(sha, blobPath);
+      order.push(sha);
+    }
   }
-  return { pathBySha, order };
+  return { pathsBySha, order };
 }
 
 /** Split [{sha,size}] into chunks of roughly `budget` bytes for cat-file --batch. */
@@ -197,8 +207,16 @@ function readBatch(git, shas, onBlob) {
  * skip as an error, which is the worst of both answers.
  */
 function decodeBlob(body) {
-  const text = decodeUtf8(body);
-  return text === null ? { reason: 'invalid-utf8' } : { text };
+  const { text, strict } = decodeForScanning(body);
+  // A blob that does not decode is BOTH scanned and reported unexamined.
+  //
+  // Those are not contradictory, they are two different claims: the lossy
+  // decode preserves every ASCII byte, so an ASCII credential is still found -
+  // refusing to look was how the sibling scanner came to print PASS on a file
+  // with a key next to one stray 0xff - while "we could not read these bytes as
+  // text" stays true and keeps the verdict off `clean`. An encoding problem
+  // must never suppress a match, and it must never be silently forgiven either.
+  return strict ? { text } : { text, reason: 'invalid-utf8' };
 }
 
 /**
@@ -275,7 +293,7 @@ export function scanRepo(opts) {
     report.examined.refs = git(['for-each-ref', '--format=%(refname)'])
       .split('\n').filter(Boolean).length;
 
-    const { pathBySha, order } = reachableObjects(git);
+    const { pathsBySha, order } = reachableObjects(git);
 
     // One --batch-check pass gives type and size for everything, so the
     // expensive --batch read only ever asks for blobs we mean to scan.
@@ -285,18 +303,20 @@ export function scanRepo(opts) {
       if (!line) continue;
       const [sha, type, sizeStr] = line.split(' ');
       if (type !== 'blob') continue;
-      blobs.push({ sha, size: Number(sizeStr) || 0, path: pathBySha.get(sha) ?? '(unknown path)' });
+      blobs.push({ sha, size: Number(sizeStr) || 0, path: pathsBySha.get(sha) ?? '(unknown path)' });
     }
     report.examined.blobsReachable = blobs.length;
 
     const toRead = [];
     for (const blob of blobs) {
-      if (SKIP_EXT.test(blob.path)) {
-        report.examined.blobsSkippedBinaryMedia += 1;
-        continue;
-      }
+      // A media extension is a hint about what the bytes probably are, not a
+      // licence to skip reading them. It only decides the OUTCOME for a blob we
+      // could not decode anyway (a real .png is quietly skipped rather than
+      // counted as could-not-complete). Text that happens to be named .png is
+      // read and scanned like anything else.
       if (blob.size > opts.maxBytes) {
-        report.unexamined.push({ path: blob.path, blob: blob.sha, reason: 'over-size-cap' });
+        if (SKIP_EXT.test(blob.path)) report.examined.blobsSkippedBinaryMedia += 1;
+        else report.unexamined.push({ path: blob.path, blob: blob.sha, reason: 'over-size-cap' });
         continue;
       }
       toRead.push(blob);
@@ -309,11 +329,17 @@ export function scanRepo(opts) {
         if (!blob) return;
         const { text, reason } = decodeBlob(body);
         if (reason) {
+          // Undecodable AND named like binary media: an ordinary image, skipped
+          // by policy and counted, not dressed up as a scanning failure.
+          if (SKIP_EXT.test(blob.path)) {
+            report.examined.blobsSkippedBinaryMedia += 1;
+            return;
+          }
           report.unexamined.push({ path: blob.path, blob: sha, reason });
-          return;
+        } else {
+          report.examined.blobsExamined += 1;
+          report.examined.bytesExamined += body.length;
         }
-        report.examined.blobsExamined += 1;
-        report.examined.bytesExamined += body.length;
         const hits = matchSecrets(text);
         if (hits.length > 0) {
           // One finding per rule that fired, not just the first: a rule high in
