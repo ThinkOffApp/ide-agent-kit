@@ -5,6 +5,7 @@ import { readFileSync, writeFileSync, appendFileSync, existsSync } from 'node:fs
 import { randomUUID } from 'node:crypto';
 import { createReceipt, appendReceipt } from './receipt.mjs';
 import { canSend, markSent } from './rate-limiter.mjs';
+import { shouldSuppressNudge } from './intent.mjs';
 import { resolveSelfHandle, isSelfSender } from './common/handles.mjs';
 
 // Ack-only messages are low-value and cause loops. Filter them out from automation posts.
@@ -145,7 +146,15 @@ function matchesRule(msg, rule) {
 /**
  * Execute a rule action and return a receipt.
  */
-function executeAction(action, msg, apiKey, config) {
+// `muted` is petrus's emergency-only mode, resolved once per poll cycle by the
+// caller (shouldSuppressNudge is async; this function is not).
+//
+// The carve-out is the point, and it is the same one the room and DM pollers
+// already make: HIS OWN MESSAGES ALWAYS GET AN ANSWER. Emergency-only exists to
+// silence agent chatter, not to make the room stop answering the person typing
+// in it -- a withheld reply to a command he just sent is indistinguishable from
+// a crash, which is a failure this repo keeps rediscovering.
+function executeAction(action, msg, apiKey, config, muted = false) {
   const startedAt = new Date().toISOString();
   if (!action) {
     return createReceipt({
@@ -166,6 +175,18 @@ function executeAction(action, msg, apiKey, config) {
   if (action.type === 'post') {
     const targetRoom = sub(action.room) || room;
     const body = sub(action.body);
+    const ownerHandle = String(config?.poller?.owner_handle || 'petrus').replace(/^@+/, '').toLowerCase();
+    const sender = String(msg.user?.handle || msg.from || msg.sender || '').replace(/^@+/, '').toLowerCase();
+    if (muted && sender !== ownerHandle) {
+      console.log(`  emergency-only: skipping self-initiated post to ${targetRoom} (trigger from ${sender || '?'})`);
+      return createReceipt({
+        actor: { name: config?.poller?.handle || 'ide-agent-kit', kind: 'automation' },
+        action: `post to ${targetRoom}`,
+        status: 'suppressed',
+        notes: 'emergency-only mode: agent-triggered post withheld',
+        startedAt,
+      });
+    }
     const ok = postMessage(targetRoom, body, apiKey, config);
     return createReceipt({
       actor: { name: config?.poller?.handle || 'ide-agent-kit', kind: 'automation' },
@@ -278,6 +299,12 @@ export async function startRoomAutomation({ rooms, apiKey, handle, interval, con
   async function poll() {
     let actionsRun = 0;
     const now = Date.now();
+    // Resolved ONCE per cycle, not per message: shouldSuppressNudge hits the
+    // intent API, and doing it per message would turn one poll into dozens of
+    // calls. Fails open (false) on any error, same as the pollers -- a broken
+    // presence lookup must never silence the room.
+    const muted = await shouldSuppressNudge(config);
+    if (muted) console.log('  emergency-only: agent-triggered posts withheld; his own still answered');
 
     for (const room of rooms) {
       const msgs = fetchRoomMessages(room, apiKey);
@@ -304,7 +331,7 @@ export async function startRoomAutomation({ rooms, apiKey, handle, interval, con
           }
 
           console.log(`  rule "${rule.name}" matched → ${rule.action?.type || '?'}`);
-          const receipt = executeAction(rule.action, m, apiKey, config);
+          const receipt = executeAction(rule.action, m, apiKey, config, muted);
           appendReceipt(receiptPath, receipt);
           lastFired.set(rule.name, now);
           actionsRun++;
@@ -340,3 +367,7 @@ export async function startRoomAutomation({ rooms, apiKey, handle, interval, con
 
   return timer;
 }
+
+// Exported for tests only: the mute carve-out is the kind of logic that must
+// be provable, not eyeballed, because both of its failure modes are silent.
+export { executeAction as executeActionForTest };
