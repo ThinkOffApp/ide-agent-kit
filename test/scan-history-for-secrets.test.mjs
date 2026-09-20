@@ -630,9 +630,17 @@ test('an expired JWT is reported and distinguished from a live one', () => {
   // conversation, not a non-event.
   assert.equal(report.findings.length, 3);
   const human = runScanner([dir]);
-  assert.match(human.stderr, /EXPIRED/);
-  assert.match(human.stderr, /LIVE until/);
-  assert.match(human.stderr, /NO EXPIRY CLAIM/);
+  // The report may describe what the token CLAIMS, never what it IS. We never
+  // asked an issuer anything, so validity and revocation are both unknown.
+  assert.match(human.stderr, /expiry claim [^\n]*\(past\)/);
+  assert.match(human.stderr, /expiry claim [^\n]*\(in \d+ days\)/);
+  assert.match(human.stderr, /no expiry claim; validity and revocation unverified/);
+
+  // The wording this replaced asserted facts the scanner cannot establish:
+  // "LIVE until" read as proof the token still works, and "does not stop
+  // working" as proof it never will. Assert they cannot come back.
+  assert.doesNotMatch(human.stderr, /live until/i);
+  assert.doesNotMatch(human.stderr, /does not stop working/i);
 });
 
 test('a malformed eyJ-prefixed string does not crash the scanner', () => {
