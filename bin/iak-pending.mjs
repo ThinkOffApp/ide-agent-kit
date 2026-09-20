@@ -42,7 +42,7 @@
 // only to hosts that helper already trusts. It is never printed, never logged
 // and never placed in argv.
 
-import { readFileSync, writeFileSync, renameSync, unlinkSync, mkdirSync, realpathSync } from 'node:fs';
+import { readFileSync, writeFileSync, renameSync, unlinkSync, mkdirSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -50,6 +50,7 @@ import { fileURLToPath } from 'node:url';
 import { loadConfig } from '../src/config.mjs';
 import { gateAuthHeadersFor } from '../src/mcp-server.mjs';
 import { lanIpReason } from '../packages/user-intent-kit/src/model-capacity.js';
+import { isMainModule } from '../src/common/entrypoint.mjs';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 const DEFAULT_TIMEOUT_MS = 5000;
@@ -773,9 +774,11 @@ export async function main(argv = process.argv.slice(2), { env = process.env, ou
   return code;
 }
 
+// The comparison itself lives in src/common/entrypoint.mjs. It is correct here
+// too, but one implementation is the point: the idiom has been got wrong three
+// times in this repo, and a copy that is right today is a copy that can drift.
 function invokedDirectly() {
-  try { return !!process.argv[1] && realpathSync(process.argv[1]) === fileURLToPath(import.meta.url); }
-  catch { return false; }
+  return isMainModule(import.meta.url);
 }
 
 if (invokedDirectly()) {

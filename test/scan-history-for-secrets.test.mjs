@@ -443,17 +443,25 @@ test('the pre-commit secret gate fires through a symlinked path', () => {
   assert.ok(!`${linked.stdout}${linked.stderr}`.includes('TESTONLY'), 'and it still prints no value');
 });
 
-test('no entry point hand-rolls the main-module comparison', () => {
-  // We found this bug three times in one day by tripping over instances one at
-  // a time. This is the sweep, kept.
+test('every entry point uses the shared isMainModule(), not its own comparison', () => {
+  // POLICY, NOT DEFECT. This asserts that the comparison exists in one place.
+  // It does NOT establish that a file matching here is broken: the correct
+  // realpath idiom mentions process.argv[1] and import.meta.url in the same
+  // breath, exactly as the broken ones do, so this check cannot tell them
+  // apart and must not claim to.
   //
-  // The rule is PROXIMITY, not "the file mentions isMainModule somewhere": a
-  // first version of this test only checked the latter, and it passed happily
-  // when the guard was reverted to the broken comparison while the (now unused)
-  // import stayed behind. A check that cannot fail is not a check.
+  // An earlier version's failure message said the matched files "no-op through
+  // a symlink". Two files from other PRs matched, both used the correct idiom,
+  // and both were measured behaving identically through a symlink - so the
+  // message told their authors their working code was broken. That is how a
+  // useful test gets deleted by the next person who hits it. A false alarm that
+  // overstates its finding erodes trust the same way a false pass does.
   //
-  // The correct idiom never names process.argv[1] at the call site - the only
-  // place that does is the shared helper.
+  // What makes the policy worth enforcing anyway: this repo got the idiom wrong
+  // three times in three files in one day, and a copy that is correct today is
+  // a copy that can drift tomorrow. The BEHAVIOUR is proven separately, by
+  // 'isMainModule resolves symlinks on both sides' and by the two symlink
+  // parity tests above.
   const helper = path.join('src', 'common', 'entrypoint.mjs'); // the one implementation
   const offenders = [];
   for (const dir of ['bin', 'scripts', 'src']) {
@@ -480,7 +488,13 @@ test('no entry point hand-rolls the main-module comparison', () => {
     }
   }
   assert.deepEqual(offenders, [],
-    `these compare argv[1] against import.meta.url themselves, so they no-op through a symlink: ${offenders.join(', ')}`);
+    'these compare process.argv[1] against import.meta.url themselves instead of calling '
+    + `isMainModule() from ${helper}: ${offenders.join(', ')}. `
+    + 'That is a drift risk, NOT a finding that they are broken - a hand-rolled copy may well '
+    + 'be correct today. Route it through the shared helper so there is one implementation to '
+    + 'keep correct. (If the copy is NOT realpathing both sides, it is also an active bug: '
+    + 'import.meta.url is realpath-resolved and process.argv[1] is not, so it silently no-ops '
+    + 'through a symlink, and macOS /tmp is one.)');
 });
 
 test('the scanner CLI has no main-module guard at all', () => {
