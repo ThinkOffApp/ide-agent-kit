@@ -712,6 +712,26 @@ and the one-word `announceState` summary:
 successfully asked about; `?announce=posted` lists the ones genuinely waiting on
 a human. An unknown value is a 400, not an empty list.
 
+Every intent also carries `announceSummary`, the one sentence each surface
+shows a person - the HTML queue, the `/intents` payload and the MCP
+`list_intents` output all render this same string, so their wording cannot
+drift apart:
+
+| situation | `announceSummary` |
+|---|---|
+| one channel accepted it | `posted to 1 channel` |
+| one accepted, one reported nothing | `posted to 1 channel, unknown for 1` |
+| one accepted, one observed failing | `posted to 1 channel, failed for 1` |
+| the only channel failed | `failed for 1 channel` |
+| nothing configured to send it | `not sent for 1 channel` |
+| no outcome was reported | `unknown for 1 channel` |
+| an old record | `unknown: this intent predates announcement records` |
+
+Note the second row. It is deliberately **not** "posted to 1 of 2 channels":
+that reads as though the second channel definitely did not arrive, and when its
+outcome is `unreported` nobody knows whether it did. The longer sentence is the
+only true one.
+
 `unreported` is load-bearing. An announcer that resolves without reporting
 anything is recorded as unknown, never as a post; and an announce step that
 fails without observing a particular channel leaves that channel unknown, with

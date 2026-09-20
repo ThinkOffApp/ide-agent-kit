@@ -681,7 +681,7 @@ export async function runMcpServer({ configPath } = {}) {
       },
       {
         name: 'list_intents',
-        description: 'List every confirmation intent the server knows about (pending, decided, recent). Each row carries `announceState` plus a per-channel `announcements` map saying whether the asking card was actually POSTED (accepted by the channel), never posted, or failed - so a pending intent nobody was asked about is distinguishable from one waiting on a human. `posted` means the channel accepted the message; it is not evidence anyone saw it. `unknown` means the intent predates this record.',
+        description: 'List every confirmation intent the server knows about (pending, decided, recent). Each row carries `announceSummary` (the human-readable line), `announceState` and a per-channel `announcements` map, so a pending intent nobody was successfully asked about is distinguishable from one waiting on a human. `posted` means the channel ACCEPTED the message and is not evidence anyone saw it; `failed` and `skipped` mean it is known not to have gone out; `unreported` and `attempting` mean the outcome is UNKNOWN - do not report those as delivered or as failed; `unknown` means the intent predates this record. A mixed result is worded "posted to 1 channel, unknown for 1", never "posted to 1 of 2".',
         inputSchema: { type: 'object', properties: {} },
       },
       {

@@ -16,6 +16,7 @@ import {
   composeAnnouncers,
   makeCodewatchAnnouncer,
   announceStateOf,
+  announceSummaryLine,
   ANNOUNCE_STATES,
   defaultCallbackBase,
   _resetForTests,
@@ -965,4 +966,89 @@ test('failed still means observed: a channel whose own call rejects is a failure
   const i = getIntent(id);
   assert.equal(i.announceState, 'failed');
   assert.match(i.announcements.groupmind.error, /402/);
+});
+
+
+// --- the wording a human actually reads -------------------------------------
+//
+// The three states only pay off if the SURFACE preserves them. The trap is a
+// summary that says "posted to 1 of 2 channels": it reads as though the second
+// channel definitely did not arrive, which is the confident-and-wrong version
+// of exactly the inference this PR removes from the logic. These tests pin the
+// strings so the wording cannot quietly regress to the confident one.
+
+test('the line a human reads names an unknown channel as unknown, not as not-posted', async () => {
+  _resetForTests();
+  const id = await createIntent({
+    prompt: 'two channels, one of them silent',
+    channels: ['groupmind', 'codewatch'],
+    announce: composeAnnouncers({
+      groupmind: async () => ({ messageId: 'gm-5' }),
+      codewatch: async () => { /* reports nothing: nobody knows */ },
+    }),
+  });
+  const i = getIntent(id);
+  assert.equal(i.announcements.groupmind.status, 'posted');
+  assert.equal(i.announcements.codewatch.status, 'unreported');
+  assert.equal(i.announceState, 'partial');
+
+  // THE pinned string. Longer than "posted to 1 of 2 channels" and the only
+  // version that is true.
+  assert.equal(i.announceSummary, 'posted to 1 channel, unknown for 1');
+  assert.doesNotMatch(i.announceSummary, /of 2/, 'never "1 of 2", which implies the other one did not arrive');
+  assert.doesNotMatch(i.announceSummary, /not posted|failed|did not/, 'an unknown channel is not a failed one');
+  assert.doesNotMatch(i.announceSummary, /deliver|seen|read/, 'and a posted one is not a seen one');
+});
+
+test('every announcement state has a rendered line, and none of them overclaims', () => {
+  const withStatuses = (...statuses) => ({
+    announcements: Object.fromEntries(
+      statuses.map((st, n) => [`ch${n}`, { channel: `ch${n}`, status: st, postedAt: null, messageId: null, error: null }]),
+    ),
+  });
+  const cases = [
+    [withStatuses('posted'), 'posted', 'posted to 1 channel'],
+    [withStatuses('posted', 'posted'), 'posted', 'posted to 2 channels'],
+    [withStatuses('posted', 'unreported'), 'partial', 'posted to 1 channel, unknown for 1'],
+    [withStatuses('posted', 'attempting'), 'partial', 'posted to 1 channel, unknown for 1'],
+    [withStatuses('posted', 'failed'), 'partial', 'posted to 1 channel, failed for 1'],
+    [withStatuses('posted', 'failed', 'unreported'), 'partial', 'posted to 1 channel, failed for 1, unknown for 1'],
+    [withStatuses('posted', 'skipped'), 'partial', 'posted to 1 channel, not sent for 1'],
+    [withStatuses('failed'), 'failed', 'failed for 1 channel'],
+    [withStatuses('failed', 'failed'), 'failed', 'failed for 2 channels'],
+    [withStatuses('unreported'), 'unreported', 'unknown for 1 channel'],
+    [withStatuses('attempting'), 'attempting', 'unknown for 1 channel'],
+    [withStatuses('skipped'), 'skipped', 'not sent for 1 channel'],
+    [withStatuses(), 'none', 'no channels were asked'],
+    [{}, 'unknown', 'unknown: this intent predates announcement records'],
+  ];
+  for (const [intent, state, line] of cases) {
+    assert.equal(announceStateOf(intent), state, `state for ${line}`);
+    assert.equal(announceSummaryLine(intent), line);
+  }
+  // Nothing that is not an OBSERVED non-delivery may be worded as one.
+  for (const [intent, state, line] of cases) {
+    if (state === 'failed' || state === 'skipped') continue;
+    assert.doesNotMatch(line, /^(failed|not sent)/, `"${line}" claims a non-delivery nobody observed`);
+  }
+  // And the two that ARE observed say so plainly rather than hiding in "unknown".
+  assert.match(announceSummaryLine(withStatuses('failed')), /^failed/);
+  assert.match(announceSummaryLine(withStatuses('skipped')), /^not sent/);
+});
+
+test('the HTML queue renders the server wording, and never calls an unknown outcome "not posted"', async () => {
+  // The page used to build its own sentence: `'card not posted: ' + state`,
+  // which told the reader an unreported or unknown channel had definitely not
+  // arrived. It now renders announceSummary, so the page cannot be more
+  // confident than the record.
+  const server = startConfirmationsServer({ port: 0, host: '127.0.0.1' });
+  await new Promise((r) => server.listening ? r() : server.once('listening', r));
+  try {
+    const html = await (await fetch(`http://127.0.0.1:${server.address().port}/`)).text();
+    assert.match(html, /announceSummary/, 'the page renders the shared sentence');
+    assert.doesNotMatch(html, /not posted/, 'no blanket "not posted" wording for every non-posted state');
+    assert.doesNotMatch(html, /delivered|was seen/, 'and nothing claims delivery or a reader');
+  } finally {
+    server.close();
+  }
 });

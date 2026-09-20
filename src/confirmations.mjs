@@ -212,10 +212,57 @@ export function announceStateOf(intent) {
   const has = (s) => statuses.includes(s);
   if (statuses.every((v) => v === 'posted')) return 'posted';
   if (has('failed')) return has('posted') ? 'partial' : 'failed';
-  if (has('attempting')) return 'attempting';
+  // Any mix that includes a real post is 'partial'. Checked BEFORE the
+  // unsettled states, because returning 'attempting' for posted+attempting
+  // hides the channel that demonstrably landed - the summary word has to
+  // cover every channel, not just the worst one.
   if (has('posted')) return 'partial';
+  if (has('attempting')) return 'attempting';
   if (statuses.every((v) => v === 'skipped')) return 'skipped';
   return 'unreported';
+}
+
+// THE ONE HUMAN-READABLE SENTENCE. Every surface that shows a person what
+// happened to the announcement renders this string: the HTML queue, the
+// /intents payload, the MCP list_intents output. One function, so the wording
+// cannot drift apart between them.
+//
+// The trap it exists to avoid: "posted to 1 of 2 channels" reads as though the
+// second channel definitely did not arrive. When that second channel is
+// 'unreported' or 'attempting', nobody knows whether it arrived, and the only
+// true sentence says so. Longer is fine. Confident and wrong is not. The same
+// rule the logic follows - an absence is not evidence in either direction -
+// has to survive into the prose, or the three states were pointless.
+//
+// So: 'failed' and 'skipped' are countable as "did not go out" because both
+// were OBSERVED. 'unreported' and 'attempting' are counted separately as
+// unknown, and are never folded into either the posted side or the failed side.
+export function announceSummaryLine(intent) {
+  const state = announceStateOf(intent);
+  if (state === 'unknown') return 'unknown: this intent predates announcement records';
+  const a = (intent && intent.announcements) || {};
+  const entries = Object.values(a);
+  if (entries.length === 0) return 'no channels were asked';
+  const count = (...want) => entries.filter((r) => want.includes((r && r.status) || '')).length;
+  const posted = count('posted');
+  const failed = count('failed');
+  const unknown = count('unreported', 'attempting');
+  const notSent = count('skipped');
+  const parts = [];
+  // The first clause carries the unit ("posted to 1 channel"); the rest are
+  // bare counts ("unknown for 1"), so the sentence stays short enough for a
+  // watch face without merging any two groups.
+  const add = (label, n) => {
+    if (!n) return;
+    parts.push(parts.length === 0 ? `${label} ${n} ${n === 1 ? 'channel' : 'channels'}` : `${label} ${n}`);
+  };
+  add('posted to', posted);
+  add('failed for', failed);
+  // Never merged with either line above. This is the whole point.
+  add('unknown for', unknown);
+  add('not sent for', notSent);
+  if (parts.length === 0) return 'no channels were asked';
+  return parts.join(', ');
 }
 
 /** Public view of the announcement records: a copy, so a caller cannot edit
@@ -241,6 +288,10 @@ export function listIntents() {
     // summary. This is what makes "pending because nobody answered yet"
     // distinguishable from "pending because nothing was ever sent".
     announceState: announceStateOf(i),
+    // The sentence a person reads. Shipped in the payload rather than
+    // re-worded by each client, so the phone, the HTML queue and the MCP
+    // output cannot disagree about what is known.
+    announceSummary: announceSummaryLine(i),
     announcements: announcementsView(i),
   }));
 }
@@ -259,6 +310,7 @@ export function getIntent(id) {
     decidedAt: i.decidedAt,
     decision: i.decision,
     announceState: announceStateOf(i),
+    announceSummary: announceSummaryLine(i),
     announcements: announcementsView(i),
   };
 }
@@ -1249,7 +1301,10 @@ function renderIntentsHtml() {
     let intents = [];
     try { intents = await (await fetch('/intents', { cache: 'no-store' })).json(); } catch { return; }
     intents.sort((a, b) => b.createdAt - a.createdAt);
-    const sig = intents.map(i => i.id + i.status + (i.announceState || '')).join('|');
+    // The summary is part of the signature: within one state the wording can
+    // still change (a second channel reporting, say), and a stale sentence is
+    // exactly the kind of quiet overclaim this page is meant not to make.
+    const sig = intents.map(i => i.id + i.status + (i.announceState || '') + (i.announceSummary || '')).join('|');
     if (sig === lastSig) return;
     lastSig = sig;
     list.innerHTML = '';
@@ -1267,10 +1322,20 @@ function renderIntentsHtml() {
       // never successfully announced is not the same thing as one waiting on
       // a person, and the page used to render them identically.
       const ann = i.announceState || 'unknown';
-      const annClass = ann === 'posted' ? 'posted' : (ann === 'failed' || ann === 'partial' ? 'bad' : 'iffy');
-      // "posted", never "delivered" or "seen": the daemon knows the room
-      // accepted the message and nothing more than that.
-      const annText = ann === 'posted' ? 'card posted' : 'card not posted: ' + ann;
+      // Red only where the card is KNOWN not to have reached anyone (observed
+      // failure, or nothing configured to send it). Everything unknown is
+      // amber, including a partial: amber says "go and look", red would say
+      // "it did not arrive", and that is a claim nobody here can make.
+      const annClass = ann === 'posted' ? 'posted' : (ann === 'failed' || ann === 'skipped' ? 'bad' : 'iffy');
+      // The sentence comes from the server (announceSummary) so this page
+      // cannot word it more confidently than the record supports. It used to
+      // build its own, which labelled EVERY non-posted state as a definite
+      // non-delivery and so told the reader that an unknown channel had
+      // certainly not arrived.
+      // "posted" is the strongest word this page may use: the daemon knows
+      // the channel accepted the message, and nothing beyond that about
+      // whether it reached or was read by a person.
+      const annText = 'announcement: ' + (i.announceSummary || 'unknown');
       el.innerHTML =
         '<div class="prompt"></div>' +
         '<div class="ann ' + annClass + '"></div>' +
