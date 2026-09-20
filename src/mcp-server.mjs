@@ -35,6 +35,7 @@ import { nudgeTmux } from './common/notify.mjs';
 import { tmuxRun } from './ide/tmux-runner.mjs';
 import { loadConfig } from './config.mjs';
 import { assertRoomVoice } from './responder-lock.mjs';
+import { isMainModule } from './common/entrypoint.mjs';
 import { defaultCallbackBase,
   createIntent,
   decideIntent,
@@ -1047,7 +1048,7 @@ export async function runMcpServer({ configPath } = {}) {
 }
 
 // Run directly when invoked as a script.
-if (import.meta.url === `file://${process.argv[1]}`) {
+if (isMainModule(import.meta.url)) {
   // Allow --config <path> on the command line (mirrors other CLI subcommands).
   const argv = process.argv.slice(2);
   let configPath;

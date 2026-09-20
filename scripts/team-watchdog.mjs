@@ -103,9 +103,9 @@ let ROSTER = [];
 // State persists to a file so it survives one-shot (StartInterval) runs and
 // sleep/wake. In-process setTimeout pauses when the Mac sleeps, so the watchdog
 // runs as a launchd StartInterval one-shot (ONCE=1) instead of a long loop.
-import { readFileSync, writeFileSync, realpathSync } from 'node:fs';
+import { readFileSync, writeFileSync } from 'node:fs';
 import { execFile } from 'node:child_process';
-import { fileURLToPath } from 'node:url';
+import { isMainModule } from '../src/common/entrypoint.mjs';
 const STATE_FILE = '/tmp/team-watchdog-state.json';
 let state = {};
 function loadState() { try { return JSON.parse(readFileSync(STATE_FILE, 'utf8')); } catch { return {}; } }
@@ -240,8 +240,4 @@ async function run() {
 // Only run the loop when executed directly (node scripts/team-watchdog.mjs),
 // never when imported by a test. Keeping import side-effect-free is what lets
 // the pure helpers (loadRoster, lastSeen, ageMinutes, isStale) be unit-tested.
-const invokedDirectly = (() => {
-  try { return !!process.argv[1] && realpathSync(process.argv[1]) === fileURLToPath(import.meta.url); }
-  catch { return false; }
-})();
-if (invokedDirectly) run();
+if (isMainModule(import.meta.url)) run();

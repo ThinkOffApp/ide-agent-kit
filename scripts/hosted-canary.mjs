@@ -33,8 +33,8 @@
 // Exit 0 healthy, 1 unhealthy, 2 misconfigured. Run it from cron or launchd.
 
 import { existsSync, writeFileSync, unlinkSync, readFileSync } from 'node:fs';
-import { pathToFileURL } from 'node:url';
 import { randomUUID } from 'node:crypto';
+import { isMainModule } from '../src/common/entrypoint.mjs';
 
 /** The message we post. A nonce, so reading it back proves OUR write landed
  *  rather than finding someone else's old row. */
@@ -162,6 +162,6 @@ async function main() {
   process.exit(result.ok ? 0 : 1);
 }
 
-if (import.meta.url === pathToFileURL(process.argv[1] || '').href) {
+if (isMainModule(import.meta.url)) {
   main();
 }

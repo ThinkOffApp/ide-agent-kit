@@ -137,7 +137,9 @@ export async function runAgent(cfg) {
 }
 
 // CLI: config from IAK dogfood config + env overrides.
-if (import.meta.url === `file://${process.argv[1]}`) {
+import { isMainModule } from '../src/common/entrypoint.mjs';
+
+if (isMainModule(import.meta.url)) {
   const { readFileSync } = await import('node:fs');
   const cfgPath = process.env.IAK_CONFIG || '/Users/petrus/ide-agent-kit/config/dogfood.json';
   let base = {};

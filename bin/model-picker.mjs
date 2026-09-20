@@ -104,7 +104,6 @@ import { parseArgs } from 'node:util';
 import { homedir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { realpathSync } from 'node:fs';
 import { readFile, writeFile, mkdir, rename } from 'node:fs/promises';
 
 import {
@@ -118,6 +117,7 @@ import {
 // That was fixed once already in PR #52; hand-rolling around the helper that
 // exists to prevent it would re-open it.
 import { gateAuthHeadersFor } from '../src/mcp-server.mjs';
+import { isMainModule } from '../src/common/entrypoint.mjs';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -752,15 +752,14 @@ export async function main(argv = process.argv.slice(2), {
   }
 }
 
-// Only when run directly. realpathSync on both sides because import.meta.url
-// is already realpath-resolved and process.argv[1] is not: a `~/bin` symlink
-// (the documented way to put this on PATH) or macOS /tmp (itself a symlink)
-// made the comparison false, so main() never ran and the program exited 0 -
-// a code this file documents as "a selection was applied".
-const invokedDirectly = (() => {
-  try { return !!process.argv[1] && realpathSync(process.argv[1]) === fileURLToPath(import.meta.url); }
-  catch { return false; }
-})();
+// Only when run directly. The comparison lives in src/common/entrypoint.mjs,
+// which realpaths both sides because import.meta.url is already resolved and
+// process.argv[1] is not: a `~/bin` symlink (the documented way to put this on
+// PATH) or macOS /tmp (itself a symlink) made a naive comparison false, so
+// main() never ran and the program exited 0 - a code this file documents as
+// "a selection was applied". One implementation, because this repo has got the
+// idiom wrong three times in three different files.
+const invokedDirectly = isMainModule(import.meta.url);
 if (invokedDirectly) {
   process.exit(await main());
 }

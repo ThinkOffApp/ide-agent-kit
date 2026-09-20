@@ -38,6 +38,7 @@ import { appendFileSync, mkdirSync, readFileSync, existsSync } from 'node:fs';
 import { randomUUID, timingSafeEqual, createHash } from 'node:crypto';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
+import { isMainModule } from '../src/common/entrypoint.mjs';
 
 const DEFAULT_PORT = 18790;
 const DEFAULT_STORE = join(homedir(), '.iak', 'local-relay.jsonl');
@@ -209,7 +210,7 @@ export function startRelay(opts = {}) {
 }
 
 // CLI entry
-if (import.meta.url === `file://${process.argv[1]}`) {
+if (isMainModule(import.meta.url)) {
   const arg = (name) => {
     const i = process.argv.indexOf(name);
     return i !== -1 ? process.argv[i + 1] : undefined;

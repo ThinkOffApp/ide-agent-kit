@@ -18,7 +18,7 @@
 //      supervisor loop - codex review of PR #87).
 import { existsSync, statSync, readFileSync, writeFileSync, unlinkSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
-import { pathToFileURL } from 'node:url';
+import { isMainModule } from '../src/common/entrypoint.mjs';
 
 export function heartbeatAge(path, now = Date.now()) {
   if (!existsSync(path)) return Infinity;
@@ -136,6 +136,6 @@ async function main() {
   }
 }
 
-if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+if (isMainModule(import.meta.url)) {
   await main();
 }
