@@ -46,6 +46,11 @@ import {
   parseNvidiaTotalMib,
   parseVmStatAvailable,
   largestFromPs,
+  PARAM_SOURCES,
+  paramsFromName,
+  paramsFromSafetensorsHeader,
+  paramsFromGgufBuffer,
+  readModelParams,
   ModelAvailabilityProbe,
 } from '../src/model-availability.js';
 
@@ -61,6 +66,49 @@ const MACBOOK = Object.freeze({
   model: 75.3 * GiB,         // ddalcu/Qwen3.8-Flash-Next-MLX-Serve-mixed-4-8bit
   largestConsumer: 17.2 * GiB, // a colima VM
 });
+
+/** Installed RAM on that machine: 128 GiB, which the fleet prints as 137.4 GB. */
+const INSTALLED = 137438953472;
+
+/**
+ * A vm_stat fixture built from the second set of numbers measured on the same
+ * MacBook: page size 16384, 45.9 GiB in use, 80.9 GiB reclaimable. The page
+ * counts below are exactly those totals.
+ *
+ * NOTE, and it is an open question rather than a resolved one: the two
+ * fixtures in this file were handed over an hour apart and do not describe the
+ * same moment - MACBOOK.available says 45.9 GiB free plus reclaimable, this
+ * one says 45.9 GiB IN USE and 80.9 GiB reclaimable. Both are kept, deliberately
+ * unaveraged: the first pins the fits-if-freed arithmetic that was signed off,
+ * this one pins the parser.
+ */
+function vmStat({
+  pageSize = 16384,
+  free = 2_000_000,
+  speculative = 3_301_862,
+  purgeable = 0,
+  active = 2_000_000,
+  inactive = 500_000,
+  wired = 300_000,
+  compressor = 208_102,
+  labels = {},
+} = {}) {
+  const l = {
+    free: 'Pages free', speculative: 'Pages speculative', purgeable: 'Pages purgeable',
+    active: 'Pages active', inactive: 'Pages inactive', wired: 'Pages wired down',
+    compressor: 'Pages occupied by compressor', ...labels,
+  };
+  return [
+    pageSize === null ? 'Mach Virtual Memory Statistics:' : `Mach Virtual Memory Statistics: (page size of ${pageSize} bytes)`,
+    `${l.free}: ${free}.`,
+    `${l.active}: ${active}.`,
+    `${l.inactive}: ${inactive}.`,
+    `${l.speculative}: ${speculative}.`,
+    `${l.wired}: ${wired}.`,
+    `${l.purgeable}: ${purgeable}.`,
+    `${l.compressor}: ${compressor}.`,
+  ].join('\n');
+}
 
 // --- a real cache on disk --------------------------------------------------
 
@@ -268,38 +316,95 @@ test('a model too large for the empty box is too-large, not fits-if-freed', () =
 // --- the live headroom instrument ------------------------------------------
 
 test('available memory is reclaimable pages, not free pages and not memory_pressure', () => {
-  const vmStat = [
-    'Mach Virtual Memory Statistics: (page size of 16384 bytes)',
-    'Pages free:                                  1464197.',
-    'Pages active:                                2126026.',
-    'Pages inactive:                              1295757.',
-    'Pages speculative:                           2334709.',
-    'Pages wired down:                             465156.',
-    'Pages purgeable:                               46008.',
-  ].join('\n');
+  const bytes = parseVmStatAvailable(vmStat(), INSTALLED);
 
-  const bytes = parseVmStatAvailable(vmStat);
-  // free + speculative + purgeable. Reclaimable by the kernel, nobody quits
-  // anything.
-  assert.equal(bytes, (1464197 + 2334709 + 46008) * 16384);
+  // free + speculative + purgeable: 80.9 GiB, reclaimable by the kernel with
+  // nobody quitting anything.
+  assert.equal(bytes, 86865707008);
+  assert.equal(Math.round((bytes / GiB) * 10) / 10, 80.9);
 
   // Active pages are running applications and are NOT counted: that is the
   // difference between this and memory_pressure, which reported 86% free on
   // this very machine while 34.8 GB sat in active pages.
-  assert.ok(bytes < (1464197 + 2334709 + 46008 + 2126026) * 16384);
+  assert.ok(bytes < INSTALLED);
+  // In use is the sum of the app-held queues, 45.9 GiB, and NOT installed
+  // minus available: vm_stat's queues account for 126.8 of the 128 GiB, and
+  // quietly attributing the 1.2 GiB gap to either side would be inventing a
+  // number to make two readings agree.
+  const inUse = (2_000_000 + 500_000 + 300_000 + 208_102) * 16384;
+  assert.equal(Math.round((inUse / GiB) * 10) / 10, 45.9);
 
   // And it is not bare free memory either - the cache the OS hands back is in
   // there, which is the rule host-telemetry.js sets out.
-  assert.ok(bytes > 1464197 * 16384);
+  assert.ok(bytes > 2_000_000 * 16384);
+});
+
+// --- THE PARSER MUST FAIL CLOSED -------------------------------------------
+// A broken counter parser does not throw. It matches nothing, sums an empty
+// set to zero, reports nothing in use, and green-lights every model on the box
+// with a confident "fits now". Every case below must come back unknown.
+
+test('a changed label format yields unknown, not infinite free memory', () => {
+  const moved = vmStat({ labels: { free: 'Pages Free', speculative: 'Pages Speculative' } });
+  assert.equal(parseVmStatAvailable(moved, INSTALLED), null);
+
+  // And the state that follows from it is not a fit.
+  assert.equal(classifyFit(2 * GB, 100 * GB, null).state, AVAILABILITY.HEADROOM_UNKNOWN);
+});
+
+test('empty vm_stat output yields unknown', () => {
+  assert.equal(parseVmStatAvailable('', INSTALLED), null);
+  assert.equal(parseVmStatAvailable(null, INSTALLED), null);
+  assert.equal(parseVmStatAvailable('Mach Virtual Memory Statistics: (page size of 16384 bytes)', INSTALLED), null);
+});
+
+test('a missing page-size line yields unknown rather than an assumed 4096', () => {
+  assert.equal(parseVmStatAvailable(vmStat({ pageSize: null }), INSTALLED), null);
+});
+
+test('the page size is read from the output, not hardcoded', () => {
+  // The same page counts at 4096 describe a quarter of the memory. A
+  // hardcoded 16384 would report 4x what the machine has.
+  const small = parseVmStatAvailable(vmStat({ pageSize: 4096 }), INSTALLED / 4);
+  assert.equal(small, 5_301_862 * 4096);
+  assert.notEqual(small, 5_301_862 * 16384);
+});
+
+test('a reading that implies nothing is in use yields unknown', () => {
+  // Every page free on a running macOS box is impossible; it is what a parser
+  // that has lost the active/wired counters looks like from the outside.
+  const allFree = vmStat({ free: 8_388_608, speculative: 0, purgeable: 0, active: 0, inactive: 0, wired: 0, compressor: 0 });
+  assert.equal(parseVmStatAvailable(allFree, INSTALLED), null);
+});
+
+test('counters that do not account for installed RAM yield unknown', () => {
+  // Half the machine missing from the queues means a counter was dropped, and
+  // a plausible-looking number from a broken parse is the whole hazard.
+  assert.equal(parseVmStatAvailable(vmStat(), INSTALLED * 2), null);
+});
+
+test('a Linux MemAvailable that cannot be read is unknown, never plenty', async () => {
+  const now = await measureAvailableNow({
+    platform: 'linux',
+    sources: { availableMemBytes: () => undefined, totalMemBytes: () => INSTALLED },
+  });
+  assert.equal(now.bytes, null);
+  assert.match(now.note, /unknown/);
+
+  // A value above installed RAM means the field was misread.
+  const absurd = await measureAvailableNow({
+    platform: 'linux',
+    sources: { availableMemBytes: () => INSTALLED * 2, totalMemBytes: () => INSTALLED },
+  });
+  assert.equal(absurd.bytes, null);
 });
 
 test('available memory is capped at the budget, because the budget is a ceiling', async () => {
   const now = await measureAvailableNow({
     platform: 'darwin',
     budgetBytes: 50 * GB,
-    run: async (cmd) => (cmd.endsWith('vm_stat')
-      ? 'Mach Virtual Memory Statistics: (page size of 4096 bytes)\nPages free: 100000000.\n'
-      : ''),
+    sources: { totalMemBytes: () => INSTALLED },
+    run: async (cmd) => (cmd.endsWith('vm_stat') ? vmStat() : ''),
   });
   assert.equal(now.bytes, 50 * GB);
   assert.match(now.note, /capped at the budget/);
@@ -515,4 +620,182 @@ test('search roots are configurable and the default is not a single hardcoded la
   const fallback = defaultSearchRoots({}, '/home/x');
   assert.ok(fallback.length > 1, 'GGUF files do not all live in the hub cache');
   assert.equal(fallback[0], '/home/x/.cache/huggingface/hub');
+});
+
+
+// --- A LISTING IS NOT A LOADING -------------------------------------------
+
+test('a model a server merely lists is ranked BELOW everything the disk says', async () => {
+  // The September 2026 incident, end to end. mlx_lm advertised a model that
+  // was still downloading; the disk knows better and the disk wins.
+  const root = cacheRoot();
+  repo(root, 'ddalcu/Qwen3.8-Flash-Next-MLX-Serve-mixed-4-8bit', {
+    shards: ['model-00001.safetensors', 'model-00003.safetensors'],
+    blobExtras: ['deadbeef.incomplete'],
+  });
+
+  const { models } = await describeLocalModels({
+    roots: [root],
+    listedIds: ['ddalcu/Qwen3.8-Flash-Next-MLX-Serve-mixed-4-8bit'],
+    budget: { bytes: MACBOOK.budget, source: BUDGET_SOURCES.METAL },
+    now: { bytes: MACBOOK.available, holder: null },
+  });
+
+  const entry = models.find(m => m.model.startsWith('ddalcu/'));
+  assert.equal(entry.state, AVAILABILITY.INCOMPLETE);
+  assert.notEqual(entry.state, AVAILABILITY.SERVED);
+  assert.notEqual(entry.state, AVAILABILITY.LISTED);
+  assert.equal(heartbeatFields(models).model_available, undefined);
+});
+
+test('a listed model with no bytes here is LISTED, and says the listing proves nothing', async () => {
+  const { models } = await describeLocalModels({
+    roots: [cacheRoot()],
+    listedIds: ['elsewhere/advertised'],
+    budget: { bytes: MACBOOK.budget, source: BUDGET_SOURCES.METAL },
+    now: { bytes: MACBOOK.available, holder: null },
+  });
+  assert.equal(models[0].state, AVAILABILITY.LISTED);
+  assert.match(models[0].reason, /nothing here proves it is loaded/);
+  assert.equal(heartbeatFields(models).model_available, undefined);
+});
+
+test('a listing never outranks a model that actually generated', async () => {
+  const root = cacheRoot();
+  repo(root, 'org/loaded', { shards: ['model.safetensors'], size: 1024 });
+  const { models } = await describeLocalModels({
+    roots: [root],
+    servedIds: ['org/loaded'],
+    listedIds: ['org/loaded', 'org/merely-listed'],
+    budget: { bytes: MACBOOK.budget, source: BUDGET_SOURCES.METAL },
+    now: { bytes: MACBOOK.available, holder: null },
+  });
+  assert.equal(models[0].model, 'org/loaded');
+  assert.equal(models[0].state, AVAILABILITY.SERVED);
+  assert.equal(models.find(m => m.model === 'org/merely-listed').state, AVAILABILITY.LISTED);
+});
+
+// --- how big is it, and do we actually know -------------------------------
+
+test('parameters come from metadata, and a name is labelled as a guess', async () => {
+  const header = {
+    __metadata__: { format: 'pt' },
+    'model.embed_tokens.weight': { dtype: 'BF16', shape: [1000, 64] },
+    'model.layers.0.mlp.down_proj.weight': { dtype: 'BF16', shape: [64, 128] },
+  };
+  assert.equal(paramsFromSafetensorsHeader(header), 1000 * 64 + 64 * 128);
+
+  // A name is a convention nobody enforces: read, but never as a count.
+  assert.equal(paramsFromName('Qwen/Qwen3.8-27B'), 27e9);
+  assert.equal(paramsFromName('google/gemma-3-4b-it'), 4e9);
+  assert.equal(paramsFromName('org/no-size-here'), null);
+  // `A3B` is an MoE's ACTIVE parameters, not the model's size.
+  assert.equal(paramsFromName('Qwen/Qwen3-Coder-A3B-Instruct'), null);
+});
+
+test('a quantized weight is unpacked from its own scales, not from config.json', () => {
+  // Measured on this MacBook. `Qwen3.8-Flash-Next-MLX-Serve-mixed-4-8bit`
+  // declares a single `bits: 4` while mixing 4-bit and 8-bit tensors, and
+  // trusting that declaration counted every 8-bit tensor twice - 133B for a
+  // model that the scales put at 129B.
+  const header = {
+    // 8-bit: 4 values per uint32, so [16, 32] U32 holds 16 x 128.
+    'a.weight': { dtype: 'U32', shape: [16, 32] },
+    'a.scales': { dtype: 'BF16', shape: [16, 2] },
+    'a.biases': { dtype: 'BF16', shape: [16, 2] },
+  };
+  // scales_last (2) x group_size (64) = 128 true columns.
+  assert.equal(paramsFromSafetensorsHeader(header, { bits: 4, groupSize: 64 }), 16 * 128);
+  // The declared bits alone would have said 8 values per word: 16 x 32 x 8.
+  assert.notEqual(paramsFromSafetensorsHeader(header, { bits: 4, groupSize: 64 }), 16 * 32 * 8);
+
+  // Scales and biases are descriptions of parameters, not parameters.
+  assert.equal(paramsFromSafetensorsHeader({ 'a.scales': { dtype: 'BF16', shape: [16, 2] } }), null);
+});
+
+test('a GGUF file is counted from its own tensor table', () => {
+  // Built to the spec here rather than measured: no real GGUF file was
+  // available on this machine to check it against.
+  const parts = [];
+  const u32 = n => { const b = Buffer.alloc(4); b.writeUInt32LE(n); parts.push(b); };
+  const u64 = n => { const b = Buffer.alloc(8); b.writeBigUInt64LE(BigInt(n)); parts.push(b); };
+  const str = v => { u64(v.length); parts.push(Buffer.from(v, 'utf8')); };
+
+  parts.push(Buffer.from('GGUF', 'utf8'));
+  u32(3);       // version
+  u64(2);       // tensor count
+  u64(1);       // kv count
+  str('general.architecture');
+  u32(8); str('qwen3');            // one string KV, to be skipped
+  str('token_embd.weight'); u32(2); u64(1000); u64(64); u32(0); u64(0);
+  str('blk.0.ffn_down.weight'); u32(2); u64(64); u64(128); u32(0); u64(4096);
+
+  assert.equal(paramsFromGgufBuffer(Buffer.concat(parts)), 1000 * 64 + 64 * 128);
+  assert.equal(paramsFromGgufBuffer(Buffer.from('not a gguf file at all!!')), null);
+});
+
+test('an index that states its own parameter count is believed over arithmetic', async () => {
+  const root = cacheRoot();
+  const dir = repo(root, 'org/stated', {
+    shards: ['model.safetensors'],
+    size: 2048,
+    index: { metadata: { total_parameters: 4022468096 }, weight_map: { 'a.weight': 'model.safetensors' } },
+  });
+  const scan = await scanRepoDir(dir);
+  assert.equal(scan.params, 4022468096);
+  assert.equal(scan.paramsSource, PARAM_SOURCES.INDEX);
+});
+
+test('an incomplete download publishes NO parameter count', async () => {
+  // Summing the shards that happen to have arrived gives a real number for a
+  // model that does not exist yet - the same overclaim as calling it available.
+  const out = rank({
+    repoId: 'org/half',
+    onDisk: {
+      repoId: 'org/half', weightBytes: 30 * GB, complete: false,
+      reasons: ['2 blob(s) still downloading'], params: 128.8e9, paramsSource: PARAM_SOURCES.SAFETENSORS,
+    },
+    budget: { bytes: MACBOOK.budget, source: BUDGET_SOURCES.METAL },
+    now: { bytes: MACBOOK.available, holder: null },
+  });
+  assert.equal(out.state, AVAILABILITY.INCOMPLETE);
+  assert.equal(out.paramsB, undefined);
+  assert.equal(heartbeatFields([out]).model_params_b, undefined);
+});
+
+test('the heartbeat carries size and parameters, with their provenance', () => {
+  const out = rank({
+    repoId: 'Qwen/Qwen3.8-27B',
+    onDisk: {
+      repoId: 'Qwen/Qwen3.8-27B', weightBytes: 27.5 * GB, complete: true, reasons: [],
+      params: 27.1e9, paramsSource: PARAM_SOURCES.SAFETENSORS,
+    },
+    budget: { bytes: MACBOOK.budget, source: BUDGET_SOURCES.METAL },
+    now: { bytes: MACBOOK.available, holder: null },
+  });
+  const fields = heartbeatFields([out]);
+  assert.equal(fields.model_size_gb, 27.5);
+  assert.equal(fields.model_params_b, 27.1);
+  assert.equal(fields.model_params_source, PARAM_SOURCES.SAFETENSORS);
+
+  // A count nobody derived is omitted whole, never defaulted to the name.
+  const bare = rank({
+    repoId: 'org/anonymous',
+    onDisk: { repoId: 'org/anonymous', weightBytes: 1 * GB, complete: true, reasons: [], params: null, paramsSource: null },
+    budget: { bytes: MACBOOK.budget, source: BUDGET_SOURCES.METAL },
+    now: { bytes: MACBOOK.available, holder: null },
+  });
+  assert.equal(heartbeatFields([bare]).model_params_b, undefined);
+  assert.equal(heartbeatFields([bare]).model_size_gb, 1);
+});
+
+test('a name-derived count is published as unconfirmed, never as fact', async () => {
+  const root = cacheRoot();
+  // A GGUF shard set: the first file holds only its own tensors, so counting
+  // them would give a fraction. The name is all there is, and it says so.
+  const dir = repo(root, 'org/Some-27B-GGUF', { shards: ['weights-00001-of-00002.gguf', 'weights-00002-of-00002.gguf'] });
+  const scan = await scanRepoDir(dir);
+  assert.equal(scan.paramsSource, PARAM_SOURCES.NAME);
+  assert.equal(scan.params, 27e9);
+  assert.equal(PARAM_SOURCES.NAME, 'name-unconfirmed', 'the source must say so in its own name');
 });

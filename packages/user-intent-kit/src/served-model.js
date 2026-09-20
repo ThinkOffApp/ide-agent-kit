@@ -19,8 +19,29 @@
  * we want: a model swap shows up within one probe interval, and a server that
  * dies takes its label with it instead of leaving one behind.
  *
- * So the ranking is: what a server SAYS beats what a file says, and "we asked
- * and got no name" beats both - it publishes nothing.
+ * WHAT A LISTING IS WORTH, WHICH IS LESS THAN THIS FILE ONCE ASSUMED
+ *
+ * The first version of this reporter treated "a server listed it" as "a
+ * server loaded it". Measured in production 20 Sep 2026, that is false:
+ * `mlx_lm server` enumerates the local HuggingFace cache, so a 75 GiB model
+ * that was still downloading appeared in `/v1/models` on a box serving a
+ * 2.3 GiB one, and the dashboard announced the MacBook was serving it. It
+ * could not even have loaded it - a generation request answered `Model type
+ * qwen4_exp not supported`.
+ *
+ * So the ranking is now: a model that GENERATED a token beats everything,
+ * because that is the only evidence that anything is actually loaded. A
+ * listing is evidence that files exist on a disk, which is the same grade of
+ * evidence as a directory scan, and it is labelled LISTED and published as
+ * such. "We asked and got no name" beats a configured name - it publishes
+ * nothing.
+ *
+ * The generation probe is OFF by default. It costs a forward pass on
+ * somebody's machine and, against a server that loads on demand, it can cause
+ * a load. The consequence is deliberate and worth stating plainly: with it
+ * off, no box publishes a served `model` at all. An unproven claim is not a
+ * cheaper version of a proven one, and a blank field is the honest rendering
+ * of "nobody asked".
  *
  * THE OMIT-NOT-FAKE CONTRACT, which is the whole point
  *
@@ -59,7 +80,7 @@
  * is a worse bug than the one this file fixes.
  */
 
-import { loadRegistry, probeServedModels, DEFAULT_TIMEOUT_MS } from './model-capacity.js';
+import { loadRegistry, probeServedModels, probeGeneration, DEFAULT_TIMEOUT_MS } from './model-capacity.js';
 
 /** Where a local model server listens when nobody says otherwise. */
 export const DEFAULT_ENDPOINT = '127.0.0.1:8080';
@@ -73,14 +94,48 @@ export const DEFAULT_PROBE_TIMEOUT_MS = 4000;
 /** Values of INTENT_MODEL_ENDPOINT that mean "do not probe at all". */
 const DISABLED = new Set(['0', 'off', 'none', 'no', 'disabled', 'false']);
 
+/** Values of INTENT_MODEL_GENERATE that switch the generation probe ON. */
+const ENABLED = new Set(['1', 'on', 'yes', 'true', 'enabled']);
+
+/**
+ * The shortest gap between two generation probes.
+ *
+ * A model swap is a human-scale event; five minutes of resolution is plenty,
+ * and the probe costs somebody else's compute. This is a floor enforced by the
+ * probe itself, not a suggestion to the caller.
+ */
+export const DEFAULT_GENERATION_MIN_MS = 300000;
+
+/** One generation's worth of patience. A loaded model answers in well under this. */
+export const DEFAULT_GENERATION_TIMEOUT_MS = 5000;
+
+/** Hosts a generation probe may talk to without an explicit endpoint setting. */
+const LOOPBACK_HOSTS = new Set(['127.0.0.1', 'localhost', '::1', '0:0:0:0:0:0:0:1']);
+
 /**
  * Why we are publishing what we are publishing. Exported because the daemon
  * logs it and the tests assert on it: "no model" has four different causes
  * and an operator reading a blank card needs to know which one.
  */
 export const VERDICTS = Object.freeze({
-  /** A server named a model. Published verbatim. */
-  NAMED: 'named',
+  /**
+   * A model GENERATED a token when asked. The only proof that it is loaded,
+   * and the only verdict that publishes a name as served.
+   */
+  GENERATED: 'generated',
+  /**
+   * A server's `/v1/models` names it, and that is the whole of the evidence.
+   *
+   * It used to be called NAMED and it used to mean served. It does not.
+   * Measured in production 20 Sep 2026: `mlx_lm server` enumerates the local
+   * HuggingFace cache, so a 75 GiB model that was still downloading - and
+   * that the build could not load at all, `Model type qwen4_exp not
+   * supported` - was listed by a server holding a 2.3 GiB one. A listing
+   * proves some files exist on disk. That is the same grade of evidence as a
+   * directory scan, so it is labelled like one and it publishes no served
+   * name.
+   */
+  LISTED: 'listed',
   /** A server answered and lists nothing loaded. Publish nothing. */
   IDLE: 'idle',
   /** 401/403. Something is serving; we cannot name it. Publish nothing. */
@@ -162,22 +217,28 @@ export function servedModelEntry(env = process.env) {
 }
 
 /**
- * Turn one probe result into the thing we publish, or nothing.
+ * Turn one listing into a verdict. Never into a served name.
  *
- * The id is taken VERBATIM. It is the server's own name for what it loaded,
- * and prettifying it here is how a dashboard ends up showing a name that
- * matches no checkpoint anybody can find. `GLM-5.3-Flash-EXL3` is what asus1
- * calls it, so `GLM-5.3-Flash-EXL3` is what the card says.
+ * Ids are taken VERBATIM. They are the server's own names, and prettifying
+ * them here is how a dashboard ends up showing a name that matches no
+ * checkpoint anybody can find. `GLM-5.3-Flash-EXL3` is what asus1 calls it,
+ * so `GLM-5.3-Flash-EXL3` is what the card says.
  *
- * A server listing several models names the first: a heartbeat field is one
- * short string, and the alternative - joining them - produces a value that is
- * not any model's id.
+ * ALL the listed ids come back, as an array. The old version named the first
+ * one, which is a coin toss dressed as a reading: a server listing several
+ * models cannot have them all resident, so the first is not "the" model any
+ * more than the third is. Joining them with commas is worse - it produces a
+ * string that is not any model's id, and that string is what reached the
+ * dashboard. The caller decides what a multi-model listing means; this
+ * function refuses to pick.
  */
 export function readVerdict(result) {
   if (result?.http === 'OK' && Array.isArray(result.models) && result.models.length) {
-    const first = result.models.find(m => typeof m === 'string' && m.trim());
-    if (first) {
-      return { verdict: VERDICTS.NAMED, model: first.trim(), reachedServer: true, reason: null };
+    const listed = result.models.filter(m => typeof m === 'string' && m.trim()).map(m => m.trim());
+    if (listed.length) {
+      // No `model`. A listing is not a loading, and the field that means
+      // "this box is serving X" stays empty until something generates.
+      return { verdict: VERDICTS.LISTED, model: undefined, listed, reachedServer: true, reason: null };
     }
   }
   if (result?.httpStatus === 401 || result?.httpStatus === 403) {
@@ -186,14 +247,14 @@ export function readVerdict(result) {
     // "unknown", "authenticated" or the last thing we saw would all be a
     // caption on a card that reads as fact. Nothing goes out, and the reason
     // says which repair to attempt.
-    return { verdict: VERDICTS.AUTH_BLOCKED, model: undefined, reachedServer: true, reason: result.reason ?? null };
+    return { verdict: VERDICTS.AUTH_BLOCKED, model: undefined, listed: [], reachedServer: true, reason: result.reason ?? null };
   }
   if (result?.http === 'DOWN') {
     // It answered and it is not serving a model. Live evidence, and it
     // outranks a configured name: the setting is provably stale.
-    return { verdict: VERDICTS.IDLE, model: undefined, reachedServer: true, reason: result.reason ?? null };
+    return { verdict: VERDICTS.IDLE, model: undefined, listed: [], reachedServer: true, reason: result.reason ?? null };
   }
-  return { verdict: VERDICTS.NO_SERVER, model: undefined, reachedServer: false, reason: result?.reason ?? null };
+  return { verdict: VERDICTS.NO_SERVER, model: undefined, listed: [], reachedServer: false, reason: result?.reason ?? null };
 }
 
 /**
@@ -214,12 +275,24 @@ export class ServedModelProbe {
   #timer = null;
   #last = null;
   #inFlight = null;
+  #generate;
+  #generateMinMs;
+  #generateTimeoutMs;
+  #guard;
+  #lastGenerationAt = null;
+  #endpointExplicit;
 
   /**
    * @param {object} [opts]
    * @param {object|null} [opts.entry] - loadRegistry entry; default from env
    * @param {number} [opts.intervalMs] - probe period (NOT the heartbeat's)
    * @param {number} [opts.staleAfterMs] - after this, a reading stops counting
+   * @param {boolean} [opts.generate] - ask one token to prove it is loaded.
+   *   OFF unless INTENT_MODEL_GENERATE says otherwise: it spends compute on
+   *   somebody else's box, and a box that has not loaded the model may try to.
+   * @param {(id: string) => boolean|Promise<boolean>} [opts.guard] - veto on a
+   *   candidate before any generation request is sent. The daemon wires this
+   *   to the disk scan so an incomplete or oversized model is never asked.
    */
   constructor({
     entry,
@@ -229,6 +302,10 @@ export class ServedModelProbe {
     timeoutMs = DEFAULT_PROBE_TIMEOUT_MS,
     intervalMs,
     staleAfterMs,
+    generate,
+    generateMinMs,
+    generateTimeoutMs,
+    guard,
   } = {}) {
     this.#env = env;
     this.#fetchImpl = fetchImpl;
@@ -247,6 +324,56 @@ export class ServedModelProbe {
       : this.#intervalMs * 3;
 
     this.#entry = entry !== undefined ? entry : this.#entryFromEnv();
+
+    // OFF by default, and it takes an explicit word to turn on. The cost is
+    // real - one forward pass, and possibly a model load - and it is charged
+    // to whoever runs the daemon, not to whoever reads the dashboard.
+    const wanted = String(env?.INTENT_MODEL_GENERATE ?? '').trim().toLowerCase();
+    this.#generate = typeof generate === 'boolean' ? generate : ENABLED.has(wanted);
+
+    const minFromEnv = Number(env?.INTENT_MODEL_GENERATE_MIN_MS);
+    this.#generateMinMs = Number.isFinite(generateMinMs) && generateMinMs >= 0
+      ? generateMinMs
+      : (Number.isFinite(minFromEnv) && minFromEnv >= 0 ? minFromEnv : DEFAULT_GENERATION_MIN_MS);
+
+    this.#generateTimeoutMs = Number.isFinite(generateTimeoutMs) && generateTimeoutMs > 0
+      ? generateTimeoutMs
+      : DEFAULT_GENERATION_TIMEOUT_MS;
+
+    this.#guard = typeof guard === 'function' ? guard : null;
+    this.#endpointExplicit = typeof env?.INTENT_MODEL_ENDPOINT === 'string'
+      && env.INTENT_MODEL_ENDPOINT.trim() !== '';
+  }
+
+  /**
+   * May we spend a token on this endpoint at all?
+   *
+   * Two separate refusals. A generation probe is never sent to a host the
+   * operator did not name: the default endpoint is a convenience for reading a
+   * listing on loopback, and silently turning it into "POST a prompt to
+   * whatever is on 8080 of some other machine" is not a convenience. And it is
+   * never sent more often than the floor, because a model swap is a
+   * human-scale event and this costs a forward pass.
+   */
+  #mayGenerate() {
+    if (!this.#generate || !this.enabled) return false;
+    const host = String(this.#entry.host).toLowerCase().replace(/^\[|\]$/g, '');
+    if (!LOOPBACK_HOSTS.has(host) && !this.#endpointExplicit) return false;
+    if (this.#lastGenerationAt === null) return true;
+    return this.#now() - this.#lastGenerationAt >= this.#generateMinMs;
+  }
+
+  /**
+   * Which single id, if any, it is honest to ask about.
+   *
+   * A server listing several models cannot have them all resident, and naming
+   * one of them in a generation request is not a read - on a server that loads
+   * on demand it is an instruction to load that model. So a multi-model
+   * listing produces no candidate at all and stays LISTED. The old code picked
+   * the first id; picking is exactly what must not happen here.
+   */
+  #candidate(listed) {
+    return Array.isArray(listed) && listed.length === 1 ? listed[0] : null;
   }
 
   #entryFromEnv() {
@@ -277,18 +404,19 @@ export class ServedModelProbe {
    */
   lastResult() {
     if (!this.enabled) {
-      return { verdict: VERDICTS.DISABLED, model: undefined, reachedServer: false, reason: null };
+      return { verdict: VERDICTS.DISABLED, model: undefined, listed: [], reachedServer: false, reason: null };
     }
     if (!this.#last) {
       // Nothing measured yet. Not "no server" - we have not asked. Either way
       // there is no name to publish, and the first heartbeat goes out
       // immediately rather than waiting on a socket.
-      return { verdict: VERDICTS.NO_SERVER, model: undefined, reachedServer: false, reason: 'not probed yet' };
+      return { verdict: VERDICTS.NO_SERVER, model: undefined, listed: [], reachedServer: false, reason: 'not probed yet' };
     }
     if (this.#now() - this.#last.at > this.#staleAfterMs) {
       return {
         verdict: VERDICTS.NO_SERVER,
         model: undefined,
+        listed: [],
         reachedServer: false,
         reason: `last reading is older than ${this.#staleAfterMs} ms`,
       };
@@ -296,9 +424,23 @@ export class ServedModelProbe {
     return this.#last.reading;
   }
 
-  /** The model id to publish, or undefined. The heartbeat calls this. */
+  /**
+   * The model id to publish as SERVED, or undefined. The heartbeat calls this.
+   *
+   * Only a GENERATED verdict fills it. With the generation probe off - which
+   * is the default - this returns undefined on every box, and that is the
+   * intended reading: without a token we do not know that anything is loaded,
+   * and the field means loaded. What a server merely lists travels in
+   * `listed()` instead, clearly labelled as the weaker claim it is.
+   */
   current() {
-    return this.lastResult().model;
+    const seen = this.lastResult();
+    return seen.verdict === VERDICTS.GENERATED ? seen.model : undefined;
+  }
+
+  /** Every id the endpoint advertises. Files on a disk somewhere, no more. */
+  listed() {
+    return this.lastResult().listed ?? [];
   }
 
   /**
@@ -320,12 +462,14 @@ export class ServedModelProbe {
           env: this.#env,
         });
         reading = readVerdict(result);
+        reading = await this.#proveIfAllowed(reading);
       } catch (err) {
         // Includes a thrown fetch, a rejected AbortSignal, and any bug above.
         // It is an absent reading, never a retained one.
         reading = {
           verdict: VERDICTS.NO_SERVER,
           model: undefined,
+          listed: [],
           reachedServer: false,
           reason: `probe error: ${err?.message ?? err}`,
         };
@@ -335,6 +479,48 @@ export class ServedModelProbe {
     })().finally(() => { this.#inFlight = null; });
 
     return this.#inFlight;
+  }
+
+  /**
+   * Try to upgrade a LISTED reading to GENERATED, or leave it exactly as it is.
+   *
+   * Every exit from here that is not a returned token leaves the verdict at
+   * LISTED. A refused guard, a rate limit, a timeout, an HTTP error, an
+   * unloadable architecture: all of them are things we could not prove, and
+   * none of them is a reason to claim more than the listing already did.
+   */
+  async #proveIfAllowed(reading) {
+    if (reading.verdict !== VERDICTS.LISTED) return reading;
+
+    const candidate = this.#candidate(reading.listed);
+    if (!candidate) {
+      return { ...reading, reason: `${reading.listed.length} models listed; none can be shown to be the loaded one` };
+    }
+    if (!this.#mayGenerate()) return reading;
+
+    if (this.#guard) {
+      let allowed = false;
+      try {
+        allowed = await this.#guard(candidate);
+      } catch {
+        allowed = false;
+      }
+      if (!allowed) {
+        return { ...reading, reason: 'not asked to generate: the bytes on disk do not support it' };
+      }
+    }
+
+    this.#lastGenerationAt = this.#now();
+    const proof = await probeGeneration(this.#entry, {
+      modelId: candidate,
+      fetchImpl: this.#fetchImpl,
+      timeoutMs: this.#generateTimeoutMs,
+      now: this.#now,
+      env: this.#env,
+    });
+
+    if (!proof.generated) return { ...reading, reason: proof.reason };
+    return { ...reading, verdict: VERDICTS.GENERATED, model: proof.model, reason: null };
   }
 
   /** Probe now, then on the probe's own interval. Unref'd: never holds the

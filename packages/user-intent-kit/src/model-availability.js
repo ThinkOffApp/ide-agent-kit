@@ -79,9 +79,25 @@
  * TODAY axis (what is free of it right now) are reported side by side and
  * neither is folded into the other - the same separation model-capacity.js
  * keeps between capacity and path, for the same reason.
+ *
+ * EVERY UNKNOWN IN THIS FILE FAILS CLOSED. That is the one rule the rest is
+ * built from, and every bug this module has been handed is a variant of an
+ * unknown quietly rendering as a yes: an unreadable budget, an unparseable
+ * memory figure, a model that is merely listed by a server, a download that
+ * is 99% finished. None of them may become a positive claim.
+ *
+ * It is worth being concrete about why the arithmetic deserves as much
+ * suspicion as the data source. A counter parser that matches NOTHING does
+ * not throw - it produces an empty set of counters, which sums to zero, which
+ * reads as "nothing is in use", which green-lights every model on the box
+ * with a confident "fits now". That failure looks like arithmetic rather than
+ * a bad instrument, which is what makes it worse than the memory_pressure
+ * trap below. Hence parseVmStatAvailable refuses an empty parse, refuses a
+ * missing page size, and cross-checks its own counters against installed RAM
+ * before it will return a number at all.
  */
 
-import { readdir, readFile, lstat, stat } from 'node:fs/promises';
+import { readdir, readFile, lstat, stat, open as openFile } from 'node:fs/promises';
 import { execFile } from 'node:child_process';
 import { homedir } from 'node:os';
 import { join, basename } from 'node:path';
@@ -149,8 +165,22 @@ export const BUDGET_SOURCES = Object.freeze({
 
 /** The states a (box, model) pair can be in. Exactly one applies. */
 export const AVAILABILITY = Object.freeze({
-  /** A live listing names it. Outranks everything below. */
+  /**
+   * It GENERATED a token. The only proof a model is loaded, and the only
+   * state that outranks the disk.
+   */
   SERVED: 'served',
+  /**
+   * A server's /v1/models names it and we know nothing else about it.
+   *
+   * Deliberately ranked BELOW every disk-derived state, which is the whole
+   * lesson of 20 Sep 2026: `mlx_lm` lists the local HuggingFace cache, so a
+   * listing is evidence that files exist - exactly what a directory scan
+   * gives, with less detail. When the scan has anything to say about the same
+   * model, the scan wins, which is why a listed-but-still-downloading model
+   * reads as `incomplete` rather than as anything reassuring.
+   */
+  LISTED: 'listed',
   /** Complete on disk and it fits in what is free RIGHT NOW. */
   FITS_NOW: 'fits-now',
   /** Complete on disk, fits the box, not alongside what is resident today. */
@@ -177,6 +207,7 @@ export const AVAILABILITY = Object.freeze({
  */
 export const LABELS = Object.freeze({
   [AVAILABILITY.SERVED]: 'serving',
+  [AVAILABILITY.LISTED]: 'listed by a server, not shown to be loaded',
   [AVAILABILITY.FITS_NOW]: 'available and fits',
   [AVAILABILITY.FITS_IF_FREED]: 'available, fits only after freeing memory',
   [AVAILABILITY.HEADROOM_UNKNOWN]: 'available, current headroom unknown',
@@ -194,6 +225,7 @@ const STRENGTH = Object.freeze([
   AVAILABILITY.FITS_IF_FREED,
   AVAILABILITY.HEADROOM_UNKNOWN,
   AVAILABILITY.BUDGET_UNKNOWN,
+  AVAILABILITY.LISTED,
   AVAILABILITY.TOO_LARGE,
   AVAILABILITY.INCOMPLETE,
   AVAILABILITY.MANUAL,
@@ -393,21 +425,69 @@ export async function measureLargestConsumer({
  * cache-rich machine as full; this figure adds the reclaimable cache back in,
  * by name, which is exactly what the warning asks for.
  */
-export function parseVmStatAvailable(text) {
+export function parseVmStatAvailable(text, totalMemBytes = null) {
   const body = String(text ?? '');
+
+  // The page size is STATED, never assumed: 16384 on Apple Silicon, 4096
+  // elsewhere, and a hardcoded constant would be wrong by 4x on one of them.
+  // A missing line is a parse failure, not a licence to guess.
   const pageSize = Number((body.match(/page size of (\d+)/) || [])[1]);
   if (!Number.isFinite(pageSize) || pageSize <= 0) return null;
 
+  const seen = new Map();
   const pages = name => {
     const m = new RegExp(`^Pages ${name}:\\s*(\\d+)`, 'm').exec(body);
-    return m ? Number(m[1]) : null;
+    if (!m) return null;
+    const n = Number(m[1]);
+    if (!Number.isFinite(n) || n < 0) return null;
+    seen.set(name, n);
+    return n;
   };
 
   const free = pages('free');
-  if (!Number.isFinite(free)) return null;
-  const speculative = pages('speculative') ?? 0;
-  const purgeable = pages('purgeable') ?? 0;
-  return (free + speculative + purgeable) * pageSize;
+  const speculative = pages('speculative');
+  const purgeable = pages('purgeable');
+  const active = pages('active');
+  const inactive = pages('inactive');
+  const wired = pages('wired down');
+  const compressor = Number((body.match(/^Pages occupied by compressor:\s*(\d+)/m) || [])[1]);
+
+  // An empty parse is an ERROR, not a machine with nothing in it. If the
+  // labels move in a future macOS, or the regex is a character out, this is
+  // the branch that must catch it - the alternative is a sum over an empty
+  // set, reported as infinite free memory.
+  if (!seen.size) return null;
+
+  // Every counter the cross-check needs must be present. Matching three of
+  // six is a broken parser producing a plausible-looking number.
+  if (free === null || speculative === null || purgeable === null
+    || active === null || inactive === null || wired === null
+    || !Number.isFinite(compressor)) {
+    return null;
+  }
+
+  const available = (free + speculative + purgeable) * pageSize;
+  const accounted = (free + active + inactive + speculative + wired + compressor) * pageSize;
+  if (available <= 0) return null;
+
+  if (Number.isFinite(totalMemBytes) && totalMemBytes > 0) {
+    // Two instruments must agree before a number is quoted. vm_stat's queues
+    // should account for very nearly all of installed RAM (measured here:
+    // 135.9 GB of 137.4 GB, 1.1% adrift). A parser that has silently dropped
+    // a counter lands far outside this band, and so does a page size that has
+    // been misread. 20% is loose enough for a queue this file does not know
+    // about and tight enough to catch a missing one.
+    if (accounted < totalMemBytes * 0.8 || accounted > totalMemBytes * 1.2) return null;
+
+    // Zero bytes in use on a running macOS box is impossible, and so is more
+    // in use than the machine has. Either means the parse is wrong, and the
+    // honest answer is unknown - never a fit.
+    const inUse = totalMemBytes - available;
+    if (inUse <= 0 || inUse > totalMemBytes) return null;
+    if (available > totalMemBytes) return null;
+  }
+
+  return available;
 }
 
 /**
@@ -437,11 +517,26 @@ export async function measureAvailableNow({
   budgetBytes = null,
 } = {}) {
   let raw = null;
+  let total = null;
+  try {
+    const t = sources.totalMemBytes?.();
+    if (Number.isFinite(t) && t > 0) total = t;
+  } catch {
+    total = null;
+  }
+
   try {
     const value = platform === 'darwin'
-      ? parseVmStatAvailable(await run('/usr/bin/vm_stat', [], { timeoutMs: 4000 }))
+      ? parseVmStatAvailable(await run('/usr/bin/vm_stat', [], { timeoutMs: 4000 }), total)
       : sources.availableMemBytes?.();
-    if (Number.isFinite(value) && value > 0) raw = value;
+    // The same bounds guard the Linux path. A missing or unparseable
+    // MemAvailable arrives here as undefined or NaN and must read as unknown,
+    // never as plenty; a value above installed RAM means the field was
+    // misread, and a machine with nothing in use does not exist.
+    if (Number.isFinite(value) && value > 0
+      && (total === null || (value <= total && total - value > 0))) {
+      raw = value;
+    }
   } catch {
     raw = null;
   }
@@ -628,6 +723,274 @@ export function missingShards(fileNames) {
   return complaints;
 }
 
+// --- how big is the model, in parameters ----------------------------------
+
+/**
+ * Parameter counts, in decreasing order of proof - the same discipline the
+ * rest of this file applies to fits.
+ *
+ *   INDEX      the producer wrote `metadata.total_parameters` into the
+ *              safetensors index. Their own number for their own model.
+ *   SAFETENSORS every tensor's shape, summed, with the packing undone for
+ *              quantized weights. Arithmetic over real metadata.
+ *   GGUF       every tensor's dims, summed, from the file's own tensor table.
+ *   NAME       the digits in `Qwen3.8-27B`. A convention, not a measurement,
+ *              and it is published as UNCONFIRMED or not at all.
+ *
+ * A repo whose name says 27B and whose metadata cannot confirm it reports
+ * `name` as its source, so a dashboard can render the number differently from
+ * one that was counted. Guessing is allowed; guessing silently is not.
+ */
+export const PARAM_SOURCES = Object.freeze({
+  INDEX: 'index-metadata',
+  SAFETENSORS: 'safetensors-header',
+  GGUF: 'gguf-metadata',
+  NAME: 'name-unconfirmed',
+});
+
+/** Tensors that describe other tensors, and are not themselves parameters. */
+const NOT_PARAMETERS = /\.(scales|biases|zeros|g_idx|qzeros)$/;
+
+/**
+ * The JSON header of a safetensors file: an 8-byte little-endian length, then
+ * that many bytes of JSON. Only the header is read - the weights behind it can
+ * be 75 GB and are never touched.
+ */
+export async function readSafetensorsHeader(path) {
+  let handle;
+  try {
+    handle = await openFile(path, 'r');
+    const len = Buffer.alloc(8);
+    await handle.read(len, 0, 8, 0);
+    const size = Number(len.readBigUInt64LE(0));
+    // A header larger than this is not a header we understand, and reading it
+    // would be the beginning of reading the whole file into memory.
+    if (!Number.isFinite(size) || size <= 0 || size > 100 * 1024 * 1024) return null;
+    const json = Buffer.alloc(size);
+    await handle.read(json, 0, size, 8);
+    return JSON.parse(json.toString('utf8'));
+  } catch {
+    return null;
+  } finally {
+    await handle?.close().catch(() => {});
+  }
+}
+
+/**
+ * Parameters described by one safetensors header.
+ *
+ * QUANTIZED WEIGHTS ARE PACKED, and a naive shape product undercounts them by
+ * exactly the packing factor: MLX stores 4-bit weights as uint32 with eight
+ * values per element, so a [2560, 320] U32 tensor holds 2560 x 2560
+ * parameters, not 2560 x 320.
+ *
+ * THE PACKING FACTOR IS READ PER TENSOR, NOT TAKEN FROM config.json. This
+ * machine holds `Qwen3.8-Flash-Next-MLX-Serve-mixed-4-8bit`, whose config
+ * declares a single `bits: 4` while the repo, by its own name, mixes 4-bit and
+ * 8-bit tensors. Trusting the declared value counted every 8-bit tensor at
+ * twice its size and turned the model into a confident 133B.
+ *
+ * So the true inner dimension comes from the tensor's own `.scales`, which is
+ * stored unpacked at one element per quantization group: `in = scales_last x
+ * group_size`. That is arithmetic over the file's own metadata and it needs no
+ * declaration to be right. Where there is no sibling `.scales`, the declared
+ * bits are used, and where there is neither the tensor is counted as stored -
+ * which undercounts, the safe direction for a number that must not inflate.
+ */
+export function paramsFromSafetensorsHeader(header, { bits = null, groupSize = null } = {}) {
+  if (!header || typeof header !== 'object') return null;
+  const declaredFactor = Number.isFinite(bits) && bits > 0 ? 32 / bits : 1;
+  let total = 0;
+  let counted = 0;
+
+  const shapeOf = name => {
+    const shape = header?.[name]?.shape;
+    return Array.isArray(shape) && shape.length ? shape : null;
+  };
+
+  for (const [name, tensor] of Object.entries(header)) {
+    if (name === '__metadata__') continue;
+    if (NOT_PARAMETERS.test(name)) continue;
+    const shape = tensor?.shape;
+    if (!Array.isArray(shape) || !shape.length) continue;
+    for (const dim of shape) if (!Number.isFinite(dim) || dim < 0) return null;
+
+    const leading = shape.slice(0, -1).reduce((a, b) => a * b, 1);
+    const last = shape[shape.length - 1];
+
+    if (String(tensor?.dtype).toUpperCase() === 'U32') {
+      const scales = shapeOf(name.replace(/\.weight$/, '.scales'));
+      if (scales && Number.isFinite(groupSize) && groupSize > 0) {
+        total += leading * scales[scales.length - 1] * groupSize;
+      } else {
+        total += leading * last * declaredFactor;
+      }
+    } else {
+      total += leading * last;
+    }
+    counted += 1;
+  }
+  return counted ? Math.round(total) : null;
+}
+
+const GGUF_MAGIC = 0x46554747; // "GGUF", little-endian
+
+/**
+ * Parameters from a GGUF file's own tensor table.
+ *
+ * GGUF states each tensor's true dimensions rather than its packed storage
+ * shape, so the sum is the parameter count directly. Only the header region is
+ * read; if the metadata is larger than the window, the answer is null and the
+ * caller falls back rather than reading gigabytes to count them.
+ */
+export function paramsFromGgufBuffer(buf) {
+  try {
+    if (!buf || buf.length < 24 || buf.readUInt32LE(0) !== GGUF_MAGIC) return null;
+    let off = 8;
+    const u64 = () => { const v = Number(buf.readBigUInt64LE(off)); off += 8; return v; };
+    const u32 = () => { const v = buf.readUInt32LE(off); off += 4; return v; };
+    const str = () => { const n = u64(); const v = buf.toString('utf8', off, off + n); off += n; return v; };
+
+    const tensorCount = u64();
+    const kvCount = u64();
+    if (!Number.isFinite(tensorCount) || tensorCount <= 0 || tensorCount > 1e6) return null;
+
+    // Fixed widths for the scalar value types, by GGUF type id.
+    const WIDTH = { 0: 1, 1: 1, 2: 2, 3: 2, 4: 4, 5: 4, 6: 4, 7: 1, 10: 8, 11: 8, 12: 8 };
+    const skipValue = (type) => {
+      if (type === 8) { str(); return; }
+      if (type === 9) {
+        const itemType = u32();
+        const n = u64();
+        for (let i = 0; i < n; i += 1) skipValue(itemType);
+        return;
+      }
+      const w = WIDTH[type];
+      if (w === undefined) throw new Error(`unknown gguf type ${type}`);
+      off += w;
+    };
+
+    for (let i = 0; i < kvCount; i += 1) {
+      str();
+      skipValue(u32());
+      if (off > buf.length) return null;
+    }
+
+    let total = 0;
+    for (let i = 0; i < tensorCount; i += 1) {
+      str();
+      const nDims = u32();
+      if (!Number.isFinite(nDims) || nDims < 1 || nDims > 8) return null;
+      let n = 1;
+      for (let d = 0; d < nDims; d += 1) n *= u64();
+      u32(); // ggml type
+      u64(); // offset
+      total += n;
+      if (off > buf.length) return null;
+    }
+    return total > 0 ? total : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Read enough of a GGUF file to reach the end of its tensor table. */
+export async function paramsFromGgufFile(path, { window = 16 * 1024 * 1024 } = {}) {
+  let handle;
+  try {
+    handle = await openFile(path, 'r');
+    const buf = Buffer.alloc(window);
+    const { bytesRead } = await handle.read(buf, 0, window, 0);
+    return paramsFromGgufBuffer(buf.subarray(0, bytesRead));
+  } catch {
+    return null;
+  } finally {
+    await handle?.close().catch(() => {});
+  }
+}
+
+/**
+ * The parameter count a repo NAME claims: `Qwen3.8-27B`, `gemma-3-4b-it`.
+ *
+ * Returned only as a claim, never as a count. A name is a convention that
+ * nobody enforces, it survives a repack into a different size, and it is the
+ * exact kind of digit-scraping this feature was asked to prefer metadata over.
+ */
+export function paramsFromName(repoId) {
+  const name = String(repoId ?? '').split('/').pop() ?? '';
+  // Anchored to a separator so `Qwen3-4B` reads 4B and the `3` in `Qwen3` is
+  // not mistaken for a size. A range like `A3B` (active params of an MoE) is
+  // deliberately not matched: it is not the model's parameter count.
+  const m = /(?:^|[-_.])(\d+(?:\.\d+)?)\s*[bB](?:[-_.]|$)/.exec(name);
+  if (!m) return null;
+  const billions = Number(m[1]);
+  if (!Number.isFinite(billions) || billions <= 0 || billions > 100000) return null;
+  return Math.round(billions * 1e9);
+}
+
+/**
+ * How many parameters this snapshot holds, and how we know.
+ *
+ * @returns {Promise<{params: number|null, source: string|null}>}
+ */
+export async function readModelParams(snapDir, { entries = [], repoId = null } = {}) {
+  let quantBits = null;
+  let groupSize = null;
+  try {
+    const config = JSON.parse(await readFile(join(snapDir, 'config.json'), 'utf8'));
+    const quant = config?.quantization ?? config?.quantization_config;
+    const bits = Number(quant?.bits);
+    const group = Number(quant?.group_size);
+    if (Number.isFinite(bits) && bits > 0) quantBits = bits;
+    if (Number.isFinite(group) && group > 0) groupSize = group;
+  } catch {
+    quantBits = null;
+  }
+
+  // 1. The producer's own number, if they wrote one down.
+  const indexName = entries.find(n => /\.index\.json$/i.test(n));
+  if (indexName) {
+    try {
+      const index = JSON.parse(await readFile(join(snapDir, indexName), 'utf8'));
+      const stated = Number(index?.metadata?.total_parameters);
+      if (Number.isFinite(stated) && stated > 0) {
+        return { params: stated, source: PARAM_SOURCES.INDEX };
+      }
+    } catch {
+      // Unreadable index; the tensors themselves still answer.
+    }
+  }
+
+  // 2. Count the tensors. Every shard, because a sum over one is a fraction.
+  const safetensors = entries.filter(n => /\.safetensors$/i.test(n));
+  if (safetensors.length) {
+    let total = 0;
+    let ok = true;
+    for (const name of safetensors) {
+      const header = await readSafetensorsHeader(join(snapDir, name));
+      const n = paramsFromSafetensorsHeader(header, { bits: quantBits, groupSize });
+      if (n === null) { ok = false; break; }
+      total += n;
+    }
+    if (ok && total > 0) return { params: total, source: PARAM_SOURCES.SAFETENSORS };
+  }
+
+  // 3. GGUF says so itself.
+  const gguf = entries.find(n => /\.gguf$/i.test(n));
+  if (gguf) {
+    const n = await paramsFromGgufFile(join(snapDir, gguf));
+    // A sharded GGUF's first file holds only its own tensors, so the count
+    // would be a fraction of the model. Only an unsharded file answers here.
+    if (n && !SHARD_OF.test(gguf) && !SHARD_BARE.test(gguf)) {
+      return { params: n, source: PARAM_SOURCES.GGUF };
+    }
+  }
+
+  // 4. What the name claims, clearly labelled as a claim.
+  const named = paramsFromName(repoId);
+  return named ? { params: named, source: PARAM_SOURCES.NAME } : { params: null, source: null };
+}
+
 /** Bytes of a snapshot entry, following the symlink into `blobs/`. */
 async function sizeOfEntry(path, seen) {
   const link = await lstat(path);
@@ -767,6 +1130,8 @@ export async function scanRepoDir(dir, { repoId = repoIdFromCacheDir(basename(di
     }
   }
 
+  const { params, source: paramsSource } = await readModelParams(snapDir, { entries, repoId });
+
   return {
     repoId,
     dir,
@@ -774,6 +1139,8 @@ export async function scanRepoDir(dir, { repoId = repoIdFromCacheDir(basename(di
     weightBytes,
     totalBytes,
     weightFiles: weightFiles.sort(),
+    params,
+    paramsSource,
     complete: reasons.length === 0,
     reasons,
   };
@@ -815,13 +1182,17 @@ async function scanLooseDir(dir) {
       }
     }
 
+    const repoId = shard ? shard[1] : name.replace(/\.gguf$/i, '');
+    const params = shard ? paramsFromName(repoId) : await paramsFromGgufFile(join(dir, name));
     out.push({
-      repoId: shard ? shard[1] : name.replace(/\.gguf$/i, ''),
+      repoId,
       dir,
       revision: null,
       weightBytes,
       totalBytes: weightBytes,
       weightFiles: [name],
+      params,
+      paramsSource: params ? (shard ? PARAM_SOURCES.NAME : PARAM_SOURCES.GGUF) : null,
       complete: reasons.length === 0,
       reasons,
     });
@@ -903,11 +1274,24 @@ export async function scanLocalModels({ roots = defaultSearchRoots() } = {}) {
  * @param {{bytes: number|null, holder: object|null}} [args.now]
  * @param {boolean} [args.manual] - the name came from INTENT_DEVICE_MODEL
  */
-export function rank({ repoId, servedIds = [], onDisk = null, budget = null, now = null, manual = false }) {
+export function rank({
+  repoId, servedIds = [], listedIds = [], onDisk = null, budget = null, now = null, manual = false,
+}) {
   const served = new Set([...servedIds].map(s => String(s).trim()).filter(Boolean));
+  const listed = new Set([...listedIds].map(s => String(s).trim()).filter(Boolean));
   const base = {
     model: repoId,
     sizeGb: onDisk ? round1(onDisk.weightBytes / BYTES_PER_GB) : undefined,
+    // A chip reads "27B, 27.5 GB" rather than a bare repo name - but only
+    // when the count came from somewhere. `paramsSource` says where, so a
+    // number scraped off the name never renders like one that was counted.
+    //
+    // And never for an incomplete download. Summing the tensors of the shards
+    // that happen to have arrived produces a real number for a model that
+    // does not exist yet, which is the same overclaim as calling it available.
+    ...(onDisk?.params && onDisk.complete
+      ? { paramsB: round1(onDisk.params / 1e9), paramsSource: onDisk.paramsSource }
+      : {}),
     budgetGb: Number.isFinite(budget?.bytes) ? round1(budget.bytes / BYTES_PER_GB) : undefined,
     budgetSource: budget?.source ?? BUDGET_SOURCES.UNKNOWN,
     availableNowGb: Number.isFinite(now?.bytes) ? round1(now.bytes / BYTES_PER_GB) : undefined,
@@ -918,6 +1302,9 @@ export function rank({ repoId, servedIds = [], onDisk = null, budget = null, now
   }
 
   if (onDisk) {
+    // The disk outranks a listing. A server advertising a half-downloaded
+    // model does not make it more downloaded, and this branch is what stops
+    // `mlx_lm`'s catalogue from ever reaching a card as anything reassuring.
     if (!onDisk.complete) {
       return {
         ...base,
@@ -963,6 +1350,17 @@ export function rank({ repoId, servedIds = [], onDisk = null, budget = null, now
     return out;
   }
 
+  // Listed, and no bytes of it here to check. Weaker than anything the disk
+  // could have said, which is why it is tested only after the disk.
+  if (listed.has(repoId)) {
+    return {
+      ...base,
+      state: AVAILABILITY.LISTED,
+      label: LABELS[AVAILABILITY.LISTED],
+      reason: 'a server advertises this id; nothing here proves it is loaded',
+    };
+  }
+
   if (manual) {
     return {
       ...base,
@@ -990,6 +1388,7 @@ export function byStrength(a, b) {
  */
 export async function describeLocalModels({
   servedIds = [],
+  listedIds = [],
   manualName = null,
   roots = defaultSearchRoots(),
   budget,
@@ -1010,12 +1409,17 @@ export async function describeLocalModels({
   const onDisk = await scanLocalModels({ roots });
   const byId = new Map(onDisk.map(m => [m.repoId, m]));
 
-  const ids = new Set([...byId.keys(), ...[...servedIds].map(s => String(s).trim()).filter(Boolean)]);
+  const ids = new Set([
+    ...byId.keys(),
+    ...[...servedIds].map(s => String(s).trim()).filter(Boolean),
+    ...[...listedIds].map(s => String(s).trim()).filter(Boolean),
+  ]);
   if (manualName) ids.add(String(manualName).trim());
 
   const models = [...ids].map(repoId => rank({
     repoId,
     servedIds,
+    listedIds,
     onDisk: byId.get(repoId) ?? null,
     budget: measuredBudget,
     now: measuredNow,
@@ -1047,10 +1451,19 @@ export function heartbeatFields(models) {
   const best = [...(models ?? [])].sort(byStrength)[0];
   if (!best) return {};
 
-  if (best.state === AVAILABILITY.SERVED) return { model_state: best.state };
+  // Size and parameters travel with whatever the best state is, including a
+  // served one: "27B, 27.5 GB" is useful on every card, and it is measured
+  // from the disk either way. Omitted whole when not derived - a chip with no
+  // number is better than a chip with a number nobody counted.
+  const shape = {
+    ...(best.sizeGb === undefined ? {} : { model_size_gb: best.sizeGb }),
+    ...(best.paramsB === undefined ? {} : { model_params_b: best.paramsB, model_params_source: best.paramsSource }),
+  };
+
+  if (best.state === AVAILABILITY.SERVED) return { model_state: best.state, ...shape };
 
   if (best.state === AVAILABILITY.FITS_NOW) {
-    return { model_state: best.state, model_available: best.model, model_needs_gb: 0 };
+    return { model_state: best.state, model_available: best.model, model_needs_gb: 0, ...shape };
   }
 
   if (best.state === AVAILABILITY.FITS_IF_FREED) {
@@ -1059,10 +1472,11 @@ export function heartbeatFields(models) {
       model_available: best.model,
       model_needs_gb: best.needsGb,
       ...(best.holder ? { model_held_by: best.holder.name } : {}),
+      ...shape,
     };
   }
 
-  return { model_state: best.state };
+  return { model_state: best.state, ...shape };
 }
 
 function round1(n) {
@@ -1119,6 +1533,25 @@ export class ModelAvailabilityProbe {
   /** What the heartbeat merges in. Never a placeholder. */
   current() {
     return heartbeatFields(this.lastResult().models);
+  }
+
+  /**
+   * Would it be safe to ask this model to generate one token?
+   *
+   * The veto the served-model probe wires itself to. Asking a server to
+   * generate names a model, and on a server that loads on demand naming it is
+   * an instruction to load it - so the only safe candidate is one whose bytes
+   * are all here and which fits the memory available right now. An incomplete
+   * download, an oversized model, or a box that cannot measure itself all
+   * answer false, which leaves the verdict at LISTED. Unknowns fail closed
+   * here too.
+   */
+  couldLoad(modelId) {
+    const id = String(modelId ?? '').trim();
+    if (!id) return false;
+    return this.lastResult().models.some(
+      m => m.model === id && (m.state === AVAILABILITY.FITS_NOW || m.state === AVAILABILITY.SERVED)
+    );
   }
 
   async refresh(extra = {}) {

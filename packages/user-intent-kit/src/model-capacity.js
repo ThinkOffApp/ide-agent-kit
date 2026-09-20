@@ -922,3 +922,113 @@ async function probeOne(entry, {
     checkedAt: new Date(now()).toISOString(),
   };
 }
+
+/** Where a generation probe posts. The chat route every OpenAI clone has. */
+export function generationPath(kind) {
+  return kind === 'lmstudio' ? '/api/v1/chat/completions' : '/v1/chat/completions';
+}
+
+/**
+ * ONE tiny generation, because a model list is not evidence that anything is
+ * loaded.
+ *
+ * WHY THIS EXISTS, measured in production 20 Sep 2026. `mlx_lm server`
+ * enumerates the local HuggingFace cache in `/v1/models`. A 75 GiB model that
+ * was still downloading, and whose architecture that build could not even
+ * load, appeared in the listing; the reporter believed it and a dashboard
+ * announced the MacBook was serving it. The server process was 2.3 GiB RSS
+ * with a small model, and a generation request answered
+ * `Model type qwen4_exp not supported`.
+ *
+ * So a listing proves that some files exist on disk - the same grade of
+ * evidence as a directory scan - and the ONLY thing that proves a model is
+ * loaded is that it generated. One token is enough, and one token is all this
+ * asks for.
+ *
+ * It is not free: it costs compute on somebody's box, and against a server
+ * that has NOT loaded the model it may cause it to try. That is why the
+ * caller is expected to keep it switched off by default, rate limit it, and
+ * refuse candidates that are incomplete or would not fit - see
+ * ServedModelProbe, which does all three.
+ *
+ * Credentials resolve exactly as they do for the listing: `resolveEntryToken`,
+ * a path never a value, and the token goes into one header and nowhere else.
+ *
+ * @returns {Promise<{generated: boolean, model: string|null, reason: string|null,
+ *   httpStatus: number|null, rttMs: number}>}
+ */
+export async function probeGeneration(entry, {
+  modelId,
+  fetchImpl = fetch,
+  timeoutMs = 5000,
+  now = () => Date.now(),
+  env = process.env,
+  maxTokens = 1,
+} = {}) {
+  const started = now();
+  const fail = (reason, httpStatus = null) => ({
+    generated: false, model: null, reason, httpStatus, rttMs: Math.max(0, now() - started),
+  });
+
+  if (!modelId || typeof modelId !== 'string') return fail('no model id to ask about');
+
+  const credential = await resolveEntryToken(entry, { env });
+  const bracket = entry.host.includes(':') && !entry.host.startsWith('[') ? `[${entry.host}]` : entry.host;
+  const url = `http://${bracket}:${entry.port}${generationPath(entry.kind)}`;
+  const headers = { accept: 'application/json', 'content-type': 'application/json' };
+  if (credential.token) headers.authorization = `Bearer ${credential.token}`;
+
+  let response;
+  try {
+    response = await fetchImpl(url, {
+      method: 'POST',
+      headers,
+      redirect: 'error',
+      signal: AbortSignal.timeout(timeoutMs),
+      body: JSON.stringify({
+        model: modelId,
+        messages: [{ role: 'user', content: 'hi' }],
+        max_tokens: maxTokens,
+        temperature: 0,
+        stream: false,
+      }),
+    });
+  } catch (err) {
+    const { all, best } = errorCodes(err);
+    if (all.includes('TimeoutError') || all.includes('AbortError')) {
+      // A model that has to be loaded before it can answer will blow this
+      // budget. That is a degrade, never a promote: we still do not know it
+      // is loaded, which is the only question being asked.
+      return fail(`no token within ${timeoutMs} ms`);
+    }
+    return fail(`generation request failed (${best || err.message})`);
+  }
+
+  if (!response.ok) {
+    let detail = '';
+    try {
+      const body = await response.json();
+      const message = body?.error?.message ?? body?.error ?? body?.detail;
+      if (typeof message === 'string') detail = `: ${message.slice(0, 200)}`;
+    } catch {
+      // A server that cannot even describe its own failure still failed.
+    }
+    return fail(`generation returned HTTP ${response.status}${detail}`, response.status);
+  }
+
+  let data;
+  try {
+    data = await response.json();
+  } catch {
+    return fail('generation returned unparseable JSON', response.status);
+  }
+
+  const choice = Array.isArray(data?.choices) ? data.choices[0] : null;
+  if (!choice) return fail('generation returned no choices', response.status);
+
+  // The id is taken from the ANSWER, not from what we asked for. On a server
+  // holding several models that is the only thing that names the one which
+  // actually ran; when it says nothing, the id we asked about stands.
+  const answered = typeof data?.model === 'string' && data.model.trim() ? data.model.trim() : modelId;
+  return { generated: true, model: answered, reason: null, httpStatus: response.status, rttMs: Math.max(0, now() - started) };
+}

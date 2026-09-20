@@ -46,10 +46,17 @@ export class DesktopAdapter {
     this.#machine = machine ?? client?.deviceId ?? undefined;
     this.#kind = kind;
     this.#model = model;
-    this.#modelProbe = modelProbe === undefined ? new ServedModelProbe() : modelProbe;
+    // Order matters: the served-model probe's generation guard is wired to
+    // the disk scan, so the scan has to exist first. Without the guard a probe
+    // could ask a server to generate with a model that is half downloaded,
+    // and on a server that loads on demand that request IS a load.
     this.#availabilityProbe = availabilityProbe === undefined
       ? new ModelAvailabilityProbe()
       : availabilityProbe;
+    const scan = this.#availabilityProbe;
+    this.#modelProbe = modelProbe === undefined
+      ? new ServedModelProbe({ guard: id => scan?.couldLoad(id) ?? false })
+      : modelProbe;
     this.#pollIntervalMs = pollIntervalMs;
     this.#pollTimer = null;
   }
@@ -82,6 +89,21 @@ export class DesktopAdapter {
     if (seen?.model) return seen.model;
     if (seen?.reachedServer) return undefined;
     return this.#model;
+  }
+
+  /**
+   * What the endpoint merely ADVERTISES, in its own keys.
+   *
+   * A listing is not a loading - `mlx_lm` lists the whole HuggingFace cache -
+   * so this can never reach `model`. One id is named; several are counted and
+   * none is named, because a server listing several cannot have them all
+   * resident and picking one would be a coin toss printed as a fact.
+   */
+  #listedModels() {
+    const listed = this.#modelProbe?.listed?.() ?? [];
+    if (!listed.length) return {};
+    if (listed.length === 1) return { model_listed: listed[0], model_listed_count: 1 };
+    return { model_listed_count: listed.length };
   }
 
   /**
@@ -164,6 +186,7 @@ export class DesktopAdapter {
       // nothing else, so a dashboard that has never heard of availability
       // cannot start rendering "this box could run it" as "this box is
       // running it". Empty when there is nothing measured to say.
+      ...this.#listedModels(),
       ...(this.#availabilityProbe?.current() ?? {}),
     };
 

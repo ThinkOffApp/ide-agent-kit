@@ -3,7 +3,10 @@
 ## Unreleased
 
 ### Added
-- The device heartbeat now reports which LLM the machine is actually serving, as `model`. It is a live reading: `ServedModelProbe` asks a local OpenAI-compatible endpoint (`INTENT_MODEL_ENDPOINT`, default `127.0.0.1:8080`) and publishes the id it answers with, verbatim.
+- The device heartbeat now reports which LLM the machine is actually serving, as `model`. It is a live reading, and **only a returned token fills it**: `ServedModelProbe` asks a local OpenAI-compatible endpoint (`INTENT_MODEL_ENDPOINT`, default `127.0.0.1:8080`) what it lists, then optionally asks one of them to generate.
+- `VERDICTS.LISTED` and `VERDICTS.GENERATED`, replacing `NAMED`. A listing is not a loading: `mlx_lm server` enumerates the local HuggingFace cache, so a 75 GiB model that was still downloading - and that the build could not load at all - was advertised by a server holding a 2.3 GiB one, and the dashboard announced the MacBook was serving it. A listing now travels as `model_listed` / `model_listed_count`, never as `model`.
+- An optional generation probe (`probeGeneration`): one request, `max_tokens: 1`, short timeout, and a returned token is the evidence. **Off unless `INTENT_MODEL_GENERATE` says otherwise**, rate limited to one call per 5 minutes (`INTENT_MODEL_GENERATE_MIN_MS`), never sent to a host the operator did not name, and vetoed by the disk scan so an incomplete or oversized model is never asked. Any error, timeout or refusal degrades to `listed`; nothing promotes to `served`.
+- `model_size_gb`, `model_params_b` and `model_params_source`, so a chip can read "27B, 27.5 GB". Parameters come from the safetensors index's own `total_parameters`, else summed tensor shapes, else the GGUF tensor table, else the digits in the repo name - which is published as `name-unconfirmed` and never as fact. An incomplete download publishes no count at all.
 - `probeServedModels()` in `model-capacity.js` - one model-list GET with the existing credential rules, for callers that want the name and not the switcher's p90/free-memory/path readings.
 - `INTENT_MODEL_KIND`, `INTENT_MODEL_KEY_FILE` (a **path**, never a token), `INTENT_MODEL_PROBE_MS`.
 - A second, weaker and separately-labelled model claim: **available**. `model-availability.js` scans this box's model directories, verifies a download is complete, measures the memory budget, and publishes `model_state`, `model_available`, `model_needs_gb` and `model_held_by`. `model` still means SERVED and nothing else.
@@ -22,6 +25,10 @@ The device chips could only say "a server is advertising this right now", so a b
 Three rules make it safe to publish. An undeterminable memory budget reports `budget-unknown` and **never** a positive fit: on Apple Silicon the ceiling is Metal's recommended working set (measured on the MacBook: 115.4 GB of 137.4 GB installed), and with no mlx to ask and `iogpu.wired_limit_mb` at 0 there is no figure, only an unpublished kernel policy. A partially downloaded model reports `incomplete` - `.incomplete` blobs, dangling snapshot links, shard gaps and the weight index are all checked, because a half-downloaded model reading "available and fits" is the exact defect this feature prevents. And a SERVED model always outranks an available one for the same box.
 
 The live headroom comes from `vm_stat`'s reclaimable counters on macOS, not `memory_pressure`: measured here, the latter reported 86% free on a box with 34.8 GB of active pages and an 18.5 GB VM resident, because it counts running applications as free. Cache the kernel hands back counts toward `fits-now`; memory only a human can return does not.
+
+That parser fails closed, because a broken one does not throw - it matches nothing, sums an empty set to zero, reports nothing in use, and green-lights every model with a confident "fits now". It requires the page size to be stated (16384 on Apple Silicon, 4096 elsewhere; never assumed), requires every counter it cross-checks, refuses an empty parse, and refuses a reading whose queues do not account for installed RAM or which implies nothing is in use. The Linux `MemAvailable` path is bounded the same way.
+
+**Every unknown in this feature fails closed.** An unreadable budget, an unparseable memory figure, a model that is merely listed, a download that is 99% finished, a parameter count nobody derived. None of them becomes a positive claim.
 
 ## 0.2.0 (2026-04-07)
 

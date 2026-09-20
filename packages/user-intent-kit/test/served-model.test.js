@@ -26,17 +26,25 @@ import {
   VERDICTS,
   DEFAULT_ENDPOINT,
   DEFAULT_PROBE_INTERVAL_MS,
+  DEFAULT_GENERATION_MIN_MS,
 } from '../src/served-model.js';
+import { loadRegistry } from '../src/model-capacity.js';
 import { DesktopAdapter } from '../src/adapters/desktop.js';
 import { collectHostTelemetry } from '../src/host-telemetry.js';
 
 // --- fakes -----------------------------------------------------------------
 
-/** A server that answers `/v1/models` with these ids. */
-function serving(ids, { status = 200, requireAuth = false } = {}) {
+/**
+ * A server that answers `/v1/models` with these ids, and - unless told
+ * otherwise - answers a generation request with one token.
+ *
+ * `generates: false` is the September 2026 incident in a fake: the listing is
+ * honest about what is in the cache and the model cannot actually run.
+ */
+function serving(ids, { status = 200, requireAuth = false, generates = true, genError = 'Model type qwen4_exp not supported' } = {}) {
   const calls = [];
   const impl = async (url, options) => {
-    calls.push({ url, headers: options?.headers ?? {} });
+    calls.push({ url, method: options?.method ?? 'GET', headers: options?.headers ?? {} });
     const authed = Boolean(options?.headers?.authorization);
     if (requireAuth && !authed) {
       return { ok: false, status: 401, json: async () => ({ error: 'unauthorized' }) };
@@ -44,10 +52,26 @@ function serving(ids, { status = 200, requireAuth = false } = {}) {
     if (status !== 200) {
       return { ok: false, status, json: async () => ({}) };
     }
+    if (options?.method === 'POST') {
+      if (!generates) {
+        return { ok: false, status: 400, json: async () => ({ error: { message: genError } }) };
+      }
+      const asked = JSON.parse(options.body).model;
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({ model: asked, choices: [{ message: { role: 'assistant', content: 'hi' }, finish_reason: 'length' }] }),
+      };
+    }
     return { ok: true, status: 200, json: async () => ({ object: 'list', data: ids.map(id => ({ id })) }) };
   };
   impl.calls = calls;
   return impl;
+}
+
+/** A probe allowed to spend a token, with the rate limit out of the way. */
+function provingProbe(fetchImpl, extraEnv = {}, opts = {}) {
+  return probeFor(fetchImpl, extraEnv, { generate: true, generateMinMs: 0, ...opts });
 }
 
 /** Nothing listening on that port, the way Node's fetch reports it. */
@@ -101,11 +125,11 @@ test('an endpoint that answers but lists nothing loaded publishes no model', asy
 // probe, so a wiring break fails here rather than quietly halving the suite.
 
 test('CONTROL: the same path that publishes nothing when idle publishes the id when served', async () => {
-  const idle = probeFor(serving([]));
+  const idle = provingProbe(serving([]));
   await idle.refresh();
   assert.equal(idle.current(), undefined, 'idle arm must produce no name');
 
-  const live = probeFor(serving(['GLM-5.3-Flash-EXL3']));
+  const live = provingProbe(serving(['GLM-5.3-Flash-EXL3']));
   await live.refresh();
   assert.equal(live.current(), 'GLM-5.3-Flash-EXL3', 'live arm must produce the name');
 
@@ -124,16 +148,28 @@ test("a live endpoint's reported id is published verbatim", async () => {
     'Qwen/Qwen3-Coder-30B-A3B-Instruct',
     'Mia-AiLab/GLM-5.3-Flash-EXL3-TR3-4bpw',
   ]) {
-    const probe = probeFor(serving([id]));
+    const probe = provingProbe(serving([id]));
     await probe.refresh();
     assert.equal(probe.current(), id, `mangled ${id}`);
   }
 });
 
-test('a server listing several models names one of them, never a joined string', async () => {
-  const probe = probeFor(serving(['first-model', 'second-model']));
+test('a server listing several models names NONE of them', async () => {
+  // It used to name the first, which is a coin toss printed as a reading: a
+  // server listing two models cannot have both resident, so neither id is
+  // "the" served model. Joining them produced a string that is no model's id
+  // and that string reached a dashboard.
+  const probe = provingProbe(serving(['first-model', 'second-model']));
   await probe.refresh();
-  assert.equal(probe.current(), 'first-model');
+
+  assert.equal(probe.current(), undefined);
+  assert.deepEqual(probe.listed(), ['first-model', 'second-model']);
+  assert.equal(probe.lastResult().verdict, VERDICTS.LISTED);
+  assert.match(probe.lastResult().reason, /2 models listed/);
+
+  // And nothing was asked to generate: naming one of several would be a
+  // guess, and on a server that loads on demand it is an instruction to load.
+  assert.equal(serving(['a', 'b']).calls.length, 0);
 });
 
 // --- 401: serving something, and we still do not name it -------------------
@@ -179,9 +215,14 @@ test('a configured key file turns the same 401 into a real name', async () => {
   await without.refresh();
   assert.equal(without.current(), undefined);
 
-  const withKey = probeFor(server, { INTENT_MODEL_KEY_FILE: keyFile });
+  const withKey = provingProbe(server, { INTENT_MODEL_KEY_FILE: keyFile });
   await withKey.refresh();
   assert.equal(withKey.current(), 'GLM-5.3-Flash-EXL3');
+
+  // The generation request carried the same header. A probe that authenticated
+  // its listing and then posted a prompt without a token would 401 here.
+  const posted = server.calls.find(c => c.method === 'POST');
+  assert.ok(posted?.headers?.authorization, 'generation went out unauthenticated');
 
   // And the token itself is never anywhere in what we would publish.
   assert.equal(JSON.stringify(withKey.lastResult()).includes('test-token-value'), false);
@@ -239,7 +280,7 @@ test('a heartbeat publishes before the probe has answered anything', async () =>
 
 test('a stale reading expires instead of being republished forever', async () => {
   let clock = 1_000_000;
-  const probe = probeFor(serving(['GLM-5.3-Flash-EXL3']), {}, {
+  const probe = provingProbe(serving(['GLM-5.3-Flash-EXL3']), {}, {
     now: () => clock,
     intervalMs: 1000,
     staleAfterMs: 3000,
@@ -257,7 +298,9 @@ test('a stale reading expires instead of being republished forever', async () =>
 
 test('a server that stops serving drops the label on the next probe', async () => {
   let ids = ['GLM-5.3-Flash-EXL3'];
-  const probe = probeFor(async () => ({ ok: true, status: 200, json: async () => ({ data: ids.map(id => ({ id })) }) }));
+  const probe = provingProbe(async (url, options) => (options?.method === 'POST'
+    ? { ok: true, status: 200, json: async () => ({ model: ids[0], choices: [{ message: { content: 'hi' } }] }) }
+    : { ok: true, status: 200, json: async () => ({ data: ids.map(id => ({ id })) }) }));
 
   await probe.refresh();
   assert.equal(probe.current(), 'GLM-5.3-Flash-EXL3');
@@ -269,7 +312,9 @@ test('a server that stops serving drops the label on the next probe', async () =
 
 test('a model swap is reported, not frozen at the first answer', async () => {
   let ids = ['model-a'];
-  const probe = probeFor(async () => ({ ok: true, status: 200, json: async () => ({ data: ids.map(id => ({ id })) }) }));
+  const probe = provingProbe(async (url, options) => (options?.method === 'POST'
+    ? { ok: true, status: 200, json: async () => ({ model: ids[0], choices: [{ message: { content: 'hi' } }] }) }
+    : { ok: true, status: 200, json: async () => ({ data: ids.map(id => ({ id })) }) }));
   await probe.refresh();
   assert.equal(probe.current(), 'model-a');
   ids = ['model-b'];
@@ -280,7 +325,7 @@ test('a model swap is reported, not frozen at the first answer', async () => {
 // --- detection outranks configuration --------------------------------------
 
 test('a live answer beats INTENT_DEVICE_MODEL', async () => {
-  const probe = probeFor(serving(['GLM-5.3-Flash-EXL3']));
+  const probe = provingProbe(serving(['GLM-5.3-Flash-EXL3']));
   await probe.refresh();
   const state = await stateFrom({ modelProbe: probe, model: 'whatever-was-configured-last-march' });
   assert.equal(state.model, 'GLM-5.3-Flash-EXL3');
@@ -392,13 +437,125 @@ test('readVerdict never invents a model from a result that has none', () => {
     [{ http: 'OK', models: [] }, VERDICTS.NO_SERVER],
     [{ http: 'OK', models: ['  '] }, VERDICTS.NO_SERVER],
     [undefined, VERDICTS.NO_SERVER],
+    // A listing is its own verdict now, and it is NOT a served name.
+    [{ http: 'OK', models: ['a-real-id'] }, VERDICTS.LISTED],
   ];
   for (const [result, verdict] of cases) {
     const read = readVerdict(result);
     assert.equal(read.verdict, verdict, JSON.stringify(result));
     assert.equal(read.model, undefined, `invented a model from ${JSON.stringify(result)}`);
   }
-  assert.equal(readVerdict({ http: 'OK', models: [' padded-id '] }).model, 'padded-id');
+  // The id is still taken verbatim - it just travels in `listed`, not `model`.
+  assert.deepEqual(readVerdict({ http: 'OK', models: [' padded-id '] }).listed, ['padded-id']);
+});
+
+// --- A LISTING IS NOT A LOADING -------------------------------------------
+// Measured in production 20 Sep 2026: mlx_lm enumerates the HuggingFace cache,
+// so a 75 GiB model that was still downloading was listed by a server holding
+// a 2.3 GiB one, and the dashboard said the MacBook was serving it.
+
+test('a server listing a model it has not loaded does NOT report it as served', async () => {
+  const probe = probeFor(serving(['ddalcu/Qwen3.8-Flash-Next-MLX-Serve-mixed-4-8bit']));
+  await probe.refresh();
+
+  assert.equal(probe.current(), undefined, 'published a served name from a listing alone');
+  assert.equal(probe.lastResult().verdict, VERDICTS.LISTED);
+  assert.deepEqual(probe.listed(), ['ddalcu/Qwen3.8-Flash-Next-MLX-Serve-mixed-4-8bit']);
+
+  // And it must not reach the heartbeat's `model` either.
+  const state = await stateFrom({ modelProbe: probe });
+  assert.ok(!('model' in state), `a listing reached the model field: ${state.model}`);
+});
+
+test('the generation probe is OFF unless it is switched on', async () => {
+  const fetchImpl = serving(['a-model']);
+  const probe = probeFor(fetchImpl);
+  await probe.refresh();
+
+  assert.equal(probe.lastResult().verdict, VERDICTS.LISTED);
+  assert.ok(!fetchImpl.calls.some(c => c.method === 'POST'), 'spent a token without being asked to');
+
+  // INTENT_MODEL_GENERATE is the switch, and nothing else flips it.
+  const on = probeFor(serving(['a-model']), { INTENT_MODEL_GENERATE: '1' }, { generateMinMs: 0 });
+  await on.refresh();
+  assert.equal(on.lastResult().verdict, VERDICTS.GENERATED);
+  assert.equal(on.current(), 'a-model');
+});
+
+test('a generation that errors DEGRADES to listed, never promotes to served', async () => {
+  // The exact failure from the incident: the listing is fine, the model
+  // cannot load, and the error says so.
+  const probe = provingProbe(serving(['ddalcu/Qwen3.8-Flash-Next'], { generates: false }));
+  await probe.refresh();
+
+  assert.equal(probe.lastResult().verdict, VERDICTS.LISTED);
+  assert.equal(probe.current(), undefined);
+  assert.match(probe.lastResult().reason, /qwen4_exp not supported/);
+});
+
+test('a generation that times out degrades too', async () => {
+  const probe = provingProbe(async (url, options) => {
+    if (options?.method !== 'POST') {
+      return { ok: true, status: 200, json: async () => ({ data: [{ id: 'slow-model' }] }) };
+    }
+    const err = new Error('The operation was aborted due to timeout');
+    err.name = 'TimeoutError';
+    throw err;
+  });
+  await probe.refresh();
+  assert.equal(probe.lastResult().verdict, VERDICTS.LISTED);
+  assert.equal(probe.current(), undefined);
+  assert.match(probe.lastResult().reason, /no token within/);
+});
+
+test('the generation probe is rate limited hard', async () => {
+  let clock = 1_000_000;
+  const fetchImpl = serving(['a-model']);
+  const probe = probeFor(fetchImpl, { INTENT_MODEL_GENERATE: '1' }, { now: () => clock, staleAfterMs: 10 ** 9 });
+
+  await probe.refresh();
+  assert.equal(probe.lastResult().verdict, VERDICTS.GENERATED);
+  const spent = fetchImpl.calls.filter(c => c.method === 'POST').length;
+  assert.equal(spent, 1);
+
+  // A second beat one second later must not spend another forward pass.
+  clock += 1000;
+  await probe.refresh();
+  assert.equal(fetchImpl.calls.filter(c => c.method === 'POST').length, 1, 'ignored the rate limit');
+
+  // Past the floor, it may ask again.
+  clock += DEFAULT_GENERATION_MIN_MS;
+  await probe.refresh();
+  assert.equal(fetchImpl.calls.filter(c => c.method === 'POST').length, 2);
+});
+
+test('a remote endpoint nobody configured is never asked to generate', async () => {
+  const fetchImpl = serving(['a-model']);
+  // No INTENT_MODEL_ENDPOINT in the environment: this entry was built by hand,
+  // so the operator never named this host.
+  const [entry] = loadRegistry([{ id: 'local', host: '10.0.0.5', port: 8080, kind: 'openai' }], { allowLan: true });
+  const probe = new ServedModelProbe({
+    entry, env: { INTENT_MODEL_GENERATE: '1' }, fetchImpl, generateMinMs: 0,
+  });
+  await probe.refresh();
+
+  assert.equal(probe.lastResult().verdict, VERDICTS.LISTED);
+  assert.ok(!fetchImpl.calls.some(c => c.method === 'POST'), 'posted a prompt to a host nobody named');
+});
+
+test('a guard can refuse a candidate before any token is spent', async () => {
+  const fetchImpl = serving(['half-downloaded-model']);
+  const probe = probeFor(fetchImpl, { INTENT_MODEL_GENERATE: '1' }, {
+    generateMinMs: 0,
+    // The daemon wires this to the disk scan: an incomplete or oversized
+    // model is never asked to generate, because asking would load it.
+    guard: () => false,
+  });
+  await probe.refresh();
+
+  assert.equal(probe.lastResult().verdict, VERDICTS.LISTED);
+  assert.ok(!fetchImpl.calls.some(c => c.method === 'POST'));
+  assert.match(probe.lastResult().reason, /bytes on disk do not support it/);
 });
 
 // --- helpers ---------------------------------------------------------------

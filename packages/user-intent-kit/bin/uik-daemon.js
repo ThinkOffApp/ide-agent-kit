@@ -130,6 +130,11 @@ console.log(`uik-daemon: model probe -> ${modelProbe.describe()}`);
 // And where the weaker claim comes from. A card reading "available and fits"
 // should be traceable to a directory somebody can list, not to a guess.
 console.log(`uik-daemon: model scan  -> ${defaultSearchRoots().join(', ')}`);
+// Whether this box will ever publish a SERVED model at all. A listing is not
+// a loading - mlx_lm lists the whole HuggingFace cache - so only a returned
+// token fills the `model` field, and asking for one is opt-in because it
+// spends a forward pass on this machine.
+console.log(`uik-daemon: generation  -> ${process.env.INTENT_MODEL_GENERATE ? 'on (INTENT_MODEL_GENERATE)' : 'off; models will report as listed, never served'}`);
 
 const shutdown = async (sig) => {
   console.log(`uik-daemon: ${sig}, shutting down`);
