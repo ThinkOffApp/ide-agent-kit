@@ -8,25 +8,40 @@
 // code they are about and they must FAIL. They were proven that way (see the
 // PR body), because a check that cannot fail is not a check.
 //
-// DUMMY_SECRET is a made-up string. It is planted in the environment and in a
-// key file, and the suite asserts it reaches neither the selection file nor
-// any rendered output. A fixture carrying a real key would publish it: this
-// repository is public.
+// NO TEST IN THIS FILE MAY REACH THE PRODUCTION DAEMON. Every call passes a
+// daemonBase that belongs to a fixture: a loopback server started here, or a
+// port that was bound and released. That is not a convention, it is enforced
+// by pickModel/raiseChoice/daemonIsUp requiring the argument - a reviewer
+// running a modified copy of this suite once escaped into the real daemon and
+// queued a live question on the owner's phone, because the code under test
+// had a default and the test relied on a branch not being taken. A suite whose
+// safety depends on the code under test being correct is inverted.
+//
+// DUMMY_SECRET and DUMMY_GATE_TOKEN are made-up strings. They are planted in
+// the environment, in a key file and in a gate-token file, and the suite
+// asserts they reach neither the selection file, any rendered output, nor any
+// request to an untrusted host. A fixture carrying a real credential would
+// publish it: this repository is public.
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
 import { once } from 'node:events';
-import { mkdtemp, readFile, writeFile, rm } from 'node:fs/promises';
+import { execFile } from 'node:child_process';
+import { mkdtemp, readFile, writeFile, symlink, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, dirname } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 import {
+  main,
   pickModel,
   buildOffer,
   buildSelection,
   baseUrlFor,
   describeOffer,
+  describeExclusion,
+  offerability,
   raiseChoice,
   daemonIsUp,
   renderOutcome,
@@ -39,6 +54,9 @@ import { loadRegistry } from '../packages/user-intent-kit/src/model-capacity.js'
 import { createIntent, decideIntent, getIntent } from '../src/confirmations.mjs';
 
 const DUMMY_SECRET = 'sk-test-NOT-A-REAL-KEY-6f1d9c2b4a';
+const DUMMY_GATE_TOKEN = 'gate-test-NOT-A-REAL-TOKEN-91b3ee';
+const PICKER = join(dirname(fileURLToPath(import.meta.url)), '..', 'bin', 'model-picker.mjs');
+const HOST = 'testbox';
 
 // --- fixtures --------------------------------------------------------------
 
@@ -67,6 +85,7 @@ function result(id, state, extra = {}) {
     models: state === 'UP' ? [`${id}-model`] : [],
     freeMemGiB: state === 'UP' ? 40 : 2.1,
     p90Ms: 220, jitterMs: 12, path: 'direct',
+    keyBlocked: false, keyWarning: null, capacityUnknown: false,
     reason: reasons[state],
     checkedAt: new Date(1_700_000_000_000).toISOString(),
     ...extra,
@@ -86,17 +105,23 @@ function stubProbe(steps) {
 }
 
 const ALL_UP = () => entries => entries.map(e => result(e.id, 'UP'));
+/** Only `id` is UP; everything else is DOWN. */
+const ONLY = id => entries => entries.map(e => result(e.id, e.id === id ? 'UP' : 'DOWN'));
 
 /**
  * A stand-in for the intent daemon: the two endpoints request_choice uses.
  * `decide` is called with the created intent and returns the label to answer
- * with, or null to leave it pending forever (the timeout case).
+ * with, or null to leave it pending. `hangOnPoll` accepts the connection and
+ * never answers, which is the shape that makes an unsignalled fetch immortal.
  */
-async function fakeDaemon({ decide = () => null, pollsBeforeDecision = 1, refuse = null } = {}) {
+async function fakeDaemon({ decide = () => null, pollsBeforeDecision = 1, refuse = null, hangOnPoll = false } = {}) {
   const created = [];
+  const requests = [];
   const rows = new Map();
+  const sockets = new Set();
   let polls = 0;
   const server = createServer((req, res) => {
+    requests.push({ method: req.method, url: req.url, headers: req.headers });
     const json = (code, body) => {
       res.writeHead(code, { 'content-type': 'application/json' });
       res.end(JSON.stringify(body));
@@ -116,6 +141,7 @@ async function fakeDaemon({ decide = () => null, pollsBeforeDecision = 1, refuse
     }
     if (req.method === 'GET' && req.url === '/intents') {
       polls += 1;
+      if (hangOnPoll) return; // accepted, never answered
       for (const row of rows.values()) {
         if (row.status === 'pending' && polls > pollsBeforeDecision) {
           const answer = decide(row);
@@ -130,12 +156,17 @@ async function fakeDaemon({ decide = () => null, pollsBeforeDecision = 1, refuse
     }
     json(404, { ok: false, error: 'not found' });
   });
+  server.on('connection', s => { sockets.add(s); s.on('close', () => sockets.delete(s)); });
   server.listen(0, '127.0.0.1');
   await once(server, 'listening');
   return {
     base: `http://127.0.0.1:${server.address().port}`,
     created,
-    close: () => new Promise(r => server.close(r)),
+    requests,
+    close: async () => {
+      for (const s of sockets) s.destroy();
+      await new Promise(r => server.close(r));
+    },
   };
 }
 
@@ -147,6 +178,11 @@ async function deadPort() {
   const { port } = server.address();
   await new Promise(r => server.close(r));
   return port;
+}
+
+/** A daemon address that is guaranteed not to answer. Never the real one. */
+async function deadDaemon() {
+  return `http://127.0.0.1:${await deadPort()}`;
 }
 
 async function withTmp(fn) {
@@ -167,14 +203,25 @@ const PREVIOUS = {
   selectedFrom: 'mini',
 };
 
-async function seedPrevious(dir) {
+async function seedPrevious(dir, selection = PREVIOUS) {
   const path = join(dir, 'model-selection.json');
-  await writeFile(path, JSON.stringify(PREVIOUS, null, 2) + '\n');
+  await writeFile(path, JSON.stringify(selection, null, 2) + '\n');
   return { path, before: await readFile(path) };
 }
 
 const REGISTRY_PATH = '/does/not/matter.json';
 const readRegistryOk = async () => registry();
+
+/** Defaults every pickModel call in this suite shares. Never a live daemon. */
+async function pick(overrides = {}) {
+  return pickModel({
+    registryPath: REGISTRY_PATH,
+    callerHost: HOST,
+    daemonBase: overrides.daemonBase ?? await deadDaemon(),
+    readRegistryImpl: readRegistryOk,
+    ...overrides,
+  });
+}
 
 // --- offering --------------------------------------------------------------
 
@@ -184,7 +231,7 @@ test('NEGATIVE CONTROL: only UP entries are offered, and the excluded ones are n
     result('asus1-vllm-qwen3-coder', 'BUSY'),
     result('mini-lmstudio', 'UNREACHABLE'),
   ];
-  const offer = buildOffer(results, { callerHost: 'testbox' });
+  const offer = buildOffer(results, { callerHost: HOST });
 
   assert.deepEqual(offer.options, ['glm53-asus']);
   // The user must be able to see WHY the other two are missing, in the thing
@@ -197,7 +244,7 @@ test('NEGATIVE CONTROL: only UP entries are offered, and the excluded ones are n
 });
 
 test('the human detail is in the prompt, never in a label', () => {
-  const offer = buildOffer([result('glm53-asus', 'UP')], { callerHost: 'testbox' });
+  const offer = buildOffer([result('glm53-asus', 'UP')], { callerHost: HOST });
   assert.deepEqual(offer.options, ['glm53-asus']);
   assert.match(offer.prompt, /glm53-asus - glm53-asus-model, 40 GiB free, p90 220 ms \+-12, direct/);
   for (const label of offer.options) {
@@ -205,10 +252,63 @@ test('the human detail is in the prompt, never in a label', () => {
   }
 });
 
+test('P2-8 REGRESSION: an entry whose credential cannot be read is not offered, and says so', () => {
+  // vLLM and llama.cpp serve /v1/models without auth, so this box answers
+  // perfectly and reports UP. The probe knows the keyFile is unreadable.
+  const blocked = result('glm53-asus', 'UP', {
+    keyBlocked: true,
+    keyWarning: 'cannot read key file /tmp/gone.txt (ENOENT)',
+  });
+  assert.equal(offerability(blocked).offerable, false);
+  const offer = buildOffer([blocked, result('mini-lmstudio', 'UP')], { callerHost: HOST });
+  assert.deepEqual(offer.options, ['mini-lmstudio']);
+  assert.match(offer.prompt, /glm53-asus UP but its credential is unusable: cannot read key file/);
+  assert.match(describeExclusion(blocked), /would refuse the first real request/);
+});
+
+test('P2-8 REGRESSION: a key-blocked entry is not applied even when it is the only UP one', async () => {
+  await withTmp(async (dir) => {
+    const { path, before } = await seedPrevious(dir);
+    const outcome = await pick({
+      selectionPath: path,
+      probeImpl: stubProbe([entries => entries.map(e => result(e.id, 'UP', e.id === 'glm53-asus'
+        ? { keyBlocked: true, keyWarning: 'cannot read key file /tmp/gone.txt (ENOENT)' }
+        : { state: 'DOWN', models: [] }))]),
+      daemonIsUpImpl: async () => { throw new Error('must not reach a daemon'); },
+    });
+    assert.equal(outcome.outcome, OUTCOMES.NONE_UP);
+    assert.deepEqual(await readFile(path), before);
+  });
+});
+
+test('a non-disqualifying warning is shown on an entry you CAN pick, not only on excluded ones', () => {
+  const warned = result('glm53-asus', 'UP', {
+    keyWarning: 'key file /tmp/k.txt is mode 0644 - readable beyond its owner; chmod 600 it',
+    capacityUnknown: true,
+    freeMemGiB: null,
+  });
+  const line = describeOffer(warned);
+  assert.match(line, /WARNING key file .* mode 0644/);
+  assert.match(line, /capacity unknown/);
+  assert.match(line, /free unknown/);
+});
+
+test('an UP entry that named no model is refused rather than offered as "model unknown"', () => {
+  const nameless = result('glm53-asus', 'UP', { models: [] });
+  assert.equal(offerability(nameless).offerable, false);
+  const offer = buildOffer([nameless, result('mini-lmstudio', 'UP')], { callerHost: HOST });
+  assert.deepEqual(offer.options, ['mini-lmstudio']);
+  assert.match(offer.prompt, /glm53-asus UP but named no model/);
+  assert.ok(!/model unknown/.test(offer.prompt));
+});
+
+test('callerHost is required: a prompt may never say "unknown"', () => {
+  assert.throws(() => buildOffer([result('glm53-asus', 'UP')], {}), /callerHost is required/);
+  assert.rejects(() => pickModel({ registryPath: REGISTRY_PATH, daemonBase: 'http://127.0.0.1:1' }), /callerHost is required/);
+});
+
 test('an UNREACHABLE fleet reports UNREACHABLE per entry, never "none available"', async () => {
-  const outcome = await pickModel({
-    registryPath: REGISTRY_PATH,
-    readRegistryImpl: readRegistryOk,
+  const outcome = await pick({
     probeImpl: stubProbe([entries => entries.map(e => result(e.id, 'UNREACHABLE'))]),
     readSelectionImpl: async () => null,
   });
@@ -223,19 +323,17 @@ test('an UNREACHABLE fleet reports UNREACHABLE per entry, never "none available"
 });
 
 test('--dry-run prints the offer and raises nothing', async () => {
-  let raised = 0;
-  const outcome = await pickModel({
-    registryPath: REGISTRY_PATH,
+  let touched = 0;
+  const outcome = await pick({
     dryRun: true,
-    readRegistryImpl: readRegistryOk,
     probeImpl: stubProbe([entries => [result(entries[0].id, 'UP'), result(entries[1].id, 'BUSY'), result(entries[2].id, 'DOWN')]]),
     readSelectionImpl: async () => null,
-    daemonIsUpImpl: async () => { raised += 1; return true; },
-    raiseChoiceImpl: async () => { raised += 1; return { status: 'timeout' }; },
+    daemonIsUpImpl: async () => { touched += 1; return true; },
+    raiseChoiceImpl: async () => { touched += 1; return { status: 'timeout' }; },
     writeSelectionImpl: async () => { throw new Error('a dry run must not write'); },
   });
   assert.equal(outcome.outcome, OUTCOMES.DRY_RUN);
-  assert.equal(raised, 0);
+  assert.equal(touched, 0);
   assert.deepEqual(outcome.options, ['glm53-asus']);
   assert.equal(EXIT_CODES[outcome.outcome], 0);
 });
@@ -243,7 +341,7 @@ test('--dry-run prints the offer and raises nothing', async () => {
 // --- the label is the answer ----------------------------------------------
 
 test('the chosen id round-trips exactly through a real choice intent', async () => {
-  const offer = buildOffer([result('glm53-asus', 'UP'), result('mini-lmstudio', 'UP')], { callerHost: 'testbox' });
+  const offer = buildOffer([result('glm53-asus', 'UP'), result('mini-lmstudio', 'UP')], { callerHost: HOST });
   const id = await createIntent({ prompt: offer.prompt, options: offer.options, channels: [] });
 
   // A decorated label - the shape a picker that put detail in the button
@@ -262,19 +360,36 @@ test('the chosen id round-trips exactly through a real choice intent', async () 
   assert.equal(matches.length, 1);
 });
 
-test('a decision that matches no entry is refused rather than applied', async () => {
+test('a decision that matches no entry at all is refused rather than applied', async () => {
   await withTmp(async (dir) => {
     const { path, before } = await seedPrevious(dir);
-    const outcome = await pickModel({
-      registryPath: REGISTRY_PATH,
+    const outcome = await pick({
       selectionPath: path,
-      readRegistryImpl: readRegistryOk,
       probeImpl: stubProbe([ALL_UP()]),
       daemonIsUpImpl: async () => true,
       raiseChoiceImpl: async () => ({ status: 'decided', id: 'i1', decision: 'a-box-nobody-offered' }),
     });
-    assert.equal(outcome.outcome, OUTCOMES.CHANGED_SINCE_OFFER);
-    assert.match(outcome.error, /matches no registry entry/);
+    assert.equal(outcome.outcome, OUTCOMES.NOT_OFFERED);
+    assert.match(outcome.error, /was not one of the options offered/);
+    assert.deepEqual(await readFile(path), before);
+  });
+});
+
+test('REGRESSION: a REAL registry id that was never offered is refused too', async () => {
+  await withTmp(async (dir) => {
+    const { path, before } = await seedPrevious(dir);
+    // mini-lmstudio is a genuine entry and was DOWN at probe time, so it was
+    // never a button. A registry lookup would have accepted it; the
+    // allow-list must not.
+    const outcome = await pick({
+      selectionPath: path,
+      probeImpl: stubProbe([entries => entries.map(e => result(e.id, e.id === 'mini-lmstudio' ? 'DOWN' : 'UP'))]),
+      daemonIsUpImpl: async () => true,
+      raiseChoiceImpl: async () => ({ status: 'decided', id: 'i1', decision: 'mini-lmstudio' }),
+    });
+    assert.equal(outcome.outcome, OUTCOMES.NOT_OFFERED);
+    assert.equal(outcome.chosenId, 'mini-lmstudio');
+    assert.equal(EXIT_CODES[outcome.outcome], 7);
     assert.deepEqual(await readFile(path), before);
   });
 });
@@ -290,10 +405,8 @@ test('NEGATIVE CONTROL: an entry that goes BUSY between offer and answer is not 
       ALL_UP(),
       entries => entries.map(e => result(e.id, 'BUSY')),
     ]);
-    const outcome = await pickModel({
-      registryPath: REGISTRY_PATH,
+    const outcome = await pick({
       selectionPath: path,
-      readRegistryImpl: readRegistryOk,
       probeImpl,
       daemonIsUpImpl: async () => true,
       raiseChoiceImpl: async () => ({ status: 'decided', id: 'i1', decision: 'glm53-asus' }),
@@ -315,15 +428,12 @@ test('an entry that is still UP at apply time IS applied (the control for the co
   await withTmp(async (dir) => {
     const path = join(dir, 'model-selection.json');
     const probeImpl = stubProbe([ALL_UP(), ALL_UP()]);
-    const outcome = await pickModel({
-      registryPath: REGISTRY_PATH,
+    const outcome = await pick({
       selectionPath: path,
-      readRegistryImpl: readRegistryOk,
       probeImpl,
       daemonIsUpImpl: async () => true,
       raiseChoiceImpl: async () => ({ status: 'decided', id: 'i1', decision: 'glm53-asus' }),
       now: () => 1_700_000_100_000,
-      callerHost: 'testbox',
     });
     assert.equal(probeImpl.calls(), 2);
     assert.equal(outcome.outcome, OUTCOMES.APPLIED);
@@ -334,7 +444,7 @@ test('an entry that is still UP at apply time IS applied (the control for the co
       model: 'glm53-asus-model',
       keyFile: '/tmp/iak-test-key.txt',
       selectedAt: new Date(1_700_000_100_000).toISOString(),
-      selectedFrom: 'testbox',
+      selectedFrom: HOST,
     });
   });
 });
@@ -344,11 +454,9 @@ test('a timeout leaves the previous selection byte-identical', async () => {
     const { path, before } = await seedPrevious(dir);
     const daemon = await fakeDaemon({ decide: () => null });
     try {
-      const outcome = await pickModel({
-        registryPath: REGISTRY_PATH,
+      const outcome = await pick({
         selectionPath: path,
         daemonBase: daemon.base,
-        readRegistryImpl: readRegistryOk,
         probeImpl: stubProbe([ALL_UP()]),
         timeoutSec: 0.25,
         pollMs: 25,
@@ -363,6 +471,67 @@ test('a timeout leaves the previous selection byte-identical', async () => {
   });
 });
 
+// --- P1-4: the write can fail AFTER the human has tapped -------------------
+
+test('P1-4 REGRESSION: a failed write reports that the choice did not take effect, and does not crash', async () => {
+  await withTmp(async (dir) => {
+    const { path, before } = await seedPrevious(dir);
+    const outcome = await pick({
+      selectionPath: path,
+      probeImpl: stubProbe([ALL_UP(), ALL_UP()]),
+      daemonIsUpImpl: async () => true,
+      raiseChoiceImpl: async () => ({ status: 'decided', id: 'i1', decision: 'glm53-asus' }),
+      writeSelectionImpl: async () => {
+        const err = new Error("EACCES: permission denied, mkdir '/nope'");
+        err.code = 'EACCES';
+        throw err;
+      },
+    });
+    assert.equal(outcome.outcome, OUTCOMES.WRITE_FAILED);
+    assert.equal(EXIT_CODES[outcome.outcome], 8);
+    const text = renderOutcome(outcome);
+    assert.match(text, /YOUR CHOICE DID NOT TAKE EFFECT/);
+    assert.match(text, /still on mini-lmstudio/);
+    assert.match(text, /the tap has to be repeated/);
+    assert.deepEqual(await readFile(path), before);
+  });
+});
+
+test('P1-4 REGRESSION: a real unwritable destination exits 8 through main(), not 1 with a stack trace', async () => {
+  await withTmp(async (dir) => {
+    // A real endpoint, a real probe, a real write attempt. The box is
+    // loopback, so `ssh` cannot report capacity and the entry comes back UP
+    // with "capacity unknown" - which is exactly the sole-usable-entry path,
+    // so the human-facing apply runs without anybody needing to tap.
+    const endpoint = createServer((req, res) => {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ data: [{ id: 'loopback-model' }] }));
+    });
+    endpoint.listen(0, '127.0.0.1');
+    await once(endpoint, 'listening');
+    const registryPath = join(dir, 'models.json');
+    await writeFile(registryPath, JSON.stringify({
+      models: [{ id: 'loopback-one', host: '127.0.0.1', port: endpoint.address().port, kind: 'openai' }],
+    }));
+    const out = [];
+    const sink = { write: s => out.push(s) };
+    try {
+      // /dev/null is not a directory, so mkdir under it fails with ENOTDIR.
+      const code = await main(
+        ['--registry', registryPath, '--selection', '/dev/null/deeper/model-selection.json',
+          '--daemon', await deadDaemon(), '--probe-timeout', '4000', '--samples', '1'],
+        { stdout: sink, stderr: sink },
+      );
+      const text = out.join('');
+      assert.equal(code, 8, `expected the documented write-failure code, got ${code} with: ${text}`);
+      assert.match(text, /YOUR CHOICE DID NOT TAKE EFFECT/);
+      assert.ok(!/at Object\.|at async /.test(text), 'a stack trace is not a message to a person');
+    } finally {
+      await new Promise(r => endpoint.close(r));
+    }
+  });
+});
+
 // --- credentials -----------------------------------------------------------
 
 test('the written selection carries the keyFile PATH and no key material', async () => {
@@ -370,13 +539,11 @@ test('the written selection carries the keyFile PATH and no key material', async
     const path = join(dir, 'model-selection.json');
     const keyFile = join(dir, 'glm-key.txt');
     await writeFile(keyFile, `${DUMMY_SECRET}\n`, { mode: 0o600 });
-    const env = { ...process.env, LLM_API_KEY: DUMMY_SECRET, LLM_API_KEY_FILE: keyFile };
-    const previousEnv = { LLM_API_KEY: process.env.LLM_API_KEY, LLM_API_KEY_FILE: process.env.LLM_API_KEY_FILE };
-    process.env.LLM_API_KEY = env.LLM_API_KEY;
-    process.env.LLM_API_KEY_FILE = env.LLM_API_KEY_FILE;
+    const saved = { LLM_API_KEY: process.env.LLM_API_KEY, LLM_API_KEY_FILE: process.env.LLM_API_KEY_FILE };
+    process.env.LLM_API_KEY = DUMMY_SECRET;
+    process.env.LLM_API_KEY_FILE = keyFile;
     try {
-      const outcome = await pickModel({
-        registryPath: REGISTRY_PATH,
+      const outcome = await pick({
         selectionPath: path,
         readRegistryImpl: async () => loadRegistry({
           models: [
@@ -384,10 +551,7 @@ test('the written selection carries the keyFile PATH and no key material', async
             { id: 'mini-lmstudio', host: 'mini', port: 1234, kind: 'lmstudio' },
           ],
         }),
-        probeImpl: stubProbe([
-          entries => entries.map(e => result(e.id, 'UP')),
-          entries => entries.map(e => result(e.id, 'UP')),
-        ]),
+        probeImpl: stubProbe([ALL_UP(), ALL_UP()]),
         daemonIsUpImpl: async () => true,
         raiseChoiceImpl: async () => ({ status: 'decided', id: 'i1', decision: 'glm53-asus' }),
       });
@@ -401,9 +565,51 @@ test('the written selection carries the keyFile PATH and no key material', async
       assert.ok(!renderOutcome(outcome).includes(DUMMY_SECRET));
       assert.ok(!renderOutcome(outcome, { json: true }).includes(DUMMY_SECRET));
     } finally {
-      for (const [k, v] of Object.entries(previousEnv)) {
+      for (const [k, v] of Object.entries(saved)) {
         if (v === undefined) delete process.env[k]; else process.env[k] = v;
       }
+    }
+  });
+});
+
+test('P1-2 REGRESSION: the fleet gate token never travels to a daemon host outside the trusted set', async () => {
+  await withTmp(async (dir) => {
+    const tokenFile = join(dir, 'gate.token');
+    await writeFile(tokenFile, `${DUMMY_GATE_TOKEN}\n`, { mode: 0o600 });
+    const saved = process.env.IAK_GATE_TOKEN_FILE;
+    process.env.IAK_GATE_TOKEN_FILE = tokenFile;
+    try {
+      const seen = [];
+      const fetchImpl = async (url, options) => {
+        seen.push({ url, headers: options?.headers || {} });
+        return { ok: true, json: async () => ({ ok: true, id: 'i1' }) };
+      };
+      // An untrusted host: --daemon is an argument, and arguments arrive from
+      // scripts, room messages and PR text.
+      await raiseChoice({
+        daemonBase: 'http://models.example.com:8788',
+        prompt: 'p', options: ['a', 'b'], fetchImpl, timeoutSec: 0.05, pollMs: 10,
+      });
+      assert.ok(seen.length > 0);
+      for (const { headers } of seen) {
+        const values = JSON.stringify(headers);
+        assert.ok(!/authorization/i.test(values), 'no Authorization header may go to an untrusted host');
+        assert.ok(!values.includes(DUMMY_GATE_TOKEN), 'the gate token must not appear in any header');
+      }
+
+      // ...and loopback, where the fleet daemon actually lives, still gets it.
+      const trusted = [];
+      await raiseChoice({
+        daemonBase: 'http://127.0.0.1:8788',
+        prompt: 'p', options: ['a', 'b'], timeoutSec: 0.05, pollMs: 10,
+        fetchImpl: async (url, options) => {
+          trusted.push(options?.headers || {});
+          return { ok: true, json: async () => ({ ok: true, id: 'i1' }) };
+        },
+      });
+      assert.equal(trusted[0].Authorization, `Bearer ${DUMMY_GATE_TOKEN}`);
+    } finally {
+      if (saved === undefined) delete process.env.IAK_GATE_TOKEN_FILE; else process.env.IAK_GATE_TOKEN_FILE = saved;
     }
   });
 });
@@ -411,7 +617,7 @@ test('the written selection carries the keyFile PATH and no key material', async
 // --- refusals, each its own ------------------------------------------------
 
 test('a missing registry is its own refusal, naming the path', async () => {
-  const outcome = await pickModel({ registryPath: join(tmpdir(), 'iak-no-such-registry.json') });
+  const outcome = await pick({ registryPath: join(tmpdir(), 'iak-no-such-registry.json'), readRegistryImpl: undefined });
   assert.equal(outcome.outcome, OUTCOMES.NO_REGISTRY);
   assert.match(renderOutcome(outcome), /no usable registry at .*iak-no-such-registry\.json/);
   assert.equal(EXIT_CODES[outcome.outcome], 2);
@@ -420,12 +626,9 @@ test('a missing registry is its own refusal, naming the path', async () => {
 test('a daemon that is not answering is its own refusal, and writes nothing', async () => {
   await withTmp(async (dir) => {
     const { path, before } = await seedPrevious(dir);
-    const port = await deadPort();
-    const outcome = await pickModel({
-      registryPath: REGISTRY_PATH,
+    const outcome = await pick({
       selectionPath: path,
-      daemonBase: `http://127.0.0.1:${port}`,
-      readRegistryImpl: readRegistryOk,
+      daemonBase: await deadDaemon(),
       probeImpl: stubProbe([ALL_UP()]),
     });
     assert.equal(outcome.outcome, OUTCOMES.DAEMON_UNREACHABLE);
@@ -435,17 +638,113 @@ test('a daemon that is not answering is its own refusal, and writes nothing', as
   });
 });
 
-test('one UP entry is refused as a choice rather than applied without a tap', async () => {
+test('REGRESSION: a daemon that answers and REFUSES is not reported as "not answering"', async () => {
   await withTmp(async (dir) => {
     const { path, before } = await seedPrevious(dir);
-    const outcome = await pickModel({
-      registryPath: REGISTRY_PATH,
+    const daemon = await fakeDaemon({ refuse: 'options must be an array' });
+    try {
+      const outcome = await pick({
+        selectionPath: path,
+        daemonBase: daemon.base,
+        probeImpl: stubProbe([ALL_UP()]),
+        timeoutSec: 1, pollMs: 20,
+      });
+      assert.equal(outcome.outcome, OUTCOMES.DAEMON_REFUSED);
+      assert.equal(EXIT_CODES[outcome.outcome], 9);
+      const text = renderOutcome(outcome);
+      assert.match(text, /is RUNNING - do not restart it/);
+      assert.ok(!/Start the intent daemon/.test(text));
+      assert.deepEqual(await readFile(path), before);
+    } finally {
+      await daemon.close();
+    }
+  });
+});
+
+test('every outcome has an exit code, and the distinct faults have DISTINCT codes', () => {
+  for (const outcome of Object.values(OUTCOMES)) {
+    assert.equal(typeof EXIT_CODES[outcome], 'number', `${outcome} has no exit code`);
+  }
+  // "The fleet is unreachable" and "the fleet is healthy with one model" must
+  // not look the same to a wrapper script.
+  assert.notEqual(EXIT_CODES[OUTCOMES.NONE_UP], EXIT_CODES[OUTCOMES.ONLY_ONE_UP]);
+  assert.notEqual(EXIT_CODES[OUTCOMES.DAEMON_UNREACHABLE], EXIT_CODES[OUTCOMES.DAEMON_REFUSED]);
+  assert.notEqual(EXIT_CODES[OUTCOMES.CHANGED_SINCE_OFFER], EXIT_CODES[OUTCOMES.NOT_OFFERED]);
+  assert.notEqual(EXIT_CODES[OUTCOMES.WRITE_FAILED], EXIT_CODES[OUTCOMES.APPLIED]);
+  const nonZero = Object.values(OUTCOMES).map(o => EXIT_CODES[o]).filter(c => c !== 0);
+  assert.equal(new Set(nonZero).size, nonZero.length, 'two different faults share an exit code');
+});
+
+// --- one usable entry: a selection, not a dead end -------------------------
+
+test('exactly one usable entry is applied without a question, after the same re-probe', async () => {
+  await withTmp(async (dir) => {
+    const path = join(dir, 'model-selection.json');
+    const probeImpl = stubProbe([ONLY('glm53-asus'), ALL_UP()]);
+    const outcome = await pick({
       selectionPath: path,
-      readRegistryImpl: readRegistryOk,
-      probeImpl: stubProbe([entries => [result(entries[0].id, 'UP'), result(entries[1].id, 'BUSY'), result(entries[2].id, 'DOWN')]]),
-      daemonIsUpImpl: async () => { throw new Error('must not reach the daemon'); },
+      probeImpl,
+      daemonIsUpImpl: async () => { throw new Error('nobody should be asked to choose between one thing'); },
+    });
+    assert.equal(outcome.outcome, OUTCOMES.APPLIED_SOLE);
+    assert.equal(EXIT_CODES[outcome.outcome], 0);
+    assert.equal(probeImpl.calls(), 2, 'skipping the QUESTION must never skip the re-probe');
+    assert.equal(JSON.parse(await readFile(path, 'utf8')).selectedId, 'glm53-asus');
+    assert.match(renderOutcome(outcome), /only usable entry/);
+  });
+});
+
+test('a fleet that shrank to one REPLACES a stale selection pointing at a dead box', async () => {
+  await withTmp(async (dir) => {
+    // The previous selection is mini-lmstudio, which is now DOWN. Refusing
+    // here would preserve a selection we just measured as dead.
+    const { path } = await seedPrevious(dir);
+    const outcome = await pick({
+      selectionPath: path,
+      probeImpl: stubProbe([ONLY('glm53-asus'), ALL_UP()]),
+    });
+    assert.equal(outcome.outcome, OUTCOMES.APPLIED_SOLE);
+    assert.equal(outcome.previous.selectedId, 'mini-lmstudio');
+    assert.equal(JSON.parse(await readFile(path, 'utf8')).selectedId, 'glm53-asus');
+  });
+});
+
+test('the sole usable entry being ALREADY selected is a no-op with exit 0, and touches nothing', async () => {
+  await withTmp(async (dir) => {
+    const { path, before } = await seedPrevious(dir, { ...PREVIOUS, selectedId: 'glm53-asus' });
+    const outcome = await pick({
+      selectionPath: path,
+      probeImpl: stubProbe([ONLY('glm53-asus')]),
+      writeSelectionImpl: async () => { throw new Error('nothing to write'); },
+    });
+    assert.equal(outcome.outcome, OUTCOMES.ALREADY_SELECTED);
+    assert.equal(EXIT_CODES[outcome.outcome], 0);
+    assert.deepEqual(await readFile(path), before);
+  });
+});
+
+test('--require-choice refuses to apply a sole entry without a tap, with its own code', async () => {
+  await withTmp(async (dir) => {
+    const { path, before } = await seedPrevious(dir);
+    const outcome = await pick({
+      selectionPath: path,
+      requireChoice: true,
+      probeImpl: stubProbe([ONLY('glm53-asus')]),
     });
     assert.equal(outcome.outcome, OUTCOMES.ONLY_ONE_UP);
+    assert.equal(EXIT_CODES[outcome.outcome], 10);
+    assert.deepEqual(await readFile(path), before);
+  });
+});
+
+test('a sole entry that stops being usable before the write is NOT applied', async () => {
+  await withTmp(async (dir) => {
+    const { path, before } = await seedPrevious(dir);
+    const outcome = await pick({
+      selectionPath: path,
+      probeImpl: stubProbe([ONLY('glm53-asus'), entries => entries.map(e => result(e.id, 'BUSY'))]),
+    });
+    assert.equal(outcome.outcome, OUTCOMES.CHANGED_SINCE_OFFER);
     assert.deepEqual(await readFile(path), before);
   });
 });
@@ -471,20 +770,47 @@ test('raiseChoice posts the options and returns the tapped label', async () => {
   }
 });
 
-test('a daemon that refuses the intent is reported, not retried into silence', async () => {
-  const daemon = await fakeDaemon({ refuse: 'options must be an array' });
+test('P1-3 REGRESSION: every daemon request carries an AbortSignal', async () => {
+  const seen = [];
+  await raiseChoice({
+    daemonBase: 'http://127.0.0.1:1',
+    prompt: 'p', options: ['a', 'b'], timeoutSec: 0.2, pollMs: 10,
+    fetchImpl: async (url, options) => {
+      seen.push(options?.signal);
+      return { ok: true, json: async () => (url.endsWith('/intent') ? { ok: true, id: 'i1' } : []) };
+    },
+  });
+  assert.ok(seen.length >= 2, 'expected a POST and at least one poll');
+  for (const signal of seen) {
+    assert.ok(signal && typeof signal.aborted === 'boolean', 'a fetch without a signal can hang forever');
+  }
+});
+
+test('P1-3 REGRESSION: --timeout-sec is enforced against a daemon that accepts and never answers', async () => {
+  const daemon = await fakeDaemon({ hangOnPoll: true });
   try {
-    const answer = await raiseChoice({ daemonBase: daemon.base, prompt: 'p', options: ['a', 'b'], pollMs: 20, timeoutSec: 1 });
-    assert.equal(answer.status, 'refused');
-    assert.match(answer.error, /options must be an array/);
+    const started = Date.now();
+    const answer = await raiseChoice({
+      daemonBase: daemon.base,
+      prompt: 'p', options: ['a', 'b'],
+      timeoutSec: 0.6, pollMs: 25, requestTimeoutMs: 150,
+    });
+    const elapsed = Date.now() - started;
+    assert.equal(answer.status, 'timeout');
+    assert.ok(elapsed < 5000, `the timeout must bound the wait, took ${elapsed} ms`);
   } finally {
     await daemon.close();
   }
 });
 
+test('P2-9 REGRESSION: there is no default daemon address to fall through to', async () => {
+  await assert.rejects(() => pickModel({ registryPath: REGISTRY_PATH, callerHost: HOST }), /daemonBase is required/);
+  await assert.rejects(() => raiseChoice({ prompt: 'p', options: ['a', 'b'] }), /daemonBase is required/);
+  await assert.rejects(() => daemonIsUp({}), /daemonBase is required/);
+});
+
 test('daemonIsUp is false for a port nothing is listening on, true for the daemon', async () => {
-  const port = await deadPort();
-  assert.equal(await daemonIsUp({ daemonBase: `http://127.0.0.1:${port}` }), false);
+  assert.equal(await daemonIsUp({ daemonBase: await deadDaemon() }), false);
   const daemon = await fakeDaemon({});
   try {
     assert.equal(await daemonIsUp({ daemonBase: daemon.base }), true);
@@ -498,24 +824,48 @@ test('the whole flow works against the HTTP daemon, from offer to written file',
     const path = join(dir, 'model-selection.json');
     const daemon = await fakeDaemon({ decide: row => row.options[0] });
     try {
-      const outcome = await pickModel({
-        registryPath: REGISTRY_PATH,
+      const outcome = await pick({
         selectionPath: path,
         daemonBase: daemon.base,
-        readRegistryImpl: readRegistryOk,
         probeImpl: stubProbe([ALL_UP(), ALL_UP()]),
         pollMs: 20,
         timeoutSec: 5,
-        callerHost: 'testbox',
       });
       assert.equal(outcome.outcome, OUTCOMES.APPLIED);
       assert.equal(outcome.selection.selectedId, 'glm53-asus');
       assert.match(daemon.created[0].prompt, /Which model should testbox use\?/);
       assert.deepEqual(daemon.created[0].options, ['glm53-asus', 'asus1-vllm-qwen3-coder', 'mini-lmstudio']);
-      assert.match(renderOutcome(outcome), /re-probed UP at .* before writing/);
+      assert.match(renderOutcome(outcome), /re-probed usable at .* before writing/);
     } finally {
       await daemon.close();
     }
+  });
+});
+
+// --- P1-1: the program must actually run ----------------------------------
+
+test('P1-1 REGRESSION: invoked through a symlink, the CLI still runs and still reports', async () => {
+  await withTmp(async (dir) => {
+    // The documented way to get this on PATH is a ~/bin symlink, and macOS
+    // /tmp is itself a symlink, so this is the ordinary case rather than an
+    // exotic one.
+    const link = join(dir, 'model-picker-link.mjs');
+    await symlink(PICKER, link);
+    const missing = join(dir, 'no-registry.json');
+    const run = args => new Promise(resolve => {
+      execFile(process.execPath, args, (err, stdout, stderr) => {
+        resolve({ code: err?.code ?? 0, stdout, stderr });
+      });
+    });
+    const direct = await run([PICKER, '--registry', missing, '--dry-run', '--daemon', 'http://127.0.0.1:1']);
+    const linked = await run([link, '--registry', missing, '--dry-run', '--daemon', 'http://127.0.0.1:1']);
+
+    // Exit 0 with no output would be the old bug, and this file documents 0
+    // as "a selection was applied".
+    assert.equal(direct.code, 2);
+    assert.equal(linked.code, 2, 'a symlinked invocation must not silently exit 0');
+    assert.match(linked.stderr, /no usable registry/);
+    assert.equal(linked.stderr, direct.stderr);
   });
 });
 
@@ -537,7 +887,7 @@ test('a capacity reading we could not take prints as unknown, never as 0 GiB', (
 
 test('buildSelection carries no field the registry did not have, and no token', () => {
   const [glm] = registry();
-  const selection = buildSelection(glm, result('glm53-asus', 'UP'), { callerHost: 'testbox', now: () => 0 });
+  const selection = buildSelection(glm, result('glm53-asus', 'UP'), { callerHost: HOST, now: () => 0 });
   assert.deepEqual(Object.keys(selection).sort(), ['baseUrl', 'keyFile', 'model', 'selectedAt', 'selectedFrom', 'selectedId']);
   assert.equal(selection.keyFile, '/tmp/iak-test-key.txt');
 });

@@ -433,6 +433,30 @@ test('with no key configured, probeModels sends no Authorization header, and nev
   } finally { await server.close(); }
 });
 
+test('a configured-but-unreadable key is reported as keyBlocked, not only buried in the reason', async () => {
+  // The endpoint serves /v1/models WITHOUT auth - vLLM's default, and
+  // llama.cpp's - so the probe sees a perfectly healthy UP box whose first
+  // real request will 401. A consumer deciding whether this entry is usable
+  // must not have to parse prose to find that out, so it is its own field.
+  const server = await jsonEndpoint(ONE_MODEL);
+  try {
+    const [blocked] = await probe(
+      [entry(server.port, { auth: 'bearer', keyFile: '/nope/does-not-exist.txt' })],
+      { exec: fakeExec({ mem: GPU_IDLE }), env: {} });
+    assert.equal(blocked.state, 'UP');
+    assert.equal(blocked.keyBlocked, true);
+    assert.match(blocked.reason, /cannot read key file/);
+    assert.equal(blocked.keySource, null);
+
+    // NEGATIVE CONTROL: the same endpoint with no credential configured at
+    // all is not "blocked" - it needs no key, and conflating the two would
+    // hide every keyless box behind a credential warning.
+    const [open] = await probe([entry(server.port)], { exec: fakeExec({ mem: GPU_IDLE }), env: {} });
+    assert.equal(open.state, 'UP');
+    assert.equal(open.keyBlocked, false);
+  } finally { await server.close(); }
+});
+
 test('a redirect is still refused when a token IS configured, so the header never reaches the new host', async () => {
   // `redirect: "error"` matters more once there is something to leak: a 302
   // to an arbitrary host would otherwise be handed the Authorization header.

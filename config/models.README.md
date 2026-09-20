@@ -128,6 +128,13 @@ Three things about that file, each of which is a rule and not a detail:
   themselves.
 * `selectedFrom` names the host that probed. Path and latency are per peer
   pair, so a selection made on one box is not evidence about another.
+* An entry whose `keyFile` cannot be read is never selected, even when it is
+  the only one answering. vLLM and llama.cpp serve `/v1/models` without auth,
+  so such a box looks healthy to the probe and refuses the first real request;
+  the probe reports it as `keyBlocked` and the picker excludes it by name.
+* With exactly one usable entry there is nothing to choose between, so the
+  picker applies it without asking (after the same re-probe) unless it is
+  already selected. `--require-choice` turns that back into a refusal.
 * `selectedAt` is the time of the RE-PROBE, not of the offer. The picker
   probes the chosen entry again when the answer arrives and refuses to apply
   an entry that stopped being UP while the human was deciding, which means the

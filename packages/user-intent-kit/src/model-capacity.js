@@ -851,6 +851,14 @@ async function probeOne(entry, {
     auth: credential.auth,
     keySource: credential.keySource,
     keyWarning: credential.keyWarning ?? null,
+    // A credential that was CONFIGURED and could not be read. It already
+    // shows up inside `reason`, but a consumer that has to decide whether an
+    // entry is usable must not have to parse prose to find out: a switcher
+    // that offers a key-blocked box offers one that will 401 the moment it is
+    // used, and against a server that serves /v1/models unauthenticated
+    // (vLLM's default, llama.cpp's default) nothing else in this result says
+    // so. Reported as its own boolean for exactly that reader.
+    keyBlocked: Boolean(credential.keyBlocked),
     authState: http.authState ?? null,
     httpStatus: http.httpStatus ?? null,
     // p90 of the samples, not a lucky single ping. Rank on this.
