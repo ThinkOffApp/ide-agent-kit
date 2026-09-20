@@ -20,7 +20,7 @@
 import { createServer } from 'node:http';
 import { networkInterfaces } from 'node:os';
 import { randomUUID, createHmac, timingSafeEqual } from 'node:crypto';
-import { appendFileSync } from 'node:fs';
+import { appendFileSync, existsSync, readFileSync } from 'node:fs';
 import { spawn } from 'node:child_process';
 import { deliverToSession, listSessionAgents, HOP_HEADER } from './session-send.mjs';
 
@@ -28,6 +28,76 @@ import { deliverToSession, listSessionAgents, HOP_HEADER } from './session-send.
 
 // id -> {prompt, session, channels, status, createdAt, decidedAt, decision, resolvers}
 const intents = new Map();
+
+// ---------------------------------------------------------------------------
+// DURABLE STATE
+//
+// `intents` used to live only in this process. A restart threw the queue away
+// with no warning and nothing read it back, so every pending approval card
+// silently became undecidable. That bit three times on 2026-09-19: restarts
+// while wiring /lead wiped the queue, including an intent that was mid-review.
+//
+// Append-only JSONL replayed at boot. Append-only because a rewrite-in-place
+// can truncate on a crash and take the whole queue with it -- that is the
+// failure being removed, not relocated.
+//
+// Deliberately NOT persisted: `resolvers`. Those are live promise callbacks
+// belonging to callers of waitForDecision that died with the old process; a
+// replayed intent gets an empty list and a new caller can wait on it again.
+// ---------------------------------------------------------------------------
+let statePath = null;
+
+function appendState(entry) {
+  if (!statePath) return;
+  try {
+    appendFileSync(statePath, JSON.stringify(entry) + '\n');
+  } catch (e) {
+    // Never let a persistence failure break the decision path: losing the
+    // record is bad, refusing the approval is worse.
+    process.stderr.write(`[confirmations] state append failed: ${e.message}\n`);
+  }
+}
+
+/** Replay the log into memory. Last write wins per id. Returns a summary so a
+ * caller can log what came back rather than assume it worked. */
+export function loadPersistedState(path) {
+  statePath = path || null;
+  const summary = { intents: 0, skipped: 0 };
+  if (!statePath || !existsSync(statePath)) return summary;
+  let lines;
+  try {
+    lines = readFileSync(statePath, 'utf8').split('\n');
+  } catch (e) {
+    process.stderr.write(`[confirmations] state read failed: ${e.message}\n`);
+    return summary;
+  }
+  for (const line of lines) {
+    if (!line.trim()) continue;
+    let e;
+    // A truncated final line is expected after a hard kill mid-append. Skip it
+    // and keep the rest rather than discarding the whole queue.
+    try { e = JSON.parse(line); } catch { summary.skipped += 1; continue; }
+    if (e.kind === 'intent' && e.id && e.intent) {
+      intents.set(e.id, { ...e.intent, resolvers: [] });
+    }
+    // NOTE: `kind: 'lead'` entries are written by the team-lead branch and are
+    // ignored here on purpose. Main has no lead feature yet, so replaying one
+    // would have nowhere to put it. Forward-compatible: an older log written
+    // by that branch replays its intents cleanly and skips the lead rows.
+  }
+  summary.intents = intents.size;
+  return summary;
+}
+
+/** Write an intent's current state. Called on create and on decide. */
+function persistIntent(id, i) {
+  if (!id || !i) return;
+  // The id is the Map KEY, not a field on the intent, so it has to be written
+  // explicitly. Without this the log looks perfectly healthy and replays
+  // nothing -- found by the restart test, which is why it exists.
+  const { resolvers, ...rest } = i;
+  appendState({ kind: 'intent', id, intent: rest, at: Date.now() });
+}
 // nonce -> typed action request. Actions reuse the intent approval UI but run
 // through a strict registry instead of arbitrary shell.
 const actions = new Map();
@@ -134,6 +204,7 @@ export function decideIntent(id, decision, { receiptsPath } = {}) {
   i.status = 'decided';
   i.decision = decision;
   i.decidedAt = Date.now();
+  persistIntent(id, i);
   postReceipt(receiptsPath, {
     kind: 'intent.decided', id, decision, decidedAt: i.decidedAt, prompt: i.prompt,
   });
@@ -216,6 +287,7 @@ export async function createIntent({
     timeoutSec,
   };
   intents.set(id, intent);
+  persistIntent(id, intent);
   postReceipt(receiptsPath, {
     kind: 'intent.created', id, prompt, session, channels, createdAt: intent.createdAt,
   });
