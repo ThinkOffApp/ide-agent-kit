@@ -4,13 +4,39 @@ Built for [OpenClaw](https://openclaw.dev) workflows. Local-first. No external s
 
 Multi-agent coordination toolkit for IDE AIs (Claude Code, Codex, Cursor, VS Code agents, local LLM assistants). Room-triggered automation, comment polling, and connectors for [Moltbook](https://www.moltbook.com), GitHub, and [GroupMind](https://groupmind.one) chat rooms.
 
-**One-shot install (macOS):**
+**One-shot install (macOS and Linux):**
 ```bash
 curl -fsSL https://raw.githubusercontent.com/ThinkOffApp/ide-agent-kit/main/scripts/install.sh | bash
 ```
-Idempotent. Installs prereqs via brew, clones the repo, writes a starter
-config, wires UserPromptSubmit + Stop hooks, starts the daemon, prints the
-LAN URL to paste into CodeWatch — the mobile + watch companion (Play listing in review).
+Idempotent. Checks prereqs (node 20+, npm, git, tmux), clones the repo, writes a
+starter config, wires UserPromptSubmit + Stop + SessionStart hooks, starts the
+daemon, prints the LAN URL to paste into CodeWatch — the mobile + watch companion
+(Play listing in review).
+
+Prereqs are installed via `brew` on macOS and `apt-get` / `dnf` / `pacman` /
+`zypper` on Linux. The installer always prints the exact commands first, and
+because `curl | bash` leaves no TTY to confirm on, it will **not** run a sudo
+install unattended: it prints what to run and exits non-zero. To let it install
+for you, download it, read it, and re-run with consent:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/ThinkOffApp/ide-agent-kit/main/scripts/install.sh -o iak-install.sh
+```
+```bash
+IAK_ASSUME_YES=1 bash iak-install.sh
+```
+
+Useful env vars: `IAK_DRY_RUN=1` (print the platform + prereq plan and change
+nothing), `IAK_INSTALL_DIR`, `IAK_NODE_SOURCE=distro`, `IAK_NODE_MAJOR`.
+
+**Note on Node.js on Debian/Ubuntu:** the distro `nodejs` package is below our
+floor (Ubuntu 24.04 ships 18.19.1; we need 20+), so on `apt-get` systems the
+installer uses [NodeSource](https://github.com/nodesource/distributions)'
+official apt repo and says so before running it. If you would rather not pipe a
+third-party setup script to root, install Node 20+ yourself (e.g. via `nvm`) and
+re-run — the installer will detect it and skip that step. `IAK_NODE_SOURCE=distro`
+forces the distro package instead, and the installer still refuses to continue if
+the resulting node is too old.
 
 **Manual install:** `npm install -g ide-agent-kit`
 **ClawHub:** https://clawhub.ai/ThinkOffApp/ide-agent-kit
@@ -612,7 +638,10 @@ launchctl load ~/Library/LaunchAgents/com.thinkoff.iak-team-watchdog.plist
 ```
 
 Or let the installer do it: `IAK_INSTALL_WATCHDOG=1` makes `scripts/install.sh`
-install the LaunchAgent (only if a roster exists). On a laptop that sleeps, prefer
+install the LaunchAgent (only if a roster exists). This part is macOS-only — the
+supervisor is a launchd LaunchAgent and there is no systemd unit yet. On Linux
+`IAK_INSTALL_WATCHDOG=1` is reported as skipped and you run
+`node scripts/team-watchdog.mjs` under your own supervisor. On a laptop that sleeps, prefer
 the one-shot variant documented in the plist header (`ONCE=1` + `StartInterval`),
 since the in-process interval timer stalls across sleep. Tunables (all env, all
 optional): `STALE_MIN`, `COOLDOWN_MIN`, `INTERVAL_MIN`, `MAX_NUDGES`, `ROOM`,
