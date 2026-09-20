@@ -674,7 +674,7 @@ When `mcp.confirmations` is configured, four extra tools appear:
 | Tool                  | Args                                              | Notes |
 |-----------------------|---------------------------------------------------|-------|
 | `request_confirmation`| `prompt`, `session?`, `channels?`, `timeoutSec?`, `fromHandle?` | Posts an Approve / Deny prompt to GroupMind and/or Codewatch and BLOCKS until user decides or timeout. Returns `{decision: "approve"\|"deny"}` or `{status: "timeout", id}`. `fromHandle` defaults to `poller.handle` for correct agent attribution. |
-| `list_intents`        | (none)                                            | All intents — pending and recently decided. |
+| `list_intents`        | (none)                                            | All intents — pending and recently decided. Each row carries `announceState` + a per-channel `announcements` map (see below). |
 | `approve_intent`      | `id`                                              | Manually settle a pending intent (e.g. MCP override). |
 | `deny_intent`         | `id`                                              |  |
 
@@ -703,6 +703,57 @@ End-to-end:
 3. User taps Approve / Deny on the watch — Codewatch's notification action POSTs to `http://<callback_base>/intent/<id>/decision` with `{decision: "approve"}`.
 4. The MCP tool's blocking `request_confirmation` call resolves with the decision.
 5. The agent proceeds (or doesn't) based on the decision.
+
+**Did the asking card actually post?** An intent records not just that it was
+created and decided but what happened to each channel's announcement, because
+"pending" used to mean two different things: the owner has not answered yet, or
+the card never went out at all. Every intent carries `announcements` (a map
+keyed by channel: `{channel, status, attemptedAt, postedAt, messageId, error}`)
+and the one-word `announceState` summary:
+
+| `announceState` | meaning |
+|-----------------|---------|
+| `posted`   | every channel ACCEPTED the message (2xx). See the caveat below. |
+| `failed`   | a channel's own call was OBSERVED failing - the error is on the record |
+| `partial`  | some channels posted; the rest failed or are unknown |
+| `skipped`  | a channel was asked for but nothing is configured to post it |
+| `attempting` / `unreported` | started and never settled / no outcome was reported for it |
+| `none`     | no channels were requested |
+| `unknown`  | the intent predates this record. Never read it as posted or as failed |
+
+`GET /intents?status=pending&announce=failed` lists the intents nobody was
+successfully asked about; `?announce=posted` lists the ones genuinely waiting on
+a human. An unknown value is a 400, not an empty list.
+
+Every intent also carries `announceSummary`, the one sentence each surface
+shows a person - the HTML queue, the `/intents` payload and the MCP
+`list_intents` output all render this same string, so their wording cannot
+drift apart:
+
+| situation | `announceSummary` |
+|---|---|
+| one channel accepted it | `posted to 1 channel` |
+| one accepted, one reported nothing | `posted to 1 channel, unknown for 1` |
+| one accepted, one observed failing | `posted to 1 channel, failed for 1` |
+| the only channel failed | `failed for 1 channel` |
+| nothing configured to send it | `not sent for 1 channel` |
+| no outcome was reported | `unknown for 1 channel` |
+| an old record | `unknown: this intent predates announcement records` |
+
+Note the second row. It is deliberately **not** "posted to 1 of 2 channels":
+that reads as though the second channel definitely did not arrive, and when its
+outcome is `unreported` nobody knows whether it did. The longer sentence is the
+only true one.
+
+`unreported` is load-bearing. An announcer that resolves without reporting
+anything is recorded as unknown, never as a post; and an announce step that
+fails without observing a particular channel leaves that channel unknown, with
+the error kept on the record, rather than claiming a non-delivery nobody saw.
+An absence is not evidence in either direction.
+
+`postedAt` and `messageId` mean the channel accepted the message and nothing
+more. They are not proof that it rendered, that a notification fired, or that
+anyone read it - which is why there is no `deliveredAt` and no `seenAt` field.
 
 Run standalone:
 
