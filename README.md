@@ -701,16 +701,22 @@ and the one-word `announceState` summary:
 | `announceState` | meaning |
 |-----------------|---------|
 | `posted`   | every channel ACCEPTED the message (2xx). See the caveat below. |
-| `failed`   | it was attempted and nothing landed - the error is on the record |
-| `partial`  | some channels posted, others did not |
+| `failed`   | a channel's own call was OBSERVED failing - the error is on the record |
+| `partial`  | some channels posted; the rest failed or are unknown |
 | `skipped`  | a channel was asked for but nothing is configured to post it |
-| `attempting` / `unreported` | started and never settled / the announcer said nothing |
+| `attempting` / `unreported` | started and never settled / no outcome was reported for it |
 | `none`     | no channels were requested |
 | `unknown`  | the intent predates this record. Never read it as posted or as failed |
 
 `GET /intents?status=pending&announce=failed` lists the intents nobody was
 successfully asked about; `?announce=posted` lists the ones genuinely waiting on
 a human. An unknown value is a 400, not an empty list.
+
+`unreported` is load-bearing. An announcer that resolves without reporting
+anything is recorded as unknown, never as a post; and an announce step that
+fails without observing a particular channel leaves that channel unknown, with
+the error kept on the record, rather than claiming a non-delivery nobody saw.
+An absence is not evidence in either direction.
 
 `postedAt` and `messageId` mean the channel accepted the message and nothing
 more. They are not proof that it rendered, that a notification fired, or that

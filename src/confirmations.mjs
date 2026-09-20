@@ -195,7 +195,7 @@ function pushStatus(intentId, rawStatus, fields = {}) {
 //                  Absence of an error is not a success.
 //   'posted'     - every attempted channel accepted the post. See above for
 //                  what that does and does not prove.
-//   'partial'    - some channels posted, others did not.
+//   'partial'    - some channels posted; the rest failed or are unknown.
 //   'failed'     - it was attempted and nothing landed.
 export const ANNOUNCE_STATES = [
   'unknown', 'none', 'skipped', 'attempting', 'unreported', 'posted', 'partial', 'failed',
@@ -447,6 +447,14 @@ export async function createIntent({
       // Loud on the way out as well as recorded on the intent. A failure that
       // only exists in a log file is the same bug one layer down.
       process.stderr.write(`[confirmations] intent ${id}: announce to ${channel} FAILED: ${next.error}\n`);
+    } else if (next.status === 'unreported') {
+      // Not a failure and not a success: nobody can say whether the card
+      // landed. That is worth the same visibility, because it needs a human to
+      // go and look.
+      postReceipt(receiptsPath, {
+        kind: 'intent.announce_unreported', id, channel, error: next.error || null,
+      });
+      process.stderr.write(`[confirmations] intent ${id}: announce to ${channel} UNREPORTED: ${next.error || 'announcer said nothing'}\n`);
     }
     return next;
   };
@@ -461,14 +469,24 @@ export async function createIntent({
     });
   } catch (e) {
     // The hook threw as a whole (a composed announcer reports per channel and
-    // does not reach here). Anything still unsettled is a failure - NOT a
-    // pending card, which is the confusion being removed.
+    // does not reach here). This says the ANNOUNCE STEP broke. It does NOT say
+    // what happened to any individual channel: the error may have come before
+    // a channel was reached, or after its request was already accepted.
+    //
+    // So the unsettled channels read 'unreported' and carry the error, not
+    // 'failed'. Recording a definite non-delivery we did not observe is the
+    // same overclaim as recording a definite delivery we did not observe -
+    // codexmb's second finding on #121, and the mirror image of the first.
+    // The error is kept on the record, so the intent is still findable and
+    // still does not read as a normal pending card.
     const msg = e.message || String(e);
     for (const ch of wantChannels) {
       const cur = intent.announcements[ch];
       if (!cur || cur.status === 'attempting') {
         recordAnnouncement(ch, {
-          status: 'failed', error: msg, attemptedAt: (cur && cur.attemptedAt) || Date.now(),
+          status: 'unreported',
+          error: `announce step failed before this channel reported an outcome: ${msg}`,
+          attemptedAt: (cur && cur.attemptedAt) || null,
         });
       }
     }
@@ -1474,10 +1492,19 @@ export function makeCodewatchAnnouncer({ gateUrl, gateToken }) {
 // failure - one dead channel must not mute the rest - but the failure is now
 // recorded rather than only logged.
 //
-// An announcer signals its result three ways:
-//   throw                     -> 'failed', with the message
-//   {skipped: true, reason}   -> 'skipped', nothing was posted, nothing broke
-//   {messageId} | anything    -> 'posted', with the id when the channel gave one
+// An announcer signals its result explicitly. There is no default outcome,
+// because inferring one from silence is the bug this file exists to fix:
+//   throw                              -> 'failed', with the message
+//   {skipped: true, reason}            -> 'skipped', nothing posted, nothing broke
+//   {messageId} / 2xx {statusCode}     -> 'posted', with the id when there is one
+//   {posted: true}                     -> 'posted', for a channel with no id
+//   anything else, including undefined -> 'unreported'
+//
+// That last line is the correction codexmb asked for on #121. Returning
+// nothing used to read as a successful post, so an announcer that resolved
+// early, returned undefined, or was misconfigured in a way nobody had thought
+// of announced nothing and recorded a success - the same "we tried, so it
+// landed" inference, one level up in the composition layer.
 export function composeAnnouncers(map) {
   return async (intent) => {
     const record = typeof intent.recordAnnouncement === 'function'
@@ -1506,6 +1533,20 @@ export function composeAnnouncers(map) {
           continue;
         }
         const rawId = res && (res.messageId != null ? res.messageId : res.id);
+        const code = res && typeof res.statusCode === 'number' ? res.statusCode : null;
+        // EVIDENCE, not absence of an error. 'posted' is claimed only when the
+        // announcer handed back something that shows the channel accepted the
+        // message: an id, a 2xx status, or an explicit flag.
+        const accepted = rawId != null
+          || (code !== null && code >= 200 && code < 300)
+          || (res && res.posted === true);
+        if (!accepted) {
+          record(ch, {
+            status: 'unreported',
+            error: `announcer for '${ch}' returned no evidence of a post`,
+          });
+          continue;
+        }
         record(ch, {
           // postedAt: the channel accepted it. Says nothing about a human.
           status: 'posted',
