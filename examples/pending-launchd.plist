@@ -1,0 +1,66 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  launchd wiring for iak-pending on a timer (opt-in, one per machine).
+
+  What it does: every 30 minutes it asks every daemon the fleet knows about what
+  is still waiting on the owner, and posts to the room only the items that have
+  been waiting at least 2 hours - and only when an item reaches a NEW escalation
+  (2h, then 4h, 8h, 16h). A card raised in the room scrolls away in minutes;
+  this is what still remembers it four hours later. See README, "What is still
+  waiting on you".
+
+  StartInterval, not KeepAlive: this is a one-shot per tick, and on a laptop
+  that sleeps an in-process timer stalls across sleep while launchd re-runs on
+  wake.
+
+  Install (launchd cannot expand $HOME, so bake the checkout path in with sed):
+    mkdir -p ~/Library/LaunchAgents
+    sed "s|REPLACE_WITH_IAK_ROOT|$HOME/ide-agent-kit|g" \
+      examples/pending-launchd.plist \
+      > ~/Library/LaunchAgents/com.thinkoff.iak-pending.plist
+    launchctl load ~/Library/LaunchAgents/com.thinkoff.iak-pending.plist
+
+  Before you load it, run it once by hand WITHOUT --room and read the output:
+    node bin/iak-pending.mjs --older-than 2h
+  Exit codes: 0 all clear (and every host answered), 10 something is waiting,
+  11 a host could not be asked, 12 none could, 2 cannot run. Only 0 is clear.
+
+  Anti-nag: the ledger at IAK_PENDING_STATE_FILE is what stops a repeat post.
+  Deleting it does NOT cause a storm - the next run rebuilds it and stays
+  silent for that tick, on purpose.
+
+  Raise --older-than if the room feels busy; there is no cooldown to tune,
+  because escalations are what trigger a post, not elapsed time.
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.thinkoff.iak-pending</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>-c</string>
+    <string>cd REPLACE_WITH_IAK_ROOT &amp;&amp; exec node bin/iak-pending.mjs --older-than 2h --room</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    <key>IAK_CONFIG</key>
+    <string>REPLACE_WITH_IAK_ROOT/ide-agent-kit.json</string>
+    <key>IAK_WATCHDOG_ROSTER_FILE</key>
+    <string>REPLACE_WITH_IAK_ROOT/config/watchdog-roster.json</string>
+    <key>IAK_PENDING_STATE_FILE</key>
+    <string>REPLACE_WITH_IAK_ROOT/.iak-pending-announced.json</string>
+  </dict>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>StartInterval</key>
+  <integer>1800</integer>
+  <key>StandardOutPath</key>
+  <string>/tmp/iak-pending.launchd.log</string>
+  <key>StandardErrorPath</key>
+  <string>/tmp/iak-pending.launchd.log</string>
+</dict>
+</plist>

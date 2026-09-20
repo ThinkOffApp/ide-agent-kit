@@ -5,7 +5,8 @@
   "type": "module",
   "bin": {
     "ide-agent-kit": "./bin/cli.mjs",
-    "ide-agent-kit-mcp": "./bin/iak-mcp.mjs"
+    "ide-agent-kit-mcp": "./bin/iak-mcp.mjs",
+    "iak-pending": "./bin/iak-pending.mjs"
   },
   "scripts": {
     "test": "node --test test/*.test.mjs packages/user-intent-kit/test/*.test.js",

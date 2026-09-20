@@ -21,7 +21,7 @@ import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
 import { once } from 'node:events';
 import { execFile } from 'node:child_process';
-import { mkdtempSync, writeFileSync, readFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, writeFileSync, readFileSync, rmSync, chmodSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -45,6 +45,12 @@ import {
   renderRoomBody,
   parseArgs,
   itemKey,
+  KEY_SEPARATOR,
+  ageSecondsFrom,
+  fetchFailureReason,
+  rollbackAnnouncements,
+  announceToRoom,
+  main,
   HELP,
 } from '../bin/iak-pending.mjs';
 
@@ -205,7 +211,7 @@ test('CONTROL: an unreachable host gets its own visible line and does NOT read a
     assert.equal(result.items.length, 0);
     assert.equal(result.unreachable.length, 1);
     assert.equal(result.unreachable[0].label, '@peer');
-    assert.match(result.unreachable[0].reason, /unreachable: ECONNREFUSED/);
+    assert.match(result.unreachable[0].reason, /unreachable: .*ECONNREFUSED/);
 
     const text = renderText({ ...result, thresholdSec: 0 });
     assert.match(text, /COULD NOT ASK 1 of 2 hosts/);
@@ -525,16 +531,26 @@ test('end to end: --json carries ages, unreachable hosts and the exit code', asy
   } finally { await s.close(); cleanup(); }
 });
 
-test('end to end: --older-than hides fresh items but the host is still reported as asked', async () => {
+test('end to end: --older-than hides a fresh item from the LIST but never from the exit code', async () => {
   const s = await intentsEndpoint([liveIntent('fresh', 2 * MIN)]);
   const { dir, cleanup } = tmpDir();
   try {
     const r = await runBin(['--daemon', s.base, '--config', join(dir, 'none.json'), '--json', '--older-than', '1h'], { dir });
     const doc = JSON.parse(r.stdout);
-    assert.equal(r.code, EXIT.NONE_PENDING);
+    // A 59-minute-old "Approve: rm -rf the backups" is still pending. The
+    // threshold decides what is PRINTED, not whether anything is waiting, so
+    // exit 0 keeps meaning exactly what --help says it means.
+    assert.equal(r.code, EXIT.PENDING);
+    assert.notEqual(r.code, EXIT.NONE_PENDING);
     assert.deepEqual(doc.pending, []);
+    assert.equal(doc.pending_total, 1);
+    assert.equal(doc.pending_below_threshold, 1);
     assert.deepEqual(doc.unreachable, []);
     assert.equal(doc.older_than_sec, 3600);
+
+    const text = await runBin(['--daemon', s.base, '--config', join(dir, 'none.json'), '--older-than', '1h'], { dir });
+    assert.doesNotMatch(text.stdout, /Nothing pending/);
+    assert.match(text.stdout, /1 item is pending below that threshold/);
   } finally { await s.close(); cleanup(); }
 });
 
@@ -616,4 +632,455 @@ test('this suite never wrote a real credential into the repo', () => {
   assert.ok(source.includes('dummy-gate-token-not-a-real-credential'));
   assert.ok(!/xfb_[a-f0-9]{16}/.test(source));
   assert.ok(!/antfarm_[A-Za-z0-9]{16}/.test(source));
+});
+
+// ===========================================================================
+// TIER 1: the three confirmed ways this tool could still print "you are clear"
+// when the owner is not. Each of these was written to FAIL against the first
+// version of bin/iak-pending.mjs, and each failure was a false all-clear.
+// ===========================================================================
+
+// --- T1: a roster we cannot read must not silently shrink the fleet ---------
+
+test('T1: a corrupt or unreadable roster is an error, never a one-host all-clear', async () => {
+  const up = await intentsEndpoint([]);
+  const { dir, cleanup } = tmpDir();
+  try {
+    const cfg = join(dir, 'none.json');
+    const rosterFile = join(dir, 'roster.json');
+    const good = JSON.stringify([{ handle: '@peer', gate: 'http://peer.example:8788' }]);
+
+    // Baseline: the SAME roster, valid, sees two hosts and refuses to say all clear.
+    writeFileSync(rosterFile, good);
+    const valid = await runBin(['--daemon', up.base, '--config', cfg, '--timeout-sec', '1'], {
+      dir, env: { IAK_WATCHDOG_ROSTER: '', IAK_WATCHDOG_ROSTER_FILE: rosterFile },
+    });
+    assert.equal(valid.code, EXIT.SOME_UNREACHABLE, 'baseline: a valid roster must see the peer');
+
+    // ENOENT is the ONE readable-as-empty case: a single-machine install.
+    const absent = await runBin(['--daemon', up.base, '--config', cfg], {
+      dir, env: { IAK_WATCHDOG_ROSTER: '', IAK_WATCHDOG_ROSTER_FILE: join(dir, 'no-such-roster.json') },
+    });
+    assert.equal(absent.code, EXIT.NONE_PENDING, 'a missing roster is a single-machine install, not an error');
+
+    // Everything else is a roster we cannot trust, and must never exit 0.
+    const broken = {
+      'corrupt JSON': () => writeFileSync(rosterFile, '[{"handle": "@peer", "gate"'),
+      'NUL truncated': () => writeFileSync(rosterFile, good.slice(0, 20) + '\0'.repeat(40)),
+      'wrong shape': () => writeFileSync(rosterFile, JSON.stringify({ peers: [{ handle: '@peer', gate: 'http://peer.example:8788' }] })),
+      'unreadable': () => { writeFileSync(rosterFile, good); chmodSync(rosterFile, 0o000); },
+    };
+    for (const [name, make] of Object.entries(broken)) {
+      chmodSync(rosterFile, 0o600);
+      make();
+      const r = await runBin(['--daemon', up.base, '--config', cfg, '--timeout-sec', '1'], {
+        dir, env: { IAK_WATCHDOG_ROSTER: '', IAK_WATCHDOG_ROSTER_FILE: rosterFile },
+      });
+      assert.notEqual(r.code, EXIT.NONE_PENDING, `${name}: must not exit 0 with a real peer configured`);
+      assert.doesNotMatch(r.stdout, /Nothing pending on 1 of 1 host/, `${name}: must not shrink the fleet to one host`);
+      assert.match(r.stderr, /roster/i, `${name}: must say which file it could not trust`);
+    }
+    chmodSync(rosterFile, 0o600);
+
+    // The inline env form has to obey the same rule.
+    const inline = await runBin(['--daemon', up.base, '--config', cfg], {
+      dir, env: { IAK_WATCHDOG_ROSTER: '[{"handle": "@peer"' },
+    });
+    assert.notEqual(inline.code, EXIT.NONE_PENDING, 'corrupt inline roster must not exit 0');
+    assert.match(inline.stderr, /roster/i);
+  } finally { await up.close(); cleanup(); }
+});
+
+// --- T2: a 200 whose rows are not the shape we understand -------------------
+
+test('T2: a 200 whose rows do not carry a status we understand is a shape mismatch, not an empty queue', async () => {
+  const cases = {
+    'no status key': [{ id: 'a1', prompt: 'Approve: the thing', createdAt: NOW - HOUR }],
+    'wrong case': [{ id: 'a1', prompt: 'Approve: the thing', status: 'PENDING', createdAt: NOW - HOUR }],
+    'unknown vocabulary': [{ id: 'a1', prompt: 'Approve: the thing', status: 'open', createdAt: NOW - HOUR }],
+  };
+  for (const [name, body] of Object.entries(cases)) {
+    const result = await collectPending({
+      hosts: [host('local', 'http://shape.example:8788')],
+      fetchImpl: fakeFetch({ 'http://shape.example:8788': { body } }),
+      now: NOW,
+    });
+    const text = renderText({ ...result, thresholdSec: 0 });
+    // Either it understood the row and listed it, or it could not and said so.
+    // What it must never do is drop the row and call the queue empty.
+    const listed = result.items.length === 1;
+    const flagged = result.unreachable.length === 1;
+    assert.ok(listed || flagged, `${name}: a pending item was silently dropped`);
+    assert.notEqual(exitCodeFor({ ...result, items: result.items }), EXIT.NONE_PENDING, `${name}: false all-clear`);
+    assert.doesNotMatch(text, /Nothing pending on 1 of 1 host/, `${name}: false all-clear in the text`);
+    if (flagged) assert.match(result.unreachable[0].reason, /shape|status/i, `${name}: the reason must name the problem`);
+  }
+});
+
+test('T2: rows the daemon marks decided are still a legitimate empty queue, not a shape mismatch', async () => {
+  const result = await collectPending({
+    hosts: [host('local', 'http://ok.example:8788')],
+    fetchImpl: fakeFetch({ 'http://ok.example:8788': { body: [{ id: 'x', status: 'decided', decision: 'approve', createdAt: NOW - HOUR }] } }),
+    now: NOW,
+  });
+  assert.equal(result.items.length, 0);
+  assert.equal(result.unreachable.length, 0, 'a daemon that answered honestly must not be called unreachable');
+  assert.equal(exitCodeFor(result), EXIT.NONE_PENDING);
+});
+
+// --- T3: the all-unreachable guard must be able to fail ---------------------
+
+test('T3: with zero hosts answering the output contains NO all-clear sentence at all', async () => {
+  const result = await collectPending({
+    hosts: [host('local', 'http://127.0.0.1:1')],
+    fetchImpl: fakeFetch({}),
+    now: NOW,
+  });
+  const text = renderText({ ...result, thresholdSec: 0 });
+  // Not a regex tuned to the exact sentence the code happens to emit: the
+  // words themselves must not be there when nobody answered. The previous
+  // version of this assertion matched a bare "Nothing pending." that the code
+  // could never print, so it could not fail.
+  assert.doesNotMatch(text, /Nothing pending/, 'zero hosts answered, so nothing may read as an all-clear');
+  assert.equal(result.reachedCount, 0);
+  assert.match(text, /NO host answered/);
+});
+
+test('T3: the all-clear sentence appears only when at least one host actually answered', async () => {
+  const up = await intentsEndpoint([]);
+  try {
+    const answered = await collectPending({ hosts: [host('local', up.base)], now: NOW });
+    assert.match(renderText({ ...answered, thresholdSec: 0 }), /Nothing pending on 1 of 1 host\./);
+  } finally { await up.close(); }
+});
+
+// ===========================================================================
+// Tier 2: the rest of the PR #122 review. Age believability, the honest exit
+// code, ledger carry-forward, post rollback, and the --room block that had no
+// coverage at all.
+// ===========================================================================
+
+const NUL = String.fromCharCode(0);
+
+// --- ages we cannot believe -------------------------------------------------
+
+test('an intent with NO createdAt goes through probeHost as an unknown age, and survives --older-than', async () => {
+  const result = await collectPending({
+    hosts: [host('local', 'http://ok.example:8788')],
+    fetchImpl: fakeFetch({ 'http://ok.example:8788': { body: [{ id: 'no-ts', prompt: 'Approve: the thing', status: 'pending' }] } }),
+    now: NOW,
+  });
+  assert.equal(result.items.length, 1);
+  assert.equal(result.items[0].ageSec, null, 'a missing timestamp must not read as age zero');
+  assert.equal(result.items[0].createdAt, null);
+  assert.equal(filterByAge(result.items, 9 * 3600).length, 1, 'an un-ageable item must survive the threshold');
+  assert.match(renderText({ ...result, thresholdSec: 0 }), /age unknown\s+local\s+no-ts/);
+});
+
+test('a future-dated intent is an unknown age, not a fresh one', async () => {
+  const result = await collectPending({
+    hosts: [host('local', 'http://ok.example:8788')],
+    fetchImpl: fakeFetch({ 'http://ok.example:8788': { body: [{ id: 'skewed', status: 'pending', createdAt: NOW + 6 * HOUR }] } }),
+    now: NOW,
+  });
+  assert.equal(result.items[0].ageSec, null, 'clock skew must not clamp to zero and then vanish under --older-than');
+  assert.equal(filterByAge(result.items, 3600).length, 1);
+});
+
+test('a small clock skew inside the tolerance is still treated as age zero, not as unknown', () => {
+  assert.equal(ageSecondsFrom(NOW + 10_000, NOW), 0);
+  assert.equal(ageSecondsFrom(NOW + 10 * 60_000, NOW), null);
+});
+
+test('a seconds-valued createdAt is an unknown age, never a 20000-day item at the top of the list', async () => {
+  const result = await collectPending({
+    hosts: [host('local', 'http://ok.example:8788')],
+    fetchImpl: fakeFetch({ 'http://ok.example:8788': { body: [
+      { id: 'seconds', status: 'pending', createdAt: Math.floor((NOW - HOUR) / 1000) },
+      { id: 'genuine', status: 'pending', createdAt: NOW - 9.2 * HOUR },
+    ] } }),
+    now: NOW,
+  });
+  const text = renderText({ ...result, thresholdSec: 0 });
+  assert.equal(result.items.find((i) => i.id === 'seconds').ageSec, null);
+  assert.doesNotMatch(text, /\d{4,}d /, 'an epoch-seconds timestamp must not render as tens of thousands of days');
+  assert.match(text, /9h 12m\s+local\s+genuine/);
+});
+
+// --- the exit code says what --help says ------------------------------------
+
+test('an item hidden by --older-than still makes the exit code say "pending"', () => {
+  const view = { items: [], unreachable: [], hostCount: 1, totalPending: 1 };
+  assert.equal(exitCodeFor(view), EXIT.PENDING);
+  assert.notEqual(exitCodeFor(view), EXIT.NONE_PENDING);
+  assert.equal(exitCodeFor({ items: [], unreachable: [], hostCount: 1, totalPending: 0 }), EXIT.NONE_PENDING);
+});
+
+test('the text says how many items the threshold hid, instead of implying none exist', () => {
+  const text = renderText({ items: [], unreachable: [], hostCount: 1, reachedCount: 1, totalPending: 2, thresholdSec: 3600 });
+  assert.doesNotMatch(text, /Nothing pending/);
+  assert.match(text, /2 items are pending below that threshold/);
+});
+
+// --- ledger carry-forward ----------------------------------------------------
+
+test('the ledger carries forward items on a host we could not ask, so a flapping peer cannot re-announce', () => {
+  const state = {
+    version: STATE_VERSION,
+    announced: { '@peer p1': { level: 2, at: 1, host: '@peer' }, 'local gone': { level: 1, at: 1, host: 'local' } },
+  };
+  const picked = selectAnnouncements({
+    items: [],
+    thresholdSec: 3600,
+    stateLoad: { ok: true, state },
+    now: NOW,
+    unreachableHosts: ['@peer'],
+  });
+  assert.deepEqual(Object.keys(picked.nextState.announced), ['@peer p1'], 'unreachable host keeps its entries, reachable host is pruned');
+
+  const back = selectAnnouncements({
+    items: [{ host: '@peer', id: 'p1', ageSec: 2 * 3600 }],
+    thresholdSec: 3600,
+    stateLoad: { ok: true, state: picked.nextState },
+    now: NOW + HOUR,
+  });
+  assert.deepEqual(back.announce, [], 'a peer returning from a blip must not re-announce the same escalation');
+});
+
+// --- rollback on a failed post ----------------------------------------------
+
+test('rollbackAnnouncements puts a failed announcement back to its previous level', () => {
+  const stateLoad = { ok: true, state: { version: STATE_VERSION, announced: { 'local old': { level: 1, at: 1, host: 'local' } } } };
+  const picked = selectAnnouncements({
+    items: [{ host: 'local', id: 'old', ageSec: 2 * 3600 }, { host: 'local', id: 'new', ageSec: 2 * 3600 }],
+    thresholdSec: 3600, stateLoad, now: NOW,
+  });
+  assert.deepEqual(picked.announce.map((i) => i.id).sort(), ['new', 'old']);
+  const rolled = rollbackAnnouncements(picked, stateLoad);
+  assert.equal(rolled.announced['local old'].level, 1, 'an escalation that never went out must not be recorded');
+  assert.equal(rolled.announced['local new'], undefined);
+});
+
+// --- the --room block, which had no tests at all ----------------------------
+
+function roomHarness({ dir, items, unreachable = [] }) {
+  const posts = [];
+  const errs = [];
+  const view = {
+    now: NOW, items, unreachable, hostCount: 1 + unreachable.length,
+    reachedCount: 1, totalPending: items.length,
+  };
+  return {
+    posts, errs, view,
+    statePath: join(dir, 'ledger.json'),
+    post: async (payload) => { posts.push(payload); },
+    failingPost: async () => { throw new Error('room post failed: HTTP 503'); },
+    errOut: (m) => errs.push(String(m)),
+  };
+}
+
+// The key is the DUMMY_TOKEN constant, never a literal next to `api_key`: the
+// repo's pre-commit secret scan flags that shape on sight, and it is right to.
+const ROOM_CFG = { poller: { api_key: DUMMY_TOKEN }, mcp: { confirmations: { room: 'a-room' } } };
+
+test('--room: the first escalation posts once, a second run on the same state posts nothing', async () => {
+  const { dir, cleanup } = tmpDir();
+  try {
+    const h = roomHarness({ dir, items: [{ host: 'local', id: 'a1', ageSec: 2 * 3600, prompt: 'Approve: the thing' }] });
+    // Run 1: no ledger yet, so by design it seeds and stays silent.
+    const seed = await announceToRoom({ view: h.view, thresholdSec: 3600, statePath: h.statePath, config: ROOM_CFG, env: {}, post: h.post, errOut: h.errOut });
+    assert.equal(seed.posted, false);
+    assert.equal(seed.why, 'ledger-rebuilt');
+    assert.equal(h.posts.length, 0);
+    assert.equal(loadAnnounceState(h.statePath).ok, true, 'the ledger must actually be written, not assumed');
+
+    // Run 2: the item doubles in age, so this is a new escalation. One post.
+    const older = { ...h.view, items: [{ ...h.view.items[0], ageSec: 4 * 3600 }] };
+    const first = await announceToRoom({ view: older, thresholdSec: 3600, statePath: h.statePath, config: ROOM_CFG, env: {}, post: h.post, errOut: h.errOut });
+    assert.equal(first.posted, true);
+    assert.equal(h.posts.length, 1);
+    assert.equal(h.posts[0].room, 'a-room');
+    assert.match(h.posts[0].body, /4h 0m - local - `a1`/);
+
+    // Run 3: same escalation, five minutes later. Silence.
+    const again = await announceToRoom({ view: older, thresholdSec: 3600, statePath: h.statePath, config: ROOM_CFG, env: {}, post: h.post, errOut: h.errOut });
+    assert.equal(again.posted, false);
+    assert.equal(again.why, 'nothing-new');
+    assert.equal(h.posts.length, 1, 'a timer tick must not repeat an announcement');
+  } finally { cleanup(); }
+});
+
+test('--room: the ledger is genuinely written to disk before any post', async () => {
+  const { dir, cleanup } = tmpDir();
+  try {
+    const h = roomHarness({ dir, items: [{ host: 'local', id: 'a1', ageSec: 2 * 3600, prompt: 'p' }] });
+    writeFileSync(h.statePath, JSON.stringify({ version: STATE_VERSION, announced: {} }));
+    await announceToRoom({ view: h.view, thresholdSec: 3600, statePath: h.statePath, config: ROOM_CFG, env: {}, post: h.post, errOut: h.errOut });
+    const text = readFileSync(h.statePath, 'utf8');
+    const onDisk = JSON.parse(text);
+    assert.equal(onDisk.announced['local a1'].level, 2); // 2h against a 1h threshold: one doubling
+    assert.equal(onDisk.announced['local a1'].host, 'local');
+    assert.ok(!text.includes(NUL), 'the ledger must stay text, not become binary to grep');
+  } finally { cleanup(); }
+});
+
+test('--room: an unwritable ledger means silence, not a post', async () => {
+  const { dir, cleanup } = tmpDir();
+  try {
+    const h = roomHarness({ dir, items: [{ host: 'local', id: 'a1', ageSec: 2 * 3600, prompt: 'p' }] });
+    const unwritable = join(dir, 'nope', 'ledger.json');
+    chmodSync(dir, 0o500); // cannot create the subdirectory
+    try {
+      const r = await announceToRoom({ view: h.view, thresholdSec: 3600, statePath: unwritable, config: ROOM_CFG, env: {}, post: h.post, errOut: h.errOut });
+      assert.equal(r.posted, false);
+      assert.equal(r.why, 'ledger-unwritable');
+      assert.equal(h.posts.length, 0);
+      assert.match(h.errs.join('\n'), /could not write/);
+    } finally { chmodSync(dir, 0o700); }
+  } finally { cleanup(); }
+});
+
+test('--room: a failed post rolls the ledger back so the next run retries that escalation', async () => {
+  const { dir, cleanup } = tmpDir();
+  try {
+    const h = roomHarness({ dir, items: [{ host: 'local', id: 'a1', ageSec: 2 * 3600, prompt: 'p' }] });
+    writeFileSync(h.statePath, JSON.stringify({ version: STATE_VERSION, announced: {} }));
+    const failed = await announceToRoom({ view: h.view, thresholdSec: 3600, statePath: h.statePath, config: ROOM_CFG, env: {}, post: h.failingPost, errOut: h.errOut });
+    assert.equal(failed.posted, false);
+    assert.equal(failed.why, 'post-failed');
+    assert.match(h.errs.join('\n'), /rolling back/);
+    assert.deepEqual(JSON.parse(readFileSync(h.statePath, 'utf8')).announced, {}, 'a post that never went out must not be recorded');
+
+    // The retry, on the very next run, posts. Without the rollback this item
+    // would have gone quiet until its age doubled again: 9h to 18h.
+    const retry = await announceToRoom({ view: h.view, thresholdSec: 3600, statePath: h.statePath, config: ROOM_CFG, env: {}, post: h.post, errOut: h.errOut });
+    assert.equal(retry.posted, true);
+    assert.equal(h.posts.length, 1);
+  } finally { cleanup(); }
+});
+
+test('--room: with no api key or room it posts nothing and does not record an announcement', async () => {
+  const { dir, cleanup } = tmpDir();
+  try {
+    const h = roomHarness({ dir, items: [{ host: 'local', id: 'a1', ageSec: 2 * 3600, prompt: 'p' }] });
+    writeFileSync(h.statePath, JSON.stringify({ version: STATE_VERSION, announced: {} }));
+    const r = await announceToRoom({ view: h.view, thresholdSec: 3600, statePath: h.statePath, config: {}, env: {}, post: h.post, errOut: h.errOut });
+    assert.equal(r.posted, false);
+    assert.equal(r.why, 'unconfigured');
+    assert.deepEqual(JSON.parse(readFileSync(h.statePath, 'utf8')).announced, {});
+  } finally { cleanup(); }
+});
+
+test('--room: main() wires the room path end to end and never prints the room key', async () => {
+  const s = await intentsEndpoint([liveIntent('a1', 9.2 * HOUR)]);
+  const { dir, cleanup } = tmpDir();
+  try {
+    const statePath = join(dir, 'ledger.json');
+    writeFileSync(statePath, JSON.stringify({ version: STATE_VERSION, announced: {} }));
+    const posts = [];
+    const outLines = [];
+    const errLines = [];
+    const code = await main(
+      ['--daemon', s.base, '--config', join(dir, 'none.json'), '--older-than', '1h', '--room', '--room-name', 'a-room', '--state-file', statePath],
+      {
+        env: { IAK_WATCHDOG_ROSTER: '[]', GROUPMIND_KEY: DUMMY_TOKEN, IAK_GATE_TOKEN_FILE: process.env.IAK_GATE_TOKEN_FILE },
+        out: (l) => outLines.push(String(l)),
+        errOut: (l) => errLines.push(String(l)),
+        post: async (p) => { posts.push(p); },
+      },
+    );
+    assert.equal(code, EXIT.PENDING);
+    assert.equal(posts.length, 1);
+    assert.equal(posts[0].apiKey, DUMMY_TOKEN);
+    assert.match(posts[0].body, /9h \d+m - local - `a1`/);
+    const printed = [...outLines, ...errLines].join('\n');
+    assert.ok(!printed.includes(DUMMY_TOKEN), 'the room key must never be printed');
+  } finally { await s.close(); cleanup(); }
+});
+
+// --- teeth on the tests the review found toothless --------------------------
+
+test('the dedicated 401 branch is what produces the 401 reason, not the generic not-ok branch', async () => {
+  const result = await collectPending({
+    hosts: [host('@gated', 'http://gated.example:8788')],
+    fetchImpl: fakeFetch({ 'http://gated.example:8788': { status: 401, body: {} } }),
+    now: NOW,
+  });
+  const reason = result.unreachable[0].reason;
+  // A bare "HTTP 401" is also what the generic branch emits, so asserting only
+  // that let the dedicated branch be deleted with every test still passing.
+  assert.match(reason, /HTTP 401: daemon (rejected this machine's gate token|requires a gate token)/);
+  const other = await collectPending({
+    hosts: [host('@x', 'http://x.example:8788')],
+    fetchImpl: fakeFetch({ 'http://x.example:8788': { status: 500, body: {} } }),
+    now: NOW,
+  });
+  assert.equal(other.unreachable[0].reason, 'HTTP 500', 'a 500 must not claim anything about tokens');
+});
+
+test('a REAL refused connection produces a reason a human can act on, not a bare "fetch failed"', async () => {
+  // A port that was listening a moment ago and is now closed, so this is a
+  // genuine ECONNREFUSED from Node - which wraps the useful part one level down
+  // in `cause` and reports only "fetch failed" at the top.
+  const dead = await intentsEndpoint([]);
+  await dead.close();
+  const result = await collectPending({
+    hosts: [host('local', dead.base)],
+    timeoutMs: 2000,
+    now: Date.now(),
+  });
+  const reason = result.unreachable[0].reason;
+  assert.notEqual(reason, 'unreachable: fetch failed');
+  assert.match(reason, /ECONNREFUSED/, `uninformative failure reason: ${reason}`);
+});
+
+test('a timeout is reported as a timeout, with the limit that was applied', () => {
+  assert.equal(fetchFailureReason({ name: 'TimeoutError' }, 5000), 'no answer in 5000ms');
+  assert.match(fetchFailureReason(new TypeError('fetch failed'), 5000), /fetch failed/);
+});
+
+test('the ledger key is a plain, greppable, documented string', () => {
+  // Hard-coded rather than built by calling itemKey(), which would agree with
+  // any separator at all, NUL included.
+  assert.equal(itemKey({ host: 'local', id: 'a1' }), 'local a1');
+  assert.equal(KEY_SEPARATOR, ' ');
+  assert.ok(!itemKey({ host: 'local', id: 'a1' }).includes(NUL));
+});
+
+// --- smaller confirmed items -------------------------------------------------
+
+test('the same bad gate listed twice counts as one host, not two', () => {
+  const hosts = resolveHosts({
+    roster: [
+      { handle: '@lanbox', gate: 'http://192.168.1.50:8788' },
+      { handle: '@lanbox-again', gate: 'http://192.168.1.50:8788' },
+    ],
+  });
+  assert.equal(hosts.length, 2, 'local plus one blocked peer');
+  assert.equal(hosts.filter((h) => h.blocked).length, 1);
+});
+
+test('a flag given without a value is an error, not a silently ignored default', async () => {
+  for (const argv of [['--older-than'], ['--older-than', '--json'], ['--daemon'], ['--state-file']]) {
+    const r = parseArgs(argv);
+    assert.match(r.error || '', /requires a value/, `${argv.join(' ')} was silently accepted`);
+  }
+  const run = await runBin(['--older-than']);
+  assert.equal(run.code, EXIT.CANNOT_RUN);
+  assert.match(run.stderr, /requires a value/);
+});
+
+test('--json reports only fields the daemon actually returns', async () => {
+  const s = await intentsEndpoint([liveIntent('a1', 2 * HOUR)]);
+  const { dir, cleanup } = tmpDir();
+  try {
+    const r = await runBin(['--daemon', s.base, '--config', join(dir, 'none.json'), '--json'], { dir });
+    const doc = JSON.parse(r.stdout);
+    // `options` used to be emitted and was always null: GET /intents is backed
+    // by listIntents(), which does not return it. A field that is always null
+    // is a claim the daemon never made.
+    assert.ok(!('options' in doc.pending[0]), 'do not emit a field the daemon does not return');
+    assert.deepEqual(Object.keys(doc.pending[0]).sort(), ['age', 'age_sec', 'created_at', 'host', 'id', 'prompt', 'session']);
+    assert.equal(doc.pending_total, 1);
+  } finally { await s.close(); cleanup(); }
 });
