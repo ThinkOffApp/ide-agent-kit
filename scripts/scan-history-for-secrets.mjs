@@ -24,7 +24,7 @@
 // Run:  node scripts/scan-history-for-secrets.mjs [repo-path] [--json]
 // Help: node scripts/scan-history-for-secrets.mjs --help
 
-import { MAX_BYTES, ruleLabels } from '../src/secret-patterns.mjs';
+import { MAX_BYTES, renderClaims, ruleLabels } from '../src/secret-patterns.mjs';
 import { EXIT, scanRepo } from '../src/history-scan.mjs';
 
 const DEFAULT_MAX_SECONDS = 600;
@@ -129,6 +129,10 @@ function printHuman(report) {
   if (e.blobsSkippedBinaryMedia > 0) {
     out(`skipped:   ${e.blobsSkippedBinaryMedia} binary media blob(s) by extension - NOT examined`);
   }
+  if (e.blobsExamined === 0 && e.blobsReachable > 0) {
+    out('NOTHING SCANNED: 0 of the reachable blobs were read as text. Whatever this');
+    out('           report says, it is not based on having looked at the content.');
+  }
   if (e.commits <= 1) {
     out('DEPTH:     this history is 1 commit. A history scan of a fresh snapshot');
     out('           repo proves almost nothing - it has no deleted past to hide a key in.');
@@ -152,8 +156,10 @@ function printHuman(report) {
       // non-expiring full-access production database credential", and it is
       // metadata, not the secret.
       if (f.detail && f.detail.kind === 'jwt') {
-        const claims = Object.entries(f.detail.claims).map(([k, v]) => `${k}=${v}`).join(' ');
-        out(`      claims: ${claims || '(none readable)'}`);
+        // renderClaims prints a value only where the value is constrained to a
+        // vocabulary we defined; everything else is presence and length. A
+        // JWT's claims are free text chosen by whoever made the token.
+        out(`      claims: ${renderClaims(f.detail.claims)}`);
         if (f.detail.noExpiry) out('      expiry: NO EXPIRY CLAIM - this token does not stop working');
         else if (f.detail.expired) out(`      expiry: EXPIRED ${f.detail.expiresAt}`);
         else out(`      expiry: LIVE until ${f.detail.expiresAt} (${f.detail.daysRemaining} days remaining)`);

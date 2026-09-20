@@ -58,11 +58,11 @@ import { existsSync } from 'node:fs';
 import path from 'node:path';
 import {
   MAX_BYTES,
-  SKIP_EXT,
   decodeForScanning,
+  looksLikeBinaryMedia,
   matchSecrets,
-  ruleLabels,
-} from '../src/secret-patterns.mjs';
+  sanitizeForOutput,
+} from './secret-patterns.mjs';
 
 // Documented in --help. Verdict precedence when several apply:
 // FOUND > INCOMPLETE > SHALLOW > CLEAN. Anything that is not a proven-clean
@@ -206,6 +206,21 @@ function readBatch(git, shas, onBlob) {
  * source that could carry a key - refusing it skips the scan AND mislabels the
  * skip as an error, which is the worst of both answers.
  */
+/**
+ * A repo-controlled path, made safe to print.
+ *
+ * A path is attacker-controlled free text that this report prints verbatim. It
+ * can carry ANSI escapes to repaint the output or a newline to forge an extra
+ * finding line, and it can BE a credential - keys/sk-live-xxxx.txt is a path,
+ * and printing it would leak the very thing we refuse to print from inside the
+ * file. Same rule either way: say what is there, never its content.
+ */
+export function safeReportPath(blobPath) {
+  const hits = matchSecrets(blobPath);
+  if (hits.length > 0) return `(path withheld: it matches ${hits[0].label})`;
+  return sanitizeForOutput(blobPath);
+}
+
 function decodeBlob(body) {
   const { text, strict } = decodeForScanning(body);
   // A blob that does not decode is BOTH scanned and reported unexamined.
@@ -309,14 +324,12 @@ export function scanRepo(opts) {
 
     const toRead = [];
     for (const blob of blobs) {
-      // A media extension is a hint about what the bytes probably are, not a
-      // licence to skip reading them. It only decides the OUTCOME for a blob we
-      // could not decode anyway (a real .png is quietly skipped rather than
-      // counted as could-not-complete). Text that happens to be named .png is
-      // read and scanned like anything else.
+      // No filename appears in this decision, at any stage. A blob over the cap
+      // is unexamined, full stop - we did not read it, and the name it happens
+      // to carry is not evidence about its contents. Raise --max-bytes to scan
+      // it rather than letting an extension vouch for it.
       if (blob.size > opts.maxBytes) {
-        if (SKIP_EXT.test(blob.path)) report.examined.blobsSkippedBinaryMedia += 1;
-        else report.unexamined.push({ path: blob.path, blob: blob.sha, reason: 'over-size-cap' });
+        report.unexamined.push({ path: safeReportPath(blob.path), blob: blob.sha, reason: 'over-size-cap' });
         continue;
       }
       toRead.push(blob);
@@ -329,13 +342,17 @@ export function scanRepo(opts) {
         if (!blob) return;
         const { text, reason } = decodeBlob(body);
         if (reason) {
-          // Undecodable AND named like binary media: an ordinary image, skipped
-          // by policy and counted, not dressed up as a scanning failure.
-          if (SKIP_EXT.test(blob.path)) {
+          // Undecodable, and the BYTES are a format we recognise: an ordinary
+          // image, skipped by policy and counted, not dressed up as a scanning
+          // failure. Recognition is by magic number, so a text file called
+          // logo.png is still scanned and a PNG called notes.txt is still
+          // skipped. Anything we do not recognise is lossy-scanned below and
+          // reported unexamined.
+          if (looksLikeBinaryMedia(body)) {
             report.examined.blobsSkippedBinaryMedia += 1;
             return;
           }
-          report.unexamined.push({ path: blob.path, blob: sha, reason });
+          report.unexamined.push({ path: safeReportPath(blob.path), blob: sha, reason });
         } else {
           report.examined.blobsExamined += 1;
           report.examined.bytesExamined += body.length;
@@ -345,13 +362,18 @@ export function scanRepo(opts) {
           // One finding per rule that fired, not just the first: a rule high in
           // the list used to shadow everything below it in the same blob.
           const commit = introducingCommit(git, sha);
+          // The PATH is repo-controlled free text and it is printed. It can
+          // carry ANSI escapes or a newline to forge report lines, and it can
+          // BE a credential (keys/sk-live-....txt). Same rule as everywhere
+          // else: report that there is something there, never its content.
+          const safePath = safeReportPath(blob.path);
           for (const hit of hits) {
             // label + line + length only, plus safe metadata for rules that
             // can produce it (JWT claims). The value stays in the repo, which
             // is the one place it is already.
             report.findings.push({
               rule: hit.label,
-              path: blob.path,
+              path: safePath,
               line: hit.line,
               blob: sha,
               commit,
@@ -362,11 +384,28 @@ export function scanRepo(opts) {
       });
     }
   } catch (err) {
-    report.errors.push(String(err && err.message ? err.message : err));
+    // git's stderr can quote repo-controlled text (ref names, paths), so it
+    // gets the same treatment as everything else that reaches the report.
+    report.errors.push(sanitizeForOutput(String(err && err.message ? err.message : err), 500));
   }
 
   report.examined.blobsUnexamined = report.unexamined.length;
   report.durationMs = deadline.elapsedMs();
+
+  // Accounting invariant: every reachable blob must end up in exactly one
+  // bucket - examined, skipped as recognised media, or unexamined. If the
+  // numbers do not add up, a blob fell out of the scan without anyone deciding
+  // that it should, and the report is describing a repo we did not fully walk.
+  // That is could-not-complete, not clean. (The motivating output was "PASS: no
+  // credential-shaped data in 0 reachable blob(s)", printed while a blob sat
+  // unscanned - a sentence that should never have been printable.)
+  const accounted = report.examined.blobsExamined
+    + report.examined.blobsSkippedBinaryMedia
+    + report.unexamined.length;
+  if (accounted < report.examined.blobsReachable) {
+    report.errors.push(
+      `only ${accounted} of ${report.examined.blobsReachable} reachable blobs are accounted for`);
+  }
 
   if (report.findings.length > 0) {
     report.verdict = 'found';

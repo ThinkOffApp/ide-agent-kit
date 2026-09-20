@@ -38,7 +38,7 @@
 
 import { execFileSync } from 'node:child_process';
 import { readFileSync, statSync } from 'node:fs';
-import { MAX_BYTES, SKIP_EXT, decodeForScanning, matchSecrets, ruleLabels } from '../src/secret-patterns.mjs';
+import { MAX_BYTES, decodeForScanning, looksLikeBinaryMedia, matchSecrets, renderClaims, ruleLabels, sanitizeForOutput } from '../src/secret-patterns.mjs';
 
 // The pattern list, the binary-extension skip list and the size cap now live
 // in src/secret-patterns.mjs, shared with scripts/scan-history-for-secrets.mjs.
@@ -79,8 +79,19 @@ function stageableFiles() {
 // rather than something the tool swallows.
 const lossyFiles = [];
 
+// A path is repo-controlled free text that this tool prints. It can carry ANSI
+// escapes or a newline to forge output lines, and it can itself be a credential
+// (keys/sk-live-xxx.txt), which printing would leak.
+function safeFile(file) {
+  const hits = matchSecrets(file);
+  if (hits.length > 0) return `(path withheld: it matches ${hits[0].label})`;
+  return sanitizeForOutput(file);
+}
+
 function scan(path) {
-  if (SKIP_EXT.test(path)) return [];
+  // No extension check. The same filename-decides bug lives here: a stageable
+  // foo.png holding an ASCII credential would have been skipped unread. Binary
+  // media is recognised below, by its bytes.
   let bytes;
   try {
     if (statSync(path).size > MAX_BYTES) return [];
@@ -102,7 +113,11 @@ function scan(path) {
   // a disabled scanner is worse than none. The history scanner, which reports
   // rather than blocks, does mark such blobs could-not-complete AND scans them.
   const { text, strict } = decodeForScanning(bytes);
-  if (!strict) lossyFiles.push(path);
+  if (!strict) {
+    // Recognised image or archive: nothing to read, and nothing to warn about.
+    if (looksLikeBinaryMedia(bytes)) return [];
+    lossyFiles.push(path);
+  }
   // Report WHERE and WHICH RULE, never the value itself. This output ends up
   // in CI logs and terminal scrollback, and a scanner that prints the secret it
   // found has simply moved the leak.
@@ -118,12 +133,12 @@ function scan(path) {
 // the history scanner so a finding reads the same wherever it surfaces.
 function describeDetail(detail) {
   if (!detail || detail.kind !== 'jwt') return '';
-  const claims = Object.entries(detail.claims).map(([k, v]) => `${k}=${v}`).join(' ');
+  const claims = renderClaims(detail.claims);
   let expiry;
   if (detail.noExpiry) expiry = 'NO EXPIRY CLAIM';
   else if (detail.expired) expiry = `EXPIRED ${detail.expiresAt}`;
   else expiry = `live until ${detail.expiresAt} (${detail.daysRemaining} days)`;
-  return `claims: ${claims || '(none readable)'} | ${expiry}`;
+  return `claims: ${claims} | ${expiry}`;
 }
 
 // Shared with the history scanner; a test compares the two outputs so the
@@ -143,7 +158,7 @@ function reportLossy() {
   console.error(`NOTE: ${lossyFiles.length} stageable file(s) are not valid UTF-8 and were`);
   console.error('      scanned as ASCII. Credential shapes are ASCII, so this finds them,');
   console.error('      but text in another encoding would not have been read:');
-  for (const f of lossyFiles.slice(0, 10)) console.error(`        ${f}`);
+  for (const f of lossyFiles.slice(0, 10)) console.error(`        ${safeFile(f)}`);
 }
 
 if (findings.length === 0) {
@@ -156,7 +171,7 @@ reportLossy();
 
 console.error(`FAIL: ${findings.length} stageable file(s) contain credential-shaped data\n`);
 for (const f of findings) {
-  console.error(`  ${f.file}:${f.line}`);
+  console.error(`  ${safeFile(f.file)}:${f.line}`);
   console.error(`      ${f.label} - ${f.hint}`);
   if (f.detail) console.error(`      ${describeDetail(f.detail)}`);
   console.error('');

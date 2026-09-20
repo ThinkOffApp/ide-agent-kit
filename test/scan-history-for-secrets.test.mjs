@@ -564,10 +564,17 @@ test('JWT claims are reported and the token is not', () => {
     assert.equal(r.status, EXIT.FOUND);
     const output = `${r.stdout}\n${r.stderr}`;
 
-    // The claims, which are what make the hit triageable.
+    // The claims that are constrained to a vocabulary we defined are printed...
     assert.ok(output.includes('service_role'), `role claim missing from ${args.join(' ')}`);
-    assert.ok(output.includes('supabase'), 'iss claim missing');
-    assert.ok(output.includes('TESTONLYPROJECTREF'), 'ref claim missing');
+    assert.ok(output.includes('2036-'), 'exp claim missing (as a date)');
+    // ...and the free-text ones are reported as presence and length instead,
+    // because their contents are chosen by whoever minted the token. The human
+    // report renders that as iss=<present, N chars>; the JSON carries the same
+    // thing structurally.
+    assert.ok(/iss=<present,|"iss":\s*\{\s*"present"/.test(output),
+      `iss must be reported as presence and length, not value (${args.join(' ')})`);
+    assert.ok(!output.includes('supabase'), 'the iss VALUE must not be printed');
+    assert.ok(!output.includes('TESTONLYPROJECTREF'), 'a non-conforming ref value must not be printed');
 
     // The token, which must never appear - whole, prefixed or segmented.
     assert.ok(!output.includes(token), 'the token leaked');
@@ -580,7 +587,9 @@ test('JWT claims are reported and the token is not', () => {
   }
 
   const detail = JSON.parse(runScanner([dir, '--json']).stdout).findings[0].detail;
-  assert.equal(detail.claims.role, 'service_role');
+  assert.equal(detail.claims.role.value, 'service_role');
+  assert.equal(detail.claims.iss.value, undefined, 'a free-text claim carries no value');
+  assert.equal(detail.claims.iss.chars, 'supabase'.length);
   assert.equal(detail.expired, false);
   assert.match(detail.expiresAt, /^\d{4}-\d{2}-\d{2}$/);
   assert.ok(detail.daysRemaining > 0);
@@ -758,4 +767,134 @@ test('a media extension cannot hide text content from the scan', () => {
   assert.equal(imageReport.examined.blobsSkippedBinaryMedia, 1);
   assert.equal(imageReport.unexamined.length, 0);
   assert.equal(imageReport.verdict, 'clean');
+  assert.equal(imageReport.errors.length, 0, 'a recognised image is accounted for, not lost');
+  // ...but the human output still says plainly that nothing was read.
+  const imageHuman = runScanner([imageDir]);
+  assert.match(imageHuman.stdout, /NOTHING SCANNED/);
+});
+
+// ---------------------------------------------------------------------------
+// Attacker-controlled input must not choose what the report says.
+//
+// Three rounds of review on this PR found three instances of one idea:
+// something the scanner does not control deciding what the scanner reports. A
+// JWT's claims are free text chosen by whoever minted the token; a blob's
+// filename is chosen by whoever committed it. Both reach the output.
+// ---------------------------------------------------------------------------
+
+test('a secret planted in ANY emitted claim does not reach the output', () => {
+  // The reviewer's finding: an allowlist of claim NAMES does not constrain
+  // claim VALUES. Plant the same synthetic secret in every claim the scanner
+  // is willing to name, then grep all three outputs for it.
+  const planted = synthetic('INCLAIMS');
+  const header = { alg: planted, typ: planted, kid: planted };
+  const payload = {
+    iss: planted, aud: planted, scope: planted, sub: planted, azp: planted,
+    jti: planted, role: planted, ref: planted,
+    exp: planted, iat: planted, nbf: planted,
+  };
+  const dir = newRepo('iak-hist-claimleak-');
+  writeFileSync(path.join(dir, 'token.js'), `const t = "${syntheticJwt(payload, header)}";\n`);
+  commitAll(dir, 'a token whose claims are hostile');
+
+  for (const args of [[dir], [dir, '--json']]) {
+    const r = runScanner(args);
+    assert.equal(r.status, EXIT.FOUND, `expected FOUND for ${args.join(' ')}`);
+    const output = `${r.stdout}\n${r.stderr}`;
+    assert.ok(!output.includes(planted), `a planted claim value reached ${args.join(' ')}`);
+    for (let n = 8; n <= planted.length; n++) {
+      assert.ok(!output.includes(planted.slice(0, n)), `${n}-char prefix of a claim value leaked`);
+    }
+    assert.ok(!output.includes('TESTONLY'), 'a distinctive fragment of a claim value leaked');
+    // It still reports that the claims are there, which is the triage value.
+    assert.ok(/present,\s*\d+\s*chars|"present"/.test(output), 'presence and length must still be reported');
+  }
+});
+
+test('an unrecognised role or alg is reported by shape, not by value', () => {
+  const dir = newRepo('iak-hist-vocab-');
+  const odd = 'role-' + 'x'.repeat(30);
+  writeFileSync(path.join(dir, 'odd.js'),
+    `const t = "${syntheticJwt({ role: odd, iss: 'x' }, { alg: odd, typ: 'JWT' })}";\n`);
+  commitAll(dir, 'claims outside every vocabulary');
+
+  const r = runScanner([dir, '--json']);
+  const claims = JSON.parse(r.stdout).findings[0].detail.claims;
+  assert.equal(claims.role.value, undefined, 'an unknown role value must not be printed');
+  assert.equal(claims.role.chars, odd.length);
+  assert.equal(claims.alg.value, undefined, 'an alg outside the JWT vocabulary must not be printed');
+  assert.ok(!`${r.stdout}${r.stderr}`.includes(odd));
+});
+
+test('the same blob named .png and .txt, undecodable, is still FOUND', () => {
+  // The combined case: the earlier fix moved WHERE the filename decided, not
+  // WHETHER it decided. Content that does not strictly decode AND whose
+  // representative path is a media name was skipped unread, so a repo holding a
+  // credential exited 0 / clean.
+  const dir = newRepo('iak-hist-combined-');
+  const body = Buffer.concat([
+    Buffer.from(`api_key = "${synthetic('COMBINED')}"\n`),
+    Buffer.from([0xff]),
+  ]);
+  writeFileSync(path.join(dir, 'a-alias.png'), body); // sorts first, wins the name
+  writeFileSync(path.join(dir, 'z-real.txt'), body);
+  commitAll(dir, 'same blob, two names, one invalid byte');
+
+  const r = runScanner([dir, '--json']);
+  assert.equal(r.status, EXIT.FOUND,
+    `a media-looking name must not hide undecodable text; got ${r.status}: ${r.stderr}`);
+  const report = JSON.parse(r.stdout);
+  assert.equal(report.findings.length, 1);
+  assert.equal(report.unexamined.length, 1, 'and it is still reported as not fully examined');
+  assert.equal(report.examined.blobsSkippedBinaryMedia, 0,
+    'nothing here is recognised binary media');
+});
+
+test('an oversize blob is unexamined whatever it is called', () => {
+  const dir = newRepo('iak-hist-oversize-');
+  writeFileSync(path.join(dir, 'big.png'), 'x'.repeat(4096));
+  commitAll(dir, 'a large blob with a media name');
+
+  const report = JSON.parse(runScanner([dir, '--max-bytes=1024', '--json']).stdout);
+  assert.equal(report.unexamined.length, 1,
+    'over the cap means unread, and a filename is not evidence about contents');
+  assert.equal(report.unexamined[0].reason, 'over-size-cap');
+  assert.equal(report.examined.blobsSkippedBinaryMedia, 0);
+});
+
+test('every reachable blob is accounted for in exactly one bucket', () => {
+  const dir = newRepo('iak-hist-accounting-');
+  writeFileSync(path.join(dir, 'text.js'), 'const ok = true;\n');
+  writeFileSync(path.join(dir, 'image.png'), Buffer.from('89504e470d0a1a0a0000000d49484452', 'hex'));
+  writeFileSync(path.join(dir, 'weird.dat'), Buffer.from([0xff, 0xfe, 0x41]));
+  commitAll(dir, 'one of each bucket');
+
+  const report = JSON.parse(runScanner([dir, '--json']).stdout);
+  const e = report.examined;
+  assert.equal(e.blobsExamined + e.blobsSkippedBinaryMedia + report.unexamined.length,
+    e.blobsReachable, 'a blob that is in no bucket has silently left the scan');
+  assert.ok(!report.errors.some((err) => /accounted for/.test(err)));
+});
+
+test('a path that is itself a credential is withheld, and control characters are neutralised', () => {
+  const dir = newRepo('iak-hist-paths-');
+  // A path can BE a credential, and printing it would leak exactly what we
+  // refuse to print from inside a file.
+  const namedSecret = `${synthetic('INPATH')}.txt`;
+  writeFileSync(path.join(dir, namedSecret), 'nothing secret inside\n');
+  // ...and a path can carry escapes that repaint a terminal report.
+  const forging = `notes${String.fromCharCode(27)}[2K${String.fromCharCode(13)}PASS.txt`;
+  writeFileSync(path.join(dir, forging), `key = "${synthetic('FORGE')}"\n`);
+  commitAll(dir, 'hostile filenames');
+
+  const r = runScanner([dir, '--json']);
+  const output = `${r.stdout}\n${r.stderr}`;
+  assert.ok(!output.includes('TESTONLY-INPATH'), 'a credential in a PATH must not be printed');
+  assert.ok(!output.includes(String.fromCharCode(27)), 'no escape character may reach the output');
+  assert.ok(!output.includes(String.fromCharCode(13)), 'no carriage return may reach the output');
+
+  const report = JSON.parse(r.stdout);
+  const forged = report.findings.find((f) => /notes/.test(f.path));
+  assert.ok(forged, 'the finding in the oddly-named file is still reported');
+  assert.match(forged.path, /notes\?\[2K\?PASS\.txt/, 'control characters are shown as ?, not dropped');
 });

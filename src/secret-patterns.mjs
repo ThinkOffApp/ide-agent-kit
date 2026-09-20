@@ -67,32 +67,103 @@ export const SECRET_PATTERNS = [
     'assigned secret-looking value'],
 ];
 
-// Binaries and media produce noise, not credentials. A blob skipped by this
-// rule is NOT examined - both scanners report the count so a reader can tell
-// "we looked at everything" from "we looked at everything we could read".
-export const SKIP_EXT =
-  /\.(png|jpe?g|gif|webp|ico|pdf|zip|gz|tgz|jar|aab|apk|keystore|jks|woff2?|ttf|mp[34]|mov|wav)$/i;
+// Binary media used to be recognised by file extension here. That decided
+// whether content got scanned from a name git handed us by chance, which let a
+// credential hide in a blob whose first-seen path ended .png. Recognition is
+// now by content: looksLikeBinaryMedia() below.
 
 // Above this, a blob is not scanned. It is reported as unexamined rather than
 // silently passed: "too big to check" is not "checked and clean".
 export const MAX_BYTES = 2 * 1024 * 1024;
 
-// Claims that are safe to print: standard JWT metadata, never the token, never
-// the signature, and never a custom claim we have not thought about. An
-// allowlist rather than a denylist, because the interesting question - "is this
-// a service_role key for production" - is answered by four well-known fields,
-// and a custom claim could hold anything.
-const JWT_CLAIM_ALLOWLIST = ['alg', 'typ', 'kid', 'iss', 'aud', 'role', 'ref', 'scope', 'iat', 'nbf', 'exp'];
-const MAX_CLAIM_CHARS = 64;
+// WHAT MAY BE PRINTED FROM A JWT, AND WHY SO LITTLE.
+//
+// A JWT's claims are ATTACKER-CONTROLLED FREE TEXT. Anyone who can get a token
+// into a scanned repo chooses what our report says, and this report exists to
+// be shared: pasted into a ticket, handed to a reviewer, dropped in a room. An
+// earlier version allowlisted claim NAMES and printed whatever string sat under
+// them, under 65 characters. A reviewer put a synthetic secret in `iss` and it
+// came back verbatim. An allowlist of names does not constrain values.
+//
+// So a value is printed only where the value itself is constrained to a
+// vocabulary we defined:
+//
+//   alg, typ   the JWT spec's own registered names
+//   role       the handful of roles these platforms define
+//   exp/iat/nbf a number, rendered as a date
+//   ref        ONLY when it is exactly 20 lowercase letters
+//
+// Everything else - iss, kid, aud, scope, and any claim we have not thought
+// about - is reported as presence and length. "iss present, 42 chars" tells a
+// human this token names an issuer and roughly how long it is, which is all
+// triage needs, and it cannot carry a payload.
+//
+// The one argued exception is `ref`. It is the Supabase project identifier,
+// it appears in the project's own public URL, it is not a credential, and it
+// is the single field that answers "which project is this key for" - the
+// difference between an alarming finding and an actionable one. It is printed
+// only when it matches ^[a-z]{20}$ exactly, so the channel is 20 lowercase
+// letters wide and carries nothing an attacker did not already have to encode
+// into that shape. If that trade is not wanted, delete SUPABASE_REF_SHAPE and
+// it degrades to presence-and-length like the rest.
+const JWT_ALG_VOCABULARY = new Set([
+  'HS256', 'HS384', 'HS512', 'RS256', 'RS384', 'RS512',
+  'ES256', 'ES256K', 'ES384', 'ES512', 'PS256', 'PS384', 'PS512',
+  'EdDSA', 'none',
+]);
+const JWT_TYP_VOCABULARY = new Set(['JWT', 'at+jwt', 'at+JWT', 'JOSE', 'JOSE+JSON', 'dpop+jwt']);
+const JWT_ROLE_VOCABULARY = new Set([
+  'service_role', 'anon', 'authenticated', 'authenticator',
+  'supabase_admin', 'admin', 'user', 'owner', 'editor', 'viewer', 'guest',
+]);
+const SUPABASE_REF_SHAPE = /^[a-z]{20}$/;
+const JWT_TIMESTAMP_CLAIMS = ['exp', 'iat', 'nbf'];
+// Reported by presence and length only. Listing them explicitly documents the
+// decision; anything NOT in any list is treated the same way by default, which
+// is the safe direction.
+const JWT_OPAQUE_CLAIMS = ['kid', 'iss', 'aud', 'scope', 'sub', 'azp', 'jti'];
+
+/** A value we chose to print, or a shape that carries nothing. */
+const printable = (value) => ({ value: String(value) });
+const opaque = (value) => ({ present: true, chars: String(value).length });
+
+function describeClaim(name, value) {
+  if (typeof value === 'object') return null; // arrays/objects: never dumped
+  const text = String(value);
+  if (name === 'alg') return JWT_ALG_VOCABULARY.has(text) ? printable(text) : opaque(text);
+  if (name === 'typ') return JWT_TYP_VOCABULARY.has(text) ? printable(text) : opaque(text);
+  if (name === 'role') return JWT_ROLE_VOCABULARY.has(text) ? printable(text) : opaque(text);
+  if (name === 'ref') return SUPABASE_REF_SHAPE.test(text) ? printable(text) : opaque(text);
+  if (JWT_TIMESTAMP_CLAIMS.includes(name)) {
+    return typeof value === 'number' && Number.isFinite(value)
+      ? printable(new Date(value * 1000).toISOString().slice(0, 10))
+      : opaque(text);
+  }
+  return opaque(text);
+}
+
+const JWT_REPORTED_CLAIMS = [
+  'alg', 'typ', 'role', 'ref', ...JWT_TIMESTAMP_CLAIMS, ...JWT_OPAQUE_CLAIMS,
+];
+
+/**
+ * Render one claims map as a single line for humans. Shared so a finding reads
+ * identically wherever it surfaces.
+ */
+export function renderClaims(claims) {
+  const parts = Object.entries(claims).map(([name, claim]) => (
+    claim.value !== undefined ? `${name}=${claim.value}` : `${name}=<present, ${claim.chars} chars>`
+  ));
+  return parts.join(' ') || '(none readable)';
+}
 
 /**
  * Decode a JWT's header and payload and describe them.
  *
- * Claims yes, token never. The claims are not the secret - they are metadata
- * anyone holding the token can read - and they are the whole difference between
- * "some JWT" and "a non-expiring service_role key for the production project".
- * Reporting them is what makes a hit triageable without anyone pasting the
- * credential into a terminal to find out what it is.
+ * Claims yes, token never - and only the constrained parts of the claims, see
+ * the note above. The point is a report that is safe to share: it says what the
+ * token IS (a service_role key for project x, live until 2036) without
+ * republishing anything the token's author chose to write.
  *
  * Returns null for an eyJ-prefixed string that is not actually a JWT, which is
  * a thing that exists: base64 of any JSON object starts "eyJ".
@@ -116,14 +187,11 @@ export function describeJwt(token) {
   const claims = {};
   for (const source of [header, payload]) {
     if (!source) continue;
-    for (const key of JWT_CLAIM_ALLOWLIST) {
-      const value = source[key];
+    for (const name of JWT_REPORTED_CLAIMS) {
+      const value = source[name];
       if (value === undefined || value === null) continue;
-      if (typeof value === 'object') continue; // arrays/objects: not worth dumping
-      const text = String(value);
-      claims[key] = text.length > MAX_CLAIM_CHARS
-        ? `(value omitted: ${text.length} chars)`
-        : text;
+      const described = describeClaim(name, value);
+      if (described) claims[name] = described;
     }
   }
 
@@ -142,6 +210,56 @@ export function describeJwt(token) {
     detail.noExpiry = true;
   }
   return detail;
+}
+
+// Binary media recognised by CONTENT, never by filename.
+//
+// The filename is whatever git handed us - rev-list --objects names a blob once,
+// under whichever path it met first - so a name must not decide whether content
+// gets scanned. These are magic bytes: if we RECOGNISE the format we can skip it
+// quietly, and if we do not, it is unexamined and says so.
+const BINARY_MEDIA_MAGIC = [
+  [0x89, 0x50, 0x4e, 0x47],             // PNG
+  [0xff, 0xd8, 0xff],                   // JPEG
+  [0x47, 0x49, 0x46, 0x38],             // GIF8
+  [0x25, 0x50, 0x44, 0x46],             // %PDF
+  [0x50, 0x4b, 0x03, 0x04],             // ZIP / JAR / APK / AAB / docx
+  [0x50, 0x4b, 0x05, 0x06],             // empty ZIP
+  [0x1f, 0x8b],                         // gzip / tgz
+  [0x77, 0x4f, 0x46, 0x46],             // wOFF
+  [0x77, 0x4f, 0x46, 0x32],             // wOF2
+  [0x00, 0x01, 0x00, 0x00],             // TTF
+  [0x4f, 0x54, 0x54, 0x4f],             // OTTO
+  [0x00, 0x00, 0x01, 0x00],             // ICO
+  [0x52, 0x49, 0x46, 0x46],             // RIFF (wav/webp/avi)
+  [0x49, 0x44, 0x33],                   // ID3 (mp3)
+  [0xff, 0xfb],                         // mp3 frame
+  [0x66, 0x4c, 0x61, 0x43],             // fLaC
+];
+
+/** True when the bytes ARE a recognised binary media format. */
+export function looksLikeBinaryMedia(buf) {
+  if (buf.length >= 12) {
+    // ftyp box at offset 4: mp4 / mov / m4a
+    if (buf.toString('latin1', 4, 8) === 'ftyp') return true;
+  }
+  return BINARY_MEDIA_MAGIC.some((magic) =>
+    magic.length <= buf.length && magic.every((byte, i) => buf[i] === byte));
+}
+
+/**
+ * Make a repo-controlled string safe to print.
+ *
+ * File paths are attacker-controlled free text too, and they end up in terminal
+ * output: a path can carry ANSI escapes to repaint the report, a newline to
+ * forge an extra finding line, or a carriage return to overwrite the verdict.
+ * Control characters are replaced rather than dropped, so the presence of
+ * something odd is visible instead of silently swallowed, and the result is
+ * capped so one absurd path cannot flood a log.
+ */
+export function sanitizeForOutput(text, maxChars = 300) {
+  const cleaned = String(text).replace(/[\u0000-\u001f\u007f-\u009f]/g, '?');
+  return cleaned.length > maxChars ? `${cleaned.slice(0, maxChars)}...(${cleaned.length} chars)` : cleaned;
 }
 
 /**
