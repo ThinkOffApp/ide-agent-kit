@@ -38,7 +38,7 @@
 
 import { execFileSync } from 'node:child_process';
 import { readFileSync, statSync } from 'node:fs';
-import { MAX_BYTES, SKIP_EXT, decodeUtf8, matchSecret, ruleLabels } from '../src/secret-patterns.mjs';
+import { MAX_BYTES, SKIP_EXT, decodeUtf8, matchSecrets, ruleLabels } from '../src/secret-patterns.mjs';
 
 // The pattern list, the binary-extension skip list and the size cap now live
 // in src/secret-patterns.mjs, shared with scripts/scan-history-for-secrets.mjs.
@@ -48,7 +48,7 @@ import { MAX_BYTES, SKIP_EXT, decodeUtf8, matchSecret, ruleLabels } from '../src
 // note above describes. Do not re-introduce a local copy here; a test asserts
 // that neither scanner has one.
 //
-// matchSecret() returns a rule name, a line and a length, never the matched
+// matchSecrets() returns rule names, lines and lengths, never the matched
 // text. That is why the finding below no longer prints a 6-character prefix of
 // the match: a prefix of a live key in a CI transcript is still a prefix of a
 // live key.
@@ -75,26 +75,41 @@ function stageableFiles() {
 }
 
 function scan(path) {
-  if (SKIP_EXT.test(path)) return null;
+  if (SKIP_EXT.test(path)) return [];
   let bytes;
   try {
-    if (statSync(path).size > MAX_BYTES) return null;
+    if (statSync(path).size > MAX_BYTES) return [];
     bytes = readFileSync(path);
   } catch {
-    return null; // unreadable, gone, or a directory: not our problem
+    return []; // unreadable, gone, or a directory: not our problem
   }
   // Read as bytes and decode strictly, rather than the old "readFileSync utf8
   // then look for a NUL". A NUL is not a proof of binary - bin/iak-pending.mjs
   // uses one as a field separator inside 26 kB of valid JavaScript - and the
   // lossy utf8 read could not tell a real binary from text anyway.
   const text = decodeUtf8(bytes);
-  if (text === null) return null; // genuinely not text
+  if (text === null) return []; // genuinely not text
   // Report WHERE and WHICH RULE, never the value itself. This output ends up
   // in CI logs and terminal scrollback, and a scanner that prints the secret it
   // found has simply moved the leak.
-  const hit = matchSecret(text);
-  if (!hit) return null;
-  return { label: hit.label, line: hit.line, hint: `${hit.length} chars, value not printed` };
+  return matchSecrets(text).map((hit) => ({
+    label: hit.label,
+    line: hit.line,
+    hint: `${hit.length} chars, value not printed`,
+    detail: hit.detail,
+  }));
+}
+
+// Claims for a JWT hit: metadata only, never the token. Shared wording with
+// the history scanner so a finding reads the same wherever it surfaces.
+function describeDetail(detail) {
+  if (!detail || detail.kind !== 'jwt') return '';
+  const claims = Object.entries(detail.claims).map(([k, v]) => `${k}=${v}`).join(' ');
+  let expiry;
+  if (detail.noExpiry) expiry = 'NO EXPIRY CLAIM';
+  else if (detail.expired) expiry = `EXPIRED ${detail.expiresAt}`;
+  else expiry = `live until ${detail.expiresAt} (${detail.daysRemaining} days)`;
+  return `claims: ${claims || '(none readable)'} | ${expiry}`;
 }
 
 // Shared with the history scanner; a test compares the two outputs so the
@@ -106,8 +121,7 @@ if (process.argv.includes('--print-rules')) {
 
 const findings = [];
 for (const f of stageableFiles()) {
-  const hit = scan(f);
-  if (hit) findings.push({ file: f, ...hit });
+  for (const hit of scan(f)) findings.push({ file: f, ...hit });
 }
 
 if (findings.length === 0) {
@@ -118,7 +132,9 @@ if (findings.length === 0) {
 console.error(`FAIL: ${findings.length} stageable file(s) contain credential-shaped data\n`);
 for (const f of findings) {
   console.error(`  ${f.file}:${f.line}`);
-  console.error(`      ${f.label} - ${f.hint}\n`);
+  console.error(`      ${f.label} - ${f.hint}`);
+  if (f.detail) console.error(`      ${describeDetail(f.detail)}`);
+  console.error('');
 }
 console.error('These are NOT committed yet, and this repo is public.');
 console.error('Fix by ignoring the file, not by deleting it — something may be using it:');

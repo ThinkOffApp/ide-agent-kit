@@ -510,3 +510,173 @@ test('isMainModule resolves symlinks on both sides', () => {
   writeFileSync(importer, `import ${JSON.stringify(link)};\n`);
   assert.equal(spawnSync('node', [importer], { encoding: 'utf8' }).stdout, 'NOT-MAIN');
 });
+
+// ---------------------------------------------------------------------------
+// JWTs. A Supabase service_role key is a JWT, and this scanner had no JWT rule:
+// it reported "clean" on a repo whose only credential was a non-expiring
+// full-access production database key. Claims are reported, the token never is.
+// ---------------------------------------------------------------------------
+
+const b64url = (obj) => Buffer.from(JSON.stringify(obj)).toString('base64url');
+
+/**
+ * A synthetic JWT. Nothing is signed: the signature segment is a fixed,
+ * obviously-fake string, and every ref/sub is a TESTONLY placeholder. Never
+ * paste a real token into a fixture in a public repo, including one you just
+ * found somewhere else.
+ */
+function syntheticJwt(payload, header = { alg: 'HS256', typ: 'JWT' }) {
+  const signature = ['TESTONLY', 'not', 'a', 'real', 'signature', '0'.repeat(20)].join('-');
+  return `${b64url(header)}.${b64url(payload)}.${signature}`;
+}
+
+const LIVE_SERVICE_ROLE = {
+  iss: 'supabase',
+  ref: 'TESTONLYPROJECTREF',
+  role: 'service_role',
+  iat: 1700000000,
+  exp: 2085000000, // 2036
+};
+
+test('a repo whose ONLY credential is a service_role JWT is FOUND, not clean', () => {
+  const dir = newRepo('iak-hist-jwt-');
+  writeFileSync(path.join(dir, 'test_fetch.js'),
+    `const SUPABASE_KEY = "${syntheticJwt(LIVE_SERVICE_ROLE)}";\n`);
+  commitAll(dir, 'add a fetch test');
+
+  const r = runScanner([dir, '--json']);
+  assert.equal(r.status, EXIT.FOUND,
+    `a service_role JWT must not read as clean; got ${r.status}: ${r.stderr}`);
+  const report = JSON.parse(r.stdout);
+  assert.equal(report.findings.length, 1);
+  assert.equal(report.findings[0].path, 'test_fetch.js');
+  assert.match(report.findings[0].rule, /JWT/);
+});
+
+test('JWT claims are reported and the token is not', () => {
+  const dir = newRepo('iak-hist-jwtclaims-');
+  const token = syntheticJwt(LIVE_SERVICE_ROLE);
+  writeFileSync(path.join(dir, 'client.js'), `const key = "${token}";\n`);
+  commitAll(dir, 'client');
+
+  for (const args of [[dir], [dir, '--json']]) {
+    const r = runScanner(args);
+    assert.equal(r.status, EXIT.FOUND);
+    const output = `${r.stdout}\n${r.stderr}`;
+
+    // The claims, which are what make the hit triageable.
+    assert.ok(output.includes('service_role'), `role claim missing from ${args.join(' ')}`);
+    assert.ok(output.includes('supabase'), 'iss claim missing');
+    assert.ok(output.includes('TESTONLYPROJECTREF'), 'ref claim missing');
+
+    // The token, which must never appear - whole, prefixed or segmented.
+    assert.ok(!output.includes(token), 'the token leaked');
+    for (let n = 8; n <= token.length; n++) {
+      assert.ok(!output.includes(token.slice(0, n)), `${n}-char token prefix leaked`);
+    }
+    for (const segment of token.split('.')) {
+      assert.ok(!output.includes(segment), 'a token segment leaked');
+    }
+  }
+
+  const detail = JSON.parse(runScanner([dir, '--json']).stdout).findings[0].detail;
+  assert.equal(detail.claims.role, 'service_role');
+  assert.equal(detail.expired, false);
+  assert.match(detail.expiresAt, /^\d{4}-\d{2}-\d{2}$/);
+  assert.ok(detail.daysRemaining > 0);
+  assert.ok(!JSON.stringify(detail).includes(token.split('.')[2]), 'the signature must not be in the JSON');
+});
+
+test('an expired JWT is reported and distinguished from a live one', () => {
+  const dir = newRepo('iak-hist-jwtexp-');
+  writeFileSync(path.join(dir, 'old.js'),
+    `const stale = "${syntheticJwt({ ...LIVE_SERVICE_ROLE, exp: 1500000000 })}";\n`); // 2017
+  writeFileSync(path.join(dir, 'new.js'),
+    `const live = "${syntheticJwt(LIVE_SERVICE_ROLE)}";\n`);
+  writeFileSync(path.join(dir, 'forever.js'),
+    `const forever = "${syntheticJwt({ iss: 'supabase', ref: 'TESTONLYREF2', role: 'anon' })}";\n`);
+  commitAll(dir, 'three tokens');
+
+  const report = JSON.parse(runScanner([dir, '--json']).stdout);
+  const byPath = Object.fromEntries(report.findings.map((f) => [f.path, f.detail]));
+  assert.equal(byPath['old.js'].expired, true, 'an expired token must be marked expired');
+  assert.equal(byPath['new.js'].expired, false);
+  assert.equal(byPath['forever.js'].noExpiry, true, 'no exp claim is worse news, not better');
+
+  // All three are still findings: an expired credential is a different
+  // conversation, not a non-event.
+  assert.equal(report.findings.length, 3);
+  const human = runScanner([dir]);
+  assert.match(human.stderr, /EXPIRED/);
+  assert.match(human.stderr, /LIVE until/);
+  assert.match(human.stderr, /NO EXPIRY CLAIM/);
+});
+
+test('a malformed eyJ-prefixed string does not crash the scanner', () => {
+  const dir = newRepo('iak-hist-jwtjunk-');
+  // base64 of any JSON object starts "eyJ", so eyJ-prefixed non-JWTs exist.
+  writeFileSync(path.join(dir, 'junk.txt'), [
+    `${b64url({ hello: 'world' })}.${'!'.repeat(20)}.${'?'.repeat(20)}`,
+    `${b64url({ alg: 'HS256' })}.${'Zm9vYmFy'.repeat(3)}x.${'0'.repeat(30)}`,
+    'eyJ' + 'A'.repeat(40),
+    `${b64url({ alg: 'none' })}.${b64url({ exp: 'not-a-number' })}.${'0'.repeat(30)}`,
+  ].join('\n') + '\n');
+  commitAll(dir, 'junk');
+
+  const r = runScanner([dir, '--json']);
+  assert.ok([EXIT.CLEAN, EXIT.FOUND].includes(r.status),
+    `must not crash or report incomplete; got ${r.status}: ${r.stderr}`);
+  assert.doesNotThrow(() => JSON.parse(r.stdout), 'the JSON report must still be valid');
+  assert.equal(JSON.parse(r.stdout).errors.length, 0);
+});
+
+test('every format the bash pre-commit hook knows is also caught here', () => {
+  // The JWT miss happened because this list was ported from .githooks/pre-commit
+  // and the port silently dropped four formats. Capability test, one synthetic
+  // sample per format, all assembled at runtime so no credential-shaped literal
+  // sits in this file.
+  const samples = {
+    'GroupMind agent key': 'xfb_' + 'a0'.repeat(20),
+    'GroupMind room key': 'antfarm_' + 'T0'.repeat(20),
+    'Anthropic API key': ['sk', 'ant', 'TESTONLY' + '0'.repeat(20)].join('-'),
+    'OpenAI-style secret key': ['sk', 'TESTONLY' + '0'.repeat(20)].join('-'),
+    'Google API key': 'AIza' + 'T0'.repeat(18),
+    'GitHub token': 'ghp_' + 'T0'.repeat(20),
+    'GitHub fine-grained PAT': 'github_pat_' + 'T0'.repeat(30),
+    'xAI API key': 'xai-' + 'T0'.repeat(12),
+    'Moltbook secret key': 'moltbook_sk_' + 'T0'.repeat(12),
+    'AgentMail key': 'am_' + 'te_' + 'a0'.repeat(22),
+    'Discord bot token': 'MT' + 'T0'.repeat(12) + '.' + 'TESTON' + '.' + 'T0'.repeat(15),
+    'JWT (Supabase / Auth0 / Firebase style)': syntheticJwt(LIVE_SERVICE_ROLE),
+    // Split so this file holds no credential-shaped literal, same as the rest:
+    // the repo's own pre-commit hook blocks the intact header, correctly.
+    'private key': '-----BEGIN RSA ' + 'PRIVATE' + ' KEY-----',
+  };
+
+  const dir = newRepo('iak-hist-formats-');
+  for (const [label, sample] of Object.entries(samples)) {
+    writeFileSync(path.join(dir, `${label.replace(/[^a-z0-9]+/gi, '-')}.txt`), `value = ${sample}\n`);
+  }
+  commitAll(dir, 'one of each');
+
+  const report = JSON.parse(runScanner([dir, '--json']).stdout);
+  const found = new Set(report.findings.map((f) => f.rule));
+  const missed = Object.keys(samples).filter((label) => !found.has(label));
+  assert.deepEqual(missed, [], `formats no rule catches: ${missed.join(', ')}`);
+});
+
+test('two different credentials in one blob are both reported', () => {
+  // A rule high in the list used to shadow everything below it in the same
+  // blob, which is a silent partial miss.
+  const dir = newRepo('iak-hist-shadow-');
+  writeFileSync(path.join(dir, 'both.js'),
+    `const a = "${['sk', 'TESTONLY', '0'.repeat(16)].join('-')}";\n`
+    + `const b = "${syntheticJwt(LIVE_SERVICE_ROLE)}";\n`);
+  commitAll(dir, 'two credentials, one file');
+
+  const report = JSON.parse(runScanner([dir, '--json']).stdout);
+  const rules = report.findings.map((f) => f.rule).sort();
+  assert.equal(rules.length, 2, `expected both rules to fire, got: ${rules.join(', ')}`);
+  assert.ok(rules.some((r) => /JWT/.test(r)));
+  assert.ok(rules.some((r) => /OpenAI/.test(r)));
+});

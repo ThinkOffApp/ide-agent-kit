@@ -60,7 +60,7 @@ import {
   MAX_BYTES,
   SKIP_EXT,
   decodeUtf8,
-  matchSecret,
+  matchSecrets,
   ruleLabels,
 } from '../src/secret-patterns.mjs';
 
@@ -314,17 +314,24 @@ export function scanRepo(opts) {
         }
         report.examined.blobsExamined += 1;
         report.examined.bytesExamined += body.length;
-        const hit = matchSecret(text);
-        if (hit) {
-          // label + line + length only. The value stays in the repo, which is
-          // the one place it is already.
-          report.findings.push({
-            rule: hit.label,
-            path: blob.path,
-            line: hit.line,
-            blob: sha,
-            commit: introducingCommit(git, sha),
-          });
+        const hits = matchSecrets(text);
+        if (hits.length > 0) {
+          // One finding per rule that fired, not just the first: a rule high in
+          // the list used to shadow everything below it in the same blob.
+          const commit = introducingCommit(git, sha);
+          for (const hit of hits) {
+            // label + line + length only, plus safe metadata for rules that
+            // can produce it (JWT claims). The value stays in the repo, which
+            // is the one place it is already.
+            report.findings.push({
+              rule: hit.label,
+              path: blob.path,
+              line: hit.line,
+              blob: sha,
+              commit,
+              ...(hit.detail ? { detail: hit.detail } : {}),
+            });
+          }
         }
       });
     }

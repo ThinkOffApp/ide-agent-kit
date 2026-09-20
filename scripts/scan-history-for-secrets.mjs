@@ -147,6 +147,17 @@ function printHuman(report) {
     for (const f of report.findings) {
       out(`  ${f.path}:${f.line}`);
       out(`      rule:   ${f.rule}`);
+      // Claims, never the token. What a JWT IS - service_role for which
+      // project, expiring when - is the difference between "some JWT" and "a
+      // non-expiring full-access production database credential", and it is
+      // metadata, not the secret.
+      if (f.detail && f.detail.kind === 'jwt') {
+        const claims = Object.entries(f.detail.claims).map(([k, v]) => `${k}=${v}`).join(' ');
+        out(`      claims: ${claims || '(none readable)'}`);
+        if (f.detail.noExpiry) out('      expiry: NO EXPIRY CLAIM - this token does not stop working');
+        else if (f.detail.expired) out(`      expiry: EXPIRED ${f.detail.expiresAt}`);
+        else out(`      expiry: LIVE until ${f.detail.expiresAt} (${f.detail.daysRemaining} days remaining)`);
+      }
       out(`      blob:   ${f.blob}`);
       out(`      commit: ${f.commit ?? '(not attributable to a single commit)'}`);
     }
