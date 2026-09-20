@@ -563,10 +563,23 @@ and edit it for the agents that live on *this* machine. Each entry names one wak
 ```json
 [
   { "handle": "@codex-on-this-mac",  "localWake": "/abs/path/ide-agent-kit/tools/codex_gui_nudge.sh" },
-  { "handle": "@agent-elsewhere",    "gate": "http://192.168.0.9:8788" },
+  { "handle": "@agent-elsewhere",    "gate": "http://mini:8788" },
   { "handle": "@gateless-agent" }
 ]
 ```
+
+`gate` must be a stable name, not a LAN IP: a `192.168.x.x` address only
+resolves on the network where you wrote it, and a laptop that leaves that
+network gets no error back - the wake just lands nowhere. Measured 20 Sep
+2026: a wake sent from Berlin to a Helsinki machine's LAN IP got no route,
+while the same box's Tailscale name (`mini`) answered in 64ms. A stable name
+is one that resolves the same way from every machine that might send a wake -
+a tailnet/VPN name (Tailscale, etc.) or a DNS name you control both qualify.
+If every machine you wake stays on one LAN that never changes, a LAN IP is
+fine; it just stops being fine the day one of them leaves. **If wakes work at
+home and quietly stop when you travel, this is why** - `ping <name>` (or
+`tailscale ping <name>`) the `gate`/`peers` host from wherever you are; a LAN
+IP fails silently here, it does not error.
 
 The roster can also come from `IAK_WATCHDOG_ROSTER` (inline JSON) or
 `IAK_WATCHDOG_ROSTER_FILE`. No roster → nothing to watch (the watchdog logs and
@@ -1001,14 +1014,17 @@ See `config/team-relay.example.json` for the full config shape. Key sections:
   - `port` - HTTP listener port (default `8788`); also serves the browser Approve/Deny UI at `/`
   - `host` - bind address (default `127.0.0.1`; use `0.0.0.0` for LAN-reachable so phones / watches / other Macs on the same wifi can hit `/intent`, `/wake`, `/intents`)
   - `room` - GroupMind room slug to post confirmation requests to (also where the chat-reply poller watches for `/approve <id>` and `/deny <id>`)
-  - `callback_base` - public URL of this daemon (e.g. `http://192.168.50.240:8788`) — used in the chat post and as the link from the browser UI
+  - `callback_base` - public URL of this daemon (e.g. `http://mini:8788` - a
+    stable tailnet/VPN/DNS name, not a LAN IP; see [Peer wake](#peer-wake-same-machine-agents-revive-sleeping-colleagues)
+    for why a LAN IP here goes stale the moment either machine changes network)
+    — used in the chat post and as the link from the browser UI
   - `auth_token` - optional bearer token gating `POST /intent/:id/decision` and `POST /intent`
   - `wake_script` - path to the wake script; defaults to `scripts/claudemb-wake.sh` in the repo. Used by `POST /wake` and the `wake_remote` MCP tool
-  - `peers` - map of `@handle` → daemon URL on a peer machine; the room poller's `wake-on-mention.sh` POSTs `/wake` to the matching peer when it sees `@handle` in a new room message. Example:
+  - `peers` - map of `@handle` → daemon URL on a peer machine; the room poller's `wake-on-mention.sh` POSTs `/wake` to the matching peer when it sees `@handle` in a new room message. Use each peer's stable name (tailnet/VPN/DNS), not a LAN IP - see [Peer wake](#peer-wake-same-machine-agents-revive-sleeping-colleagues). Example:
     ```json
     "peers": {
-      "@claudemm": "http://192.168.50.241:8788",
-      "@CodexMB":  "http://192.168.50.241:8788"
+      "@claudemm": "http://mini:8788",
+      "@CodexMB":  "http://mini:8788"
     }
     ```
   - `codewatch_gate_url` / `codewatch_gate_token` - legacy CodeWatch relay path (separate from the Wear OS bridge that ships in the CodeWatch Android app)
