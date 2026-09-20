@@ -160,9 +160,13 @@ function printHuman(report) {
         // vocabulary we defined; everything else is presence and length. A
         // JWT's claims are free text chosen by whoever made the token.
         out(`      claims: ${renderClaims(f.detail.claims)}`);
-        if (f.detail.noExpiry) out('      expiry: NO EXPIRY CLAIM - this token does not stop working');
-        else if (f.detail.expired) out(`      expiry: EXPIRED ${f.detail.expiresAt}`);
-        else out(`      expiry: LIVE until ${f.detail.expiresAt} (${f.detail.daysRemaining} days remaining)`);
+        // The exp claim is the token's own statement, not evidence about it.
+        // "LIVE until" read as proof of validity and "does not stop working" as
+        // proof of permanence; neither survives the fact that we never asked an
+        // issuer anything (codexmb, post-merge review of #123).
+        if (f.detail.noExpiry) out('      expiry: no expiry claim; validity and revocation unverified');
+        else if (f.detail.expired) out(`      expiry: expiry claim ${f.detail.expiresAt} (past); revocation unverified`);
+        else out(`      expiry: expiry claim ${f.detail.expiresAt} (in ${f.detail.daysRemaining} days); validity and revocation unverified`);
       }
       out(`      blob:   ${f.blob}`);
       out(`      commit: ${f.commit ?? '(not attributable to a single commit)'}`);

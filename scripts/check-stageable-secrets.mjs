@@ -135,9 +135,12 @@ function describeDetail(detail) {
   if (!detail || detail.kind !== 'jwt') return '';
   const claims = renderClaims(detail.claims);
   let expiry;
-  if (detail.noExpiry) expiry = 'NO EXPIRY CLAIM';
-  else if (detail.expired) expiry = `EXPIRED ${detail.expiresAt}`;
-  else expiry = `live until ${detail.expiresAt} (${detail.daysRemaining} days)`;
+  // Everything here is what the token SAYS about itself. Decoding `exp` proves
+  // neither that the token still works nor that it was revoked, so the wording
+  // stays scoped to the claim (codexmb, post-merge review of #123).
+  if (detail.noExpiry) expiry = 'no expiry claim; validity and revocation unverified';
+  else if (detail.expired) expiry = `expiry claim: ${detail.expiresAt} (past)`;
+  else expiry = `expiry claim: ${detail.expiresAt} (in ${detail.daysRemaining} days)`;
   return `claims: ${claims} | ${expiry}`;
 }
 

@@ -162,7 +162,7 @@ export function renderClaims(claims) {
  *
  * Claims yes, token never - and only the constrained parts of the claims, see
  * the note above. The point is a report that is safe to share: it says what the
- * token IS (a service_role key for project x, live until 2036) without
+ * token CLAIMS to be (a service_role key for project x, exp 2036) without
  * republishing anything the token's author chose to write.
  *
  * Returns null for an eyJ-prefixed string that is not actually a JWT, which is
