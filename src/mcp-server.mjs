@@ -650,6 +650,36 @@ export async function runMcpServer({ configPath } = {}) {
         },
       },
       {
+        name: 'request_choice',
+        description:
+          'Ask the user to PICK ONE of several options. Same lifecycle as request_confirmation ' +
+          '(posts to the configured channels and BLOCKS until the user answers or the timeout ' +
+          'expires) but renders one button per option instead of Approve/Deny, and returns ' +
+          '{decision: "<the chosen option>"}. The option list is an allow-list: the user cannot ' +
+          'answer with anything else. Use it for a model picker, a branch picker, any "which one?" ' +
+          'question. Needs at least two distinct options; for a yes/no use request_confirmation.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            prompt: { type: 'string', description: 'The question. Keep it short — it fits in a watch notification.' },
+            options: {
+              type: 'array',
+              items: { type: 'string' },
+              description: 'The choices, one button each. At least two, each on one line. The label IS the answer, so label them with the value you want back.',
+            },
+            session: { type: 'string', description: 'tmux session that triggered the request, for context. Optional.' },
+            channels: {
+              type: 'array',
+              items: { type: 'string', enum: ['groupmind', 'codewatch'] },
+              description: 'Which channels to post to. Default: all configured channels.',
+            },
+            timeoutSec: { type: 'number', description: 'How long to wait before returning timeout. Default 600 (10 min).', default: 600 },
+            fromHandle: { type: 'string', description: 'Originating agent handle for attribution, e.g. @CodexMB.' },
+          },
+          required: ['prompt', 'options'],
+        },
+      },
+      {
         name: 'list_intents',
         description: 'List every confirmation intent the server knows about (pending, decided, recent).',
         inputSchema: { type: 'object', properties: {} },
@@ -905,9 +935,19 @@ export async function runMcpServer({ configPath } = {}) {
           });
           return ok(JSON.stringify(posted, null, 2));
         }
+        case 'request_choice':
         case 'request_confirmation': {
-          if (!confirmEnabled && !daemonAvailable) return err('request_confirmation: confirmations not configured. Set mcp.confirmations.room (+ poller.api_key) and/or codewatch_gate_url.');
-          if (!args.prompt) return err('request_confirmation: prompt is required');
+          if (!confirmEnabled && !daemonAvailable) return err(`${name}: confirmations not configured. Set mcp.confirmations.room (+ poller.api_key) and/or codewatch_gate_url.`);
+          if (!args.prompt) return err(`${name}: prompt is required`);
+          // Validate HERE rather than letting the daemon or createIntent throw:
+          // the caller is an agent composing a picker, and "needs at least two
+          // distinct options" is only useful if it names which call was wrong.
+          let options;
+          if (name === 'request_choice') {
+            if (!Array.isArray(args.options)) return err('request_choice: options must be an array of strings');
+            options = [...new Set(args.options.map((o) => String(o).replace(/[\r\n]+/g, ' ').trim()).filter(Boolean))];
+            if (options.length < 2) return err('request_choice: needs at least two distinct options; use request_confirmation for yes/no');
+          }
           const timeoutSec = Math.max(1, Math.min(86400, args.timeoutSec || 600));
 
           // Daemon mode: forward to the running iak-mcp-daemon so the intent
@@ -919,6 +959,7 @@ export async function runMcpServer({ configPath } = {}) {
               headers: { 'Content-Type': 'application/json', ...daemonAuthHeaders() },
               body: JSON.stringify({
                 prompt: args.prompt,
+                options,
                 session: args.session,
                 channels: Array.isArray(args.channels) ? args.channels : undefined,
                 from_handle: confirmationFromHandle(args, config),
@@ -948,6 +989,7 @@ export async function runMcpServer({ configPath } = {}) {
             : Object.keys(announcerMap);
           const id = await createIntent({
             prompt: args.prompt,
+            options,
             session: args.session,
             channels,
             timeoutSec,

@@ -6,6 +6,7 @@ import assert from 'node:assert/strict';
 import {
   createIntent,
   decideIntent,
+  getIntent,
   waitForDecision,
   listIntents,
   startConfirmationsServer,
@@ -481,4 +482,138 @@ test('defaultCallbackBase: a bound IPv6 host is preserved and bracketed', () => 
   assert.equal(defaultCallbackBase({ host: 'fd00::123', port: 8790 }, ifaces), 'http://[fd00::123]:8790');
   // the v6 wildcard still advertises a LAN IPv4, which is what phones dial
   assert.equal(defaultCallbackBase({ host: '::' }, ifaces), 'http://192.168.50.241:8788');
+});
+
+// --- choice intents ---------------------------------------------------------
+// A choice intent is how a multi-option button (a model picker, a branch
+// picker) exists at all. Before it, `decideIntent` validated against a fixed
+// approve/deny vocabulary BEFORE looking the intent up, so no other answer
+// could ever be legal.
+
+test('a choice intent announces one button per option and spells out the typed form', async () => {
+  _resetForTests();
+  const announced = [];
+  const id = await createIntent({
+    prompt: 'Which model for session abc?',
+    options: ['claude-opus-5', 'claude-sonnet-5'],
+    announce: async (a) => announced.push(a),
+  });
+  assert.equal(announced.length, 1);
+  assert.deepEqual(announced[0].options, ['claude-opus-5', 'claude-sonnet-5']);
+  // and it is readable back off the intent, so the requester can map an answer
+  assert.deepEqual(getIntent(id).options, ['claude-opus-5', 'claude-sonnet-5']);
+});
+
+test('an option list is an allow-list: an undeclared value is refused', async () => {
+  _resetForTests();
+  const id = await createIntent({
+    prompt: 'pick', options: ['sonnet', 'opus'], announce: async () => {},
+  });
+  // the negative control - this is the whole point of validating against the
+  // intent rather than accepting whatever tail the message carried
+  const bad = decideIntent(id, 'claude-opus-4-1');
+  assert.equal(bad.ok, false);
+  assert.match(bad.error, /not an option/);
+  assert.equal(getIntent(id).status, 'pending');
+  // approve/deny are NOT a back door into a choice intent either
+  assert.equal(decideIntent(id, 'approve').ok, false);
+  // the declared spelling is what gets stored, whatever casing arrived
+  const good = decideIntent(id, '  OPUS ');
+  assert.equal(good.ok, true);
+  assert.equal(getIntent(id).decision, 'opus');
+});
+
+test('a plain confirmation still refuses anything but approve/deny', async () => {
+  _resetForTests();
+  const id = await createIntent({ prompt: 'plain', announce: async () => {} });
+  const r = decideIntent(id, 'sonnet');
+  assert.equal(r.ok, false);
+  assert.match(r.error, /approve/);
+  assert.equal(decideIntent(id, 'approve').ok, true);
+});
+
+test('createIntent refuses a choice that cannot be a choice', async () => {
+  _resetForTests();
+  await assert.rejects(
+    () => createIntent({ prompt: 'p', options: ['only-one'], announce: async () => {} }),
+    /at least two/,
+  );
+  // duplicates collapse, so two labels that differ only by whitespace are one
+  await assert.rejects(
+    () => createIntent({ prompt: 'p', options: ['a', ' a '], announce: async () => {} }),
+    /at least two/,
+  );
+});
+
+test('chat-reply poller settles a choice from /choose and logs the value', async () => {
+  _resetForTests();
+  const id = await createIntent({
+    prompt: 'pick a model', options: ['claude-opus-5', 'claude-sonnet-5'],
+    announce: async () => {},
+  });
+  const batches = [
+    { messages: [] },
+    { messages: [
+      // an agent must not be able to answer it, same gate as approve/deny
+      { id: 'c0', from: '@ether', body: `/choose ${id} claude-opus-5`, isHuman: false },
+      { id: 'c1', from: 'petrus', body: `/choose ${id} claude-sonnet-5`, isHuman: true },
+    ] },
+  ];
+  let call = 0;
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (url, opts) => {
+    if (opts && opts.method === 'POST') return { ok: true, json: async () => ({}) };
+    const batch = batches[Math.min(call++, batches.length - 1)];
+    return { ok: true, json: async () => batch };
+  };
+  const lines = [];
+  const handle = startChatReplyPoller({
+    apiKey: 'k', room: 'r', intervalMs: 10, owners: ['petrus'], log: (m) => lines.push(m),
+  });
+  try { await new Promise((r) => setTimeout(r, 120)); }
+  finally { clearInterval(handle); globalThis.fetch = originalFetch; }
+
+  const settled = getIntent(id);
+  assert.equal(settled.status, 'decided');
+  assert.equal(settled.decision, 'claude-sonnet-5');
+  const joined = lines.join('\n');
+  assert.match(joined, new RegExp(`/choose ${id} claude-sonnet-5 from petrus: settled`));
+  assert.match(joined, /ether.*not the owner/i);
+});
+
+test('HTTP POST /intent carries options, and a bad option list is 400 not 500', async () => {
+  _resetForTests();
+  const ok = await fetch(`http://127.0.0.1:${TEST_PORT}/intent`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ prompt: 'pick a model', options: ['opus', 'sonnet'] }),
+  });
+  assert.equal(ok.status, 201);
+  const { id } = await ok.json();
+  assert.deepEqual(getIntent(id).options, ['opus', 'sonnet']);
+
+  // Caller errors must not present as daemon faults - a 500 sends someone
+  // looking in the daemon for a typo in their own request.
+  const notArray = await fetch(`http://127.0.0.1:${TEST_PORT}/intent`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ prompt: 'p', options: 'opus' }),
+  });
+  assert.equal(notArray.status, 400);
+
+  const tooFew = await fetch(`http://127.0.0.1:${TEST_PORT}/intent`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ prompt: 'p', options: ['only-one'] }),
+  });
+  assert.equal(tooFew.status, 400);
+
+  // and an intent with NO options is still a plain confirmation
+  const plain = await fetch(`http://127.0.0.1:${TEST_PORT}/intent`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ prompt: 'plain' }),
+  });
+  assert.equal(plain.status, 201);
+  assert.equal(getIntent((await plain.json()).id).options, null);
 });
