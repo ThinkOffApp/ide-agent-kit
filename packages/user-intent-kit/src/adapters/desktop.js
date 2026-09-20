@@ -7,6 +7,7 @@ import { platform } from 'node:os';
 const IDLE_AFTER_SEC = 300;
 import { collectHostTelemetry } from '../host-telemetry.js';
 import { ServedModelProbe } from '../served-model.js';
+import { ModelAvailabilityProbe } from '../model-availability.js';
 
 /**
  * Desktop Adapter - detects active window and context on macOS.
@@ -22,6 +23,7 @@ export class DesktopAdapter {
   #kind;
   #model;
   #modelProbe;
+  #availabilityProbe;
   #pollIntervalMs;
 
   /**
@@ -33,13 +35,21 @@ export class DesktopAdapter {
    * @param {import('../served-model.js').ServedModelProbe|null} [opts.modelProbe]
    *   - asks a local endpoint what it is actually serving. Pass null to turn
    *   the probe off entirely; omit it for the environment's configuration.
+   * @param {import('../model-availability.js').ModelAvailabilityProbe|null} [opts.availabilityProbe]
+   *   - what this box has on disk and could fit. Publishes the WEAKER claim,
+   *   in its own fields; pass null to turn the disk scan off entirely.
    */
-  constructor(client, { pollIntervalMs = 30000, machine, kind, model, modelProbe } = {}) {
+  constructor(client, {
+    pollIntervalMs = 30000, machine, kind, model, modelProbe, availabilityProbe,
+  } = {}) {
     this.#client = client;
     this.#machine = machine ?? client?.deviceId ?? undefined;
     this.#kind = kind;
     this.#model = model;
     this.#modelProbe = modelProbe === undefined ? new ServedModelProbe() : modelProbe;
+    this.#availabilityProbe = availabilityProbe === undefined
+      ? new ModelAvailabilityProbe()
+      : availabilityProbe;
     this.#pollIntervalMs = pollIntervalMs;
     this.#pollTimer = null;
   }
@@ -94,6 +104,9 @@ export class DesktopAdapter {
     // appears on the dashboard at once with whatever vitals it has, label or
     // no label. The first probe fills the label in for the next beat.
     this.#modelProbe?.start();
+    // Same contract, slower timer: the scan is disk-bound, so it never runs on
+    // the heartbeat's path and the first beat goes out without waiting for it.
+    this.#availabilityProbe?.start();
     this.#pollTimer = setInterval(() => {
       this.publishState().catch(() => {});
     }, this.#pollIntervalMs);
@@ -106,6 +119,7 @@ export class DesktopAdapter {
       this.#pollTimer = null;
     }
     this.#modelProbe?.stop();
+    this.#availabilityProbe?.stop();
     this.#client.stopHeartbeat();
   }
 
@@ -146,6 +160,11 @@ export class DesktopAdapter {
       context: active ? 'active' : 'idle',
       ...(idleSec === undefined ? {} : { idle_sec: idleSec }),
       ...collectHostTelemetry({ machine: this.#machine, kind: this.#kind, model: this.#servedModel() }),
+      // The weaker claim, in its OWN keys. `model` still means served and
+      // nothing else, so a dashboard that has never heard of availability
+      // cannot start rendering "this box could run it" as "this box is
+      // running it". Empty when there is nothing measured to say.
+      ...(this.#availabilityProbe?.current() ?? {}),
     };
 
     try {

@@ -61,7 +61,7 @@
 
 import { hostname } from 'node:os';
 import { execSync } from 'node:child_process';
-import { IntentClient, IAKAdapter, DesktopAdapter, ServedModelProbe } from '../src/index.js';
+import { IntentClient, IAKAdapter, DesktopAdapter, ServedModelProbe, defaultSearchRoots } from '../src/index.js';
 
 const baseUrl = process.env.INTENT_API_BASE || 'https://groupmind.one/api/v1';
 const apiKey = process.env.INTENT_API_KEY;
@@ -127,6 +127,9 @@ console.log(`uik-daemon: device=${deviceId} agent=${agentHandle} interval=${poll
 // dashboard can be traced to a port rather than guessed at. Never a token:
 // describe() reports only that a keyFile is configured.
 console.log(`uik-daemon: model probe -> ${modelProbe.describe()}`);
+// And where the weaker claim comes from. A card reading "available and fits"
+// should be traceable to a directory somebody can list, not to a guess.
+console.log(`uik-daemon: model scan  -> ${defaultSearchRoots().join(', ')}`);
 
 const shutdown = async (sig) => {
   console.log(`uik-daemon: ${sig}, shutting down`);
