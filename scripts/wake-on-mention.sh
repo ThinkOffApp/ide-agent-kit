@@ -12,12 +12,18 @@
 #     "mcp": {
 #       "confirmations": {
 #         "peers": {
-#           "@claudemm": "http://192.168.50.105:8788",
-#           "@CodexMB":  "http://192.168.50.105:8788"
+#           "@claudemm": "http://mini:8788",
+#           "@CodexMB":  "http://mini:8788"
 #         }
 #       }
 #     }
 #   }
+#
+# Use a stable name here (Tailscale/VPN/DNS), not a LAN IP - a LAN IP only
+# resolves on the network it was written on, and once this script runs from
+# a different network the POST below just times out with no useful error.
+# See README.md's "Peer wake" section. A LAN IP is fine only while every
+# machine in `peers` stays on that one LAN.
 #
 # Env overrides:
 #   IAK_PEERS_JSON     — JSON object overriding the config peers map

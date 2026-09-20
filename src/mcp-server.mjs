@@ -600,7 +600,7 @@ export async function runMcpServer({ configPath } = {}) {
       inputSchema: {
         type: 'object',
         properties: {
-          gateUrl: { type: 'string', description: 'Base URL of the remote IAK daemon, e.g. http://192.168.50.240:8788.' },
+          gateUrl: { type: 'string', description: 'Base URL of the remote IAK daemon, e.g. http://mini:8788 - a stable tailnet/VPN/DNS name, not a LAN IP (a LAN IP only resolves on the network it was configured on and fails silently elsewhere).' },
           text: { type: 'string', description: 'Nudge text. Default: "check rooms".', default: 'check rooms' },
         },
         required: ['gateUrl'],
