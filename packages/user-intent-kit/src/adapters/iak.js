@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0
 
 import { collectHostTelemetry } from '../host-telemetry.js';
+import { StatePublisher } from '../state-publisher.js';
 
 /**
  * IAK Adapter - integrates user-intent-kit with IDE Agent Kit.
@@ -12,6 +13,7 @@ export class IAKAdapter {
   #client;
   #agentHandle;
   #machine;
+  #publisher;
 
   /**
    * @param {import('../client.js').IntentClient} client
@@ -27,6 +29,8 @@ export class IAKAdapter {
     this.#client = client;
     this.#agentHandle = agentHandle;
     this.#machine = machine ?? client?.deviceId ?? undefined;
+    this.#publisher = new StatePublisher(fields => this.#client.patchAgent(
+      this.#agentHandle.replace(/^@/, ''), { ...fields, host: collectHostTelemetry({ machine: this.#machine }) }), { refreshMs: 120000 });
   }
 
   /**
@@ -37,13 +41,12 @@ export class IAKAdapter {
    * string on some publishers, which gave the dashboard nowhere to put a
    * temperature or a load figure.
    */
-  async publishStatus({ status = 'active', currentTask = null }) {
-    const name = this.#agentHandle.replace(/^@/, '');
-    await this.#client.patchAgent(name, {
+  async publishStatus({ status = 'active', currentTask = null, heartbeat = false }) {
+    await this.#publisher.publish({
       status,
       last_task: currentTask,
-      host: collectHostTelemetry({ machine: this.#machine }),
-    });
+      ttl_sec: 300,
+    }, { force: heartbeat });
   }
 
   /**
