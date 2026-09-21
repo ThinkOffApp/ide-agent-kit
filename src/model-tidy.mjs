@@ -968,6 +968,132 @@ function verifyManifest(rootDir, manifest) {
   return true;
 }
 
+/** Stricter than verifyManifest: every manifest entry must be present and
+ * match AND there must be no extra file/symlink under `rootDir` beyond
+ * what the manifest lists. Used specifically for the delete-the-staged-
+ * original decision, where "the manifest's entries happen to be present"
+ * is not enough — corrupted-but-additional content must also fail this. */
+function manifestExactMatch(rootDir, manifest) {
+  if (!existsSync(rootDir)) return false;
+  if (!verifyManifest(rootDir, manifest)) return false;
+  const manifestRelPaths = new Set(manifest.map(m => m.relPath));
+  let actualCount = 0;
+  for (const full of listAllEntries(rootDir)) {
+    let lst;
+    try {
+      lst = lstatSync(full);
+    } catch {
+      continue;
+    }
+    if (!lst.isFile() && !lst.isSymbolicLink()) continue; // directories aren't in the manifest
+    actualCount++;
+    if (!manifestRelPaths.has(relative(rootDir, full))) return false; // extra, untracked entry
+  }
+  return actualCount === manifestRelPaths.size;
+}
+
+/**
+ * The ONLY place in this file allowed to delete a staged original. Called
+ * both from swapToSymlink's own final step (same run) and from recovery
+ * (a later run) — one guarded function, one invariant, everywhere a
+ * staged original could be discarded.
+ *
+ * A staged original is deleted ONLY when, at this exact moment:
+ *   1. every file under the journal's targetPath matches the journal
+ *      manifest by size and SHA-256, with no extra or missing paths —
+ *      not just "the manifest's entries happen to be present". The link
+ *      having been verified once, when it was CREATED, is not evidence
+ *      about the target's content NOW; the target can change afterwards
+ *      (corruption, a second process, disk issues) and "a link resolves
+ *      to something" proves nothing about what it resolves to.
+ *   2. the path at sourcePath is a symlink whose realpath resolves to
+ *      exactly the journal's recorded targetPath.
+ *   3. the staged original itself (if it still exists) still matches the
+ *      journal manifest exactly — a partially damaged original is a red
+ *      flag to report, not something to silently discard because a
+ *      symlink elsewhere happens to look fine.
+ *
+ * If ANY of the three fails: remove a bad/half symlink at sourcePath (if
+ * one exists), restore the staged original to sourcePath (if the staged
+ * copy still exists and sourcePath is clear), mark the journal record
+ * `step: 'failed'` with the reason, and report — this function NEVER
+ * deletes on the strength of "a link resolves".
+ */
+function finalizeSwapOrRestore(journalDir, record) {
+  const { sourcePath, stagedPath, targetPath, manifest } = record;
+
+  const targetOk = manifestExactMatch(targetPath, manifest);
+
+  let sourceLstat = null;
+  try {
+    sourceLstat = lstatSync(sourcePath);
+  } catch {
+    sourceLstat = null;
+  }
+  let sourceIsCorrectSymlink = false;
+  if (sourceLstat && sourceLstat.isSymbolicLink()) {
+    try {
+      sourceIsCorrectSymlink = realpathSync(sourcePath) === realpathSync(targetPath);
+    } catch {
+      sourceIsCorrectSymlink = false;
+    }
+  }
+
+  const stagedExists = existsSync(stagedPath);
+  const stagedOk = !stagedExists || manifestExactMatch(stagedPath, manifest);
+
+  if (targetOk && sourceIsCorrectSymlink && stagedOk) {
+    if (stagedExists) rmSync(stagedPath, { recursive: true });
+    removeJournalRecord(journalDir, sourcePath);
+    return { ok: true };
+  }
+
+  const reasons = [];
+  if (!targetOk) reasons.push('target content does not match the journaled manifest exactly (missing, extra, or corrupted files)');
+  if (!sourceIsCorrectSymlink) reasons.push('source is not a symlink whose realpath resolves exactly to the recorded target path');
+  if (!stagedOk) reasons.push('the staged original itself no longer matches the journaled manifest exactly');
+  const reason = reasons.join('; ');
+
+  // Never delete on this evidence. Only touch sourcePath at all if there
+  // is a staged original to fall back on — removing a bad symlink with
+  // NOTHING to put in its place would make things strictly worse (e.g.
+  // the case where the original was already legitimately deleted in a
+  // prior successful run and only the target has since degraded: there is
+  // nothing left to restore FROM, so the existing symlink — however
+  // suspect — is left exactly alone rather than removed for no benefit).
+  let restored = false;
+  if (stagedExists) {
+    try {
+      if (sourceLstat && sourceLstat.isSymbolicLink()) rmSync(sourcePath);
+    } catch {
+      // best effort — the restore attempt below will surface a failure
+    }
+    if (!existsSync(sourcePath)) {
+      try {
+        renameSync(stagedPath, sourcePath);
+        restored = existsSync(sourcePath) && !lstatSync(sourcePath).isSymbolicLink();
+      } catch {
+        restored = false;
+      }
+    }
+    // else: sourcePath still holds something unexpected (not a symlink,
+    // and removal above didn't apply) — leave both paths for manual
+    // inspection rather than guess which is authoritative.
+  } else if (sourceLstat && !sourceLstat.isSymbolicLink()) {
+    // No staged copy, and sourcePath already holds a real directory —
+    // nothing to restore, but also nothing was ever at risk.
+    restored = true;
+  }
+
+  try {
+    writeJournalRecordSync(journalDir, { ...record, step: 'failed', failureReason: reason });
+  } catch {
+    // best effort — the reason is still returned to the caller either way
+  }
+
+  return { ok: false, reason, restored };
+}
+
 /**
  * Swap one source directory for a symlink to its already-verified copy.
  *
@@ -1033,12 +1159,13 @@ function swapToSymlink(src, dst, opts = {}) {
   writeJournalRecordSync(journalDir, { ...base, step: 'swapped' });
   if (opts.afterSwap) opts.afterSwap(); // test-only hook: simulate a crash here
 
-  const real = realpathSync(src);
-  if (real !== realpathSync(dst) || !lstatSync(src).isSymbolicLink()) {
-    throw new Error(`post-swap verification failed for ${src}`);
+  // The ONLY place a staged original is deleted, in this run or later via
+  // recovery — see finalizeSwapOrRestore's docstring for the three checks.
+  // "The link resolves to something" is deliberately not one of them.
+  const result = finalizeSwapOrRestore(journalDir, base);
+  if (!result.ok) {
+    throw new Error(`post-swap finalize refused to delete the staged original and restored it instead: ${result.reason}`);
   }
-  rmSync(staging, { recursive: true });
-  removeJournalRecord(journalDir, src);
 }
 
 /** Every location discoverCandidates() looks at, reused so detection and
@@ -1166,36 +1293,45 @@ export function recoverInterruptedMoves(home, options = {}) {
       const stagedExists = existsSync(stagedPath);
       const linkExists = existsSync(linkPath);
 
+      // A symlink is either already in place, or one verified rename away
+      // from being in place: the ONLY safe way to decide whether the
+      // staged original may be deleted is finalizeSwapOrRestore's
+      // three-way check (target manifest, symlink realpath, staged
+      // manifest) — never a bare "does something exist at the realpath"
+      // check, which is exactly the data-loss bug this replaces.
+      if ((srcExists && srcIsSymlink) || (!srcExists && stagedExists && linkExists)) {
+        if (!srcExists && stagedExists && linkExists) {
+          // Completing this rename alone never deletes anything — the
+          // original is still fully intact at stagedPath either way.
+          // finalizeSwapOrRestore below undoes this if it turns out
+          // unsafe to proceed past it.
+          renameSync(linkPath, sourcePath);
+        }
+        const result = finalizeSwapOrRestore(journalDir, record);
+        if (result.ok) {
+          recovered.push({ path: sourcePath, journalFile: file, action: 'completed-swap-and-cleaned', note: 'completed the pending symlink swap (or finished cleanup of one already in place) and removed the staged original — target and symlink both re-verified against the journal manifest first' });
+        } else {
+          recovered.push({
+            path: sourcePath,
+            journalFile: file,
+            action: result.restored ? 'restored-after-failed-verification' : 'left-alone-after-failed-verification',
+            note: `refused to delete the staged original (${result.reason}); ${result.restored ? 'restored the original to the source path' : 'left current state for manual inspection'} and marked the journal record failed`
+          });
+        }
+        continue;
+      }
+
+      // Below here, no symlink has ever been placed at sourcePath — the
+      // delete-the-staged-original decision never applies, so the plainer
+      // manifest checks are enough.
       const stagedOk = !stagedExists || verifyManifest(stagedPath, manifest);
-      const srcOk = !srcExists || srcIsSymlink || verifyManifest(sourcePath, manifest);
+      const srcOk = !srcExists || verifyManifest(sourcePath, manifest);
       if (!stagedOk || !srcOk) {
         recovered.push({ path: sourcePath, journalFile: file, action: 'left-alone', note: `on-disk content (step recorded as '${step}') does not match the journaled manifest; left alone for manual inspection` });
         continue;
       }
 
-      if (srcExists && srcIsSymlink && !stagedExists) {
-        removeJournalRecord(journalDir, sourcePath);
-        recovered.push({ path: sourcePath, journalFile: file, action: 'removed-stale-journal', note: 'the move had already fully completed; removed the stale journal record' });
-      } else if (srcExists && srcIsSymlink && stagedExists) {
-        const real = realpathSync(sourcePath);
-        if (existsSync(real)) {
-          rmSync(stagedPath, { recursive: true });
-          removeJournalRecord(journalDir, sourcePath);
-          recovered.push({ path: sourcePath, journalFile: file, action: 'finished-cleanup', note: 'symlink was already in place; finished removing the staged original' });
-        } else {
-          recovered.push({ path: sourcePath, journalFile: file, action: 'left-alone', note: `symlink target ${real} does not exist — leaving ${stagedPath} for manual inspection` });
-        }
-      } else if (!srcExists && stagedExists && linkExists) {
-        renameSync(linkPath, sourcePath);
-        const real = realpathSync(sourcePath);
-        if (existsSync(real)) {
-          rmSync(stagedPath, { recursive: true });
-          removeJournalRecord(journalDir, sourcePath);
-          recovered.push({ path: sourcePath, journalFile: file, action: 'completed-swap-and-cleaned', note: 'completed the pending symlink swap (the crash landed in the gap between the two renames) and finished cleanup' });
-        } else {
-          recovered.push({ path: sourcePath, journalFile: file, action: 'completed-swap', note: 'completed the pending symlink swap; leaving the staged original for manual inspection (symlink target unexpectedly missing)' });
-        }
-      } else if (!srcExists && stagedExists && !linkExists) {
+      if (!srcExists && stagedExists && !linkExists) {
         renameSync(stagedPath, sourcePath);
         removeJournalRecord(journalDir, sourcePath);
         recovered.push({ path: sourcePath, journalFile: file, action: 'restored-original', note: 'restored the original directory (no verified pending symlink existed to trust instead)' });

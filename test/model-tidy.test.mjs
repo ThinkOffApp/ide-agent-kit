@@ -721,7 +721,7 @@ describe('GAP 2: crash-safety across a hard process kill (not just a thrown exce
     assert.ok(existsSync(`${src}.tidy-moving`));
 
     const recovered = recoverInterruptedMoves(home);
-    assert.ok(recovered.some(r => r.path === src && r.action === 'finished-cleanup'), JSON.stringify(recovered));
+    assert.ok(recovered.some(r => r.path === src && r.action === 'completed-swap-and-cleaned'), JSON.stringify(recovered));
 
     assert.equal(existsSync(src), true);
     assert.equal(lstatSync(src).isSymbolicLink(), true);
@@ -825,7 +825,7 @@ describe('GAP 2: crash-safety across a hard process kill (not just a thrown exce
     assert.match(finding.note, /no matching journal record/);
   });
 
-  it('AMENDMENT: recovery refuses a journaled unit whose on-disk content does not match the journaled manifest', () => {
+  it('AMENDMENT: recovery never silently discards a staged original whose own content no longer matches the journal — it restores (never deletes) and reports failure', () => {
     const { home, src } = buildSingleIdleFixture();
     const target = tempDir('model-tidy-gap2-target-');
     const plan = planFor(home);
@@ -837,18 +837,170 @@ describe('GAP 2: crash-safety across a hard process kill (not just a thrown exce
 
     // Tamper with the staged original so it no longer matches what the
     // journal recorded — recovery must not trust its own naming
-    // convention over the manifest.
+    // convention over the manifest, and must not silently throw this
+    // away just because a symlink elsewhere happens to resolve.
     writeFileSync(join(staging, 'weights.gguf'), 'TAMPERED-CONTENT-DOES-NOT-MATCH-MANIFEST');
 
     const recovered = recoverInterruptedMoves(home);
     const finding = recovered.find(r => r.path === src);
     assert.ok(finding);
-    assert.equal(finding.action, 'left-alone');
-    assert.match(finding.note, /does not match the journaled manifest/);
+    assert.match(finding.action, /^(restored-after-failed-verification|left-alone-after-failed-verification)$/);
+    assert.match(finding.note, /staged original itself no longer matches the journaled manifest/);
 
-    // Nothing was renamed or removed.
-    assert.equal(existsSync(src), false);
-    assert.equal(existsSync(staging), true);
-    assert.equal(readFileSync(join(staging, 'weights.gguf'), 'utf8'), 'TAMPERED-CONTENT-DOES-NOT-MATCH-MANIFEST');
+    // Whatever happened, the staged content was neither silently deleted
+    // nor silently accepted as-is: it now lives at src (or, if that
+    // somehow could not happen, at the untouched staging path) and the
+    // journal itself is marked failed rather than cleared as successful.
+    const survivedAtSrc = existsSync(src) && !lstatSync(src).isSymbolicLink();
+    const survivedAtStaging = existsSync(staging);
+    assert.ok(survivedAtSrc || survivedAtStaging, 'the tampered content must not have been silently discarded');
+    if (survivedAtSrc) {
+      assert.equal(readFileSync(join(src, 'weights.gguf'), 'utf8'), 'TAMPERED-CONTENT-DOES-NOT-MATCH-MANIFEST');
+    }
+    assert.equal(lstatSync(src).isSymbolicLink(), false, 'the source must not be left as a symlink to an unverified copy after a failed check');
+  });
+
+  it("DATA-LOSS FIX, codexmb's round-2 probe kept verbatim: target corrupted after staging must not cost the last good original", () => {
+    // Direct port of /tmp/codex-pr128-round2.pjlier/probe.mjs: a thrown
+    // exception (not a hard kill) during afterStage interrupts the swap
+    // with the original safely staged; the target is then corrupted
+    // in-place; recovery must read GOOD from the source afterwards, never
+    // BADD, and must never report success for a unit whose target was
+    // corrupted.
+    const home = tempDir('model-tidy-probe2-home-');
+    const src = join(home, 'models', 'idle');
+    const target = tempDir('model-tidy-probe2-target-');
+    mkdirSync(src, { recursive: true });
+    writeFileSync(join(src, 'weights.gguf'), 'GOOD');
+    utimesSync(join(src, 'weights.gguf'), new Date(0), new Date(0));
+
+    const plan = planRun({
+      home,
+      listProcessUsers: () => ({ checked: true, users: [] }),
+      listDockerBindUsers: () => ({ available: true, inUse: false, containers: [] }),
+      diskFreeBytes: () => 0
+    });
+
+    const interrupted = applyRun({
+      plan, target, home,
+      validateTarget: () => ({ ok: true }),
+      afterStage: () => { throw new Error('fixture interruption'); }
+    });
+    assert.equal(interrupted.ok, false, 'apply must report failure for the interrupted unit');
+
+    // Corrupt the target after the interruption, exactly like the probe.
+    writeFileSync(join(target, 'models', 'idle', 'weights.gguf'), 'BADD');
+
+    const recovery = recoverInterruptedMoves(home);
+
+    const sourceBytes = readFileSync(join(src, 'weights.gguf'), 'utf8');
+    const stagedOriginalExists = existsSync(`${src}.tidy-moving`);
+
+    // codexmb's exact probe assertions: source reads GOOD (never BADD),
+    // and the unit is reported failed with the target flagged.
+    assert.equal(sourceBytes, 'GOOD', 'source must read the last GOOD content, never the corrupted target content');
+    // "staged original either restored to the source path or retained" —
+    // both are acceptable; what's NOT acceptable is stagedOriginalExists
+    // being false while sourceBytes came out wrong. Since sourceBytes is
+    // confirmed GOOD above, either outcome for stagedOriginalExists is
+    // fine as long as the unit was reported as failed, checked next.
+    void stagedOriginalExists;
+
+    assert.equal(recovery.length, 1);
+    assert.equal(recovery[0].path, src);
+    assert.notEqual(recovery[0].action, 'completed-swap-and-cleaned', 'must never report success for a corrupted target');
+    assert.match(recovery[0].note, /target content does not match the journaled manifest/);
+
+    // Running recovery again must not somehow make it worse (idempotent
+    // refusal, not idempotent data loss).
+    const secondPass = recoverInterruptedMoves(home);
+    assert.equal(readFileSync(join(src, 'weights.gguf'), 'utf8'), 'GOOD');
+  });
+
+  it('mirror case: target is fine but the source symlink points elsewhere — recover must not delete the staged original', () => {
+    const { home, src } = buildSingleIdleFixture();
+    const target = tempDir('model-tidy-gap2-target-');
+    const plan = planFor(home);
+
+    const child = runApplyInChildWithCrash(plan, home, target, 'afterSwap');
+    assert.equal(child.status, 77);
+    // Mid-crash: swap already completed correctly (src is a symlink to
+    // the real target), staged original still pending cleanup.
+    assert.equal(lstatSync(src).isSymbolicLink(), true);
+    const staging = `${src}.tidy-moving`;
+    assert.ok(existsSync(staging));
+    const goodContent = readFileSync(join(src, 'weights.gguf'), 'utf8');
+
+    // Simulate tampering: replace the correct symlink with one pointing
+    // somewhere unrelated. The target itself, and the staged original,
+    // are both still completely fine.
+    const decoy = tempDir('model-tidy-gap2-decoy-');
+    writeFileSync(join(decoy, 'weights.gguf'), 'DECOY-NOT-THE-REAL-TARGET');
+    rmSync(src);
+    symlinkSync(decoy, src);
+
+    const recovered = recoverInterruptedMoves(home);
+    assert.equal(recovered.length, 1, 'exactly one journaled unit is in play here');
+    const match = recovered[0];
+    assert.notEqual(match.action, 'completed-swap-and-cleaned', 'must never delete the staged original on the strength of an unrelated link resolving');
+    assert.match(match.note, /source is not a symlink whose realpath resolves exactly to the recorded target path/);
+
+    // The staged original must not have been discarded: it's back at src
+    // (restored) or still sitting at the staging path — never gone.
+    const restoredAtSrc = existsSync(src) && !lstatSync(src).isSymbolicLink() && readFileSync(join(src, 'weights.gguf'), 'utf8') === goodContent;
+    const stillStaged = existsSync(staging) && readFileSync(join(staging, 'weights.gguf'), 'utf8') === goodContent;
+    assert.ok(restoredAtSrc || stillStaged, 'the good staged original must survive, either restored to src or left at the staging path');
+  });
+
+  it('positive control: target and symlink both correct — recover completes the swap and cleans up', () => {
+    const { home, src } = buildSingleIdleFixture();
+    const target = tempDir('model-tidy-gap2-target-');
+    const plan = planFor(home);
+
+    const child = runApplyInChildWithCrash(plan, home, target, 'afterStage');
+    assert.equal(child.status, 77);
+
+    const recovered = recoverInterruptedMoves(home);
+    assert.equal(recovered.length, 1);
+    assert.equal(recovered[0].action, 'completed-swap-and-cleaned');
+
+    assert.equal(existsSync(src), true);
+    assert.equal(lstatSync(src).isSymbolicLink(), true);
+    assert.equal(existsSync(`${src}.tidy-moving`), false);
+    assert.equal(readFileSync(join(src, 'weights.gguf'), 'utf8'), 'gap2-fixture-bytes'.repeat(50));
+  });
+
+  it("the SAME corrupt-target scenario against apply's OWN final cleanup path, not only recover", () => {
+    const { home, src } = buildSingleIdleFixture();
+    const target = tempDir('model-tidy-gap2-target-');
+    const plan = planFor(home);
+    const targetFile = join(target, 'models', 'idle', 'weights.gguf');
+
+    const result = applyRun({
+      plan,
+      target,
+      home,
+      validateTarget: bypassCrossFsCheck,
+      afterSwap: () => {
+        // Corrupt the target in the SAME run, right after the second
+        // rename but before apply's own finalize step runs.
+        writeFileSync(targetFile, 'CORRUPTED-DURING-THE-SAME-APPLY-RUN');
+      }
+    });
+
+    assert.equal(result.ok, false, 'apply must report failure for this unit rather than silently succeed');
+    assert.equal(result.moved.length, 0);
+    assert.equal(result.errors.length, 1);
+    assert.equal(result.errors[0].step, 'swap');
+    assert.match(result.errors[0].error, /target content does not match the journaled manifest/);
+
+    // The last good original must not have been lost: either restored to
+    // src as a real directory, or still present at the staging path.
+    const restoredAtSrc = existsSync(src) && !lstatSync(src).isSymbolicLink();
+    const stillStaged = existsSync(`${src}.tidy-moving`);
+    assert.ok(restoredAtSrc || stillStaged, 'the good original must survive apply refusing to finalize onto a corrupted target');
+    if (restoredAtSrc) {
+      assert.equal(readFileSync(join(src, 'weights.gguf'), 'utf8'), 'gap2-fixture-bytes'.repeat(50));
+    }
   });
 });

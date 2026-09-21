@@ -152,13 +152,45 @@ still matches that record's manifest, and only then acts:
 
 | Journaled state found | Recovery action |
 | --- | --- |
-| staged exists, source missing, temp link exists | rename the link into place, verify, then remove staged and the journal record — the link was already verified before it was ever created, so completing it is safe |
+| staged exists, source missing, temp link exists | complete the pending rename (the link was already verified before it was ever created), then run the guarded delete decision below before removing anything |
 | staged exists, source missing, no temp link | rename staged back to source, remove the journal record — no verified pending swap existed to trust instead |
-| staged exists, source is a symlink | the swap itself already completed; re-verify the symlink target, then remove staged and the journal record |
+| staged exists, source is a symlink | the swap itself already completed; run the guarded delete decision below before removing the staged copy |
 | temp link exists, source is a real directory, no staged | crashed before source was ever touched; remove the stray link and the journal record |
 | source is a symlink, no staged | the move had already fully completed; just remove the stale journal record |
 | source is a real directory, nothing else exists | never touched at all; remove the stale journal record |
-| manifest mismatch against whatever currently exists | **left alone**, reported, regardless of step |
+| manifest mismatch against whatever currently exists (outside the guarded delete decision) | **left alone**, reported, regardless of step |
+
+### The guarded delete decision (`finalizeSwapOrRestore`)
+
+A second, earlier bug in this same recovery path deleted the last good
+original after the crash landed between the two renames: the code
+verified the *staged* copy's manifest, and that *a* realpath existed for
+the pending symlink — but never re-verified the **target's actual
+content**, nor that the symlink's realpath was **exactly** the journal's
+recorded target path. A target that changed after the link was created
+(corruption, a second process, disk issues) still made the old code
+delete the only good copy, because "a link resolves to something" was
+being treated as proof it resolves to something *correct*. It doesn't.
+
+There is now exactly one function in the codebase allowed to delete a
+staged original — `finalizeSwapOrRestore`, used by **both** `apply`'s own
+final step (same run) and `recoverInterruptedMoves` (a later run). It
+requires all three of:
+
+1. every file under the journal's **target path** matches the manifest by
+   size and SHA-256, with no extra or missing paths — re-checked now, not
+   trusted from when the link was created;
+2. the **source path** is a symlink whose realpath resolves to exactly the
+   journal's recorded target path;
+3. the **staged original itself**, if it still exists, still matches the
+   manifest exactly — a partially damaged original is reported, never
+   silently discarded just because a symlink elsewhere looks fine.
+
+If any of the three fails: a bad/half symlink at the source path is
+removed, the staged original (if present) is renamed back to the source
+path and re-verified, the journal record is marked `step: 'failed'` with
+the reason, and the unit is reported — **never** deleted on the strength
+of a link merely resolving.
 
 A `*.tidy-moving` or `*.tidy-link` directory with **no matching journal
 record at all** is reported but never touched, no matter how it's named —
@@ -309,6 +341,15 @@ it never attempts to install anything itself.
   like a leftover with no matching journal record — or a journaled unit
   whose content has since changed — is reported and left alone, never
   guessed at.
+- **A staged original is only ever deleted by `finalizeSwapOrRestore`, the
+  one function both `apply`'s own final step and `recoverInterruptedMoves`
+  call for that decision** — never on the strength of "a symlink resolves
+  to something." It re-checks the target's actual content against the
+  manifest, that the source symlink's realpath is exactly the recorded
+  target path, and that the staged original itself (if present) still
+  matches the manifest — all three, every time, even for a unit whose link
+  was already verified once when it was created. Any failure restores the
+  staged original rather than deleting it.
 - A hardlink set moves as a unit or not at all — never partially — and the
   hardlink scan covers every discovered model root, not just the ones that
   already passed every other rule. It also refuses a candidate whose
