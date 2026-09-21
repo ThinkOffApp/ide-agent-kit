@@ -217,6 +217,58 @@ for one unit does not roll back units that already succeeded earlier in
 the same `apply` run, but the process still exits non-zero and prints
 exactly which unit failed, at which step, and why.
 
+### Never recursive-delete a path assumed to be a symlink (`unlinkOwnedSymlink`)
+
+A fourth review round found that several places removed a path they
+*believed* was a symlink using `rmSync(path, {recursive: true})`. If that
+belief were ever wrong — a real directory happens to sit at that path, or
+the symlink itself points somewhere other than expected — a recursive
+remove can destroy an entire directory tree that was never model-tidy's to
+touch.
+
+`unlinkOwnedSymlink(path, expectedTargetPath)` is now the only way
+anything in this file removes a path it believes is one of its own
+symlinks. It never recurses:
+
+1. `lstatSync(path)` — if the path doesn't exist, or isn't a symlink at
+   all, **refuse**. Touch nothing.
+2. its realpath must resolve to exactly `expectedTargetPath`'s own
+   realpath — a symlink pointing somewhere else is **refused**, not
+   unlinked.
+3. only then: `unlinkSync(path)` — never `rmSync`, never recursive. A
+   plain unlink can only ever remove the one symlink entry itself.
+
+Every caller treats a refusal as "left alone, reported, journal marked
+`failed`" — never a reason to fall back to something more aggressive.
+
+### Journal durability
+
+A naive `open(file, 'w')` + write + `fsync` has its own crash window: a
+kill landing between the truncating open and the write leaves an EMPTY or
+PARTIAL record at the path readers expect — making a real, in-flight unit
+look like there's nothing to recover, or worse, giving a reader a document
+that parses as JSON but describes something incoherent.
+
+Every journal write now follows write-temp-fsync-rename: the full record
+is written to a throwaway `<file>.tmp-<pid>-<random>` in the same
+directory, that temp file is `fsync`ed and closed, then `renameSync`d
+atomically over the real path (same-directory renames are atomic — a
+reader sees either the old complete record or the new complete one, never
+a partial one), then the journal directory itself is `fsync`ed so the
+rename survives a crash immediately after (on a platform where a
+directory can't be opened for `fsync`, that failure is swallowed — the
+rename is still atomic there, just not immediately durable).
+
+On the read side, a journal record that is **missing, empty, truncated,
+fails to parse, or doesn't match the expected schema** is never treated as
+"nothing to see here" — it's reported as `journal-unreadable`
+(`plan`/`detectInterruptedMoves`) or `left-alone`
+(`recover`/`recoverInterruptedMoves`), and the unit it might describe is
+never acted on, never deleted, by any of `plan`, `apply`, or `recover`. A
+stray `<hash>.json.tmp-*` file — the leftover of a write that itself got
+interrupted — is recognized by name and reported the same way; it is never
+parsed as a record.
+
 ## Selection rules (in order, each with an explicit reason string)
 
 0. **Interrupted move found** — highest priority, checked before anything
@@ -338,6 +390,17 @@ it never attempts to install anything itself.
 
 ## Safety invariants
 
+- **Nothing removes a path it believes is a symlink without verifying it
+  first, and never recursively.** `unlinkOwnedSymlink` is the only code
+  path allowed to do this: it refuses (touches nothing) if the path isn't
+  actually a symlink, or resolves to somewhere other than the journal's
+  recorded target — a plain `unlinkSync`, never `rmSync`, only after both
+  checks pass.
+- **Every journal write is crash-safe: write-temp-fsync-rename, then fsync
+  the directory.** A journal record that's missing, empty, truncated,
+  unparseable, or the wrong shape is treated as `journal-unreadable` by
+  every reader (`plan`, `apply`, `recover`) — that unit is reported and
+  left alone, never acted on.
 - `plan` makes zero filesystem writes, ever — including for interrupted
   moves, which it only detects and reports. Only `recover` and `apply`
   (once, at its own start) mutate anything.

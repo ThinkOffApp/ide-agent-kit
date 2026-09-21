@@ -51,10 +51,10 @@ import {
   readdirSync, lstatSync, existsSync, readFileSync, readlinkSync,
   realpathSync, symlinkSync, rmSync, mkdirSync, copyFileSync, linkSync,
   statSync, appendFileSync, constants as FS_CONSTANTS, accessSync, renameSync,
-  openSync, writeSync, fsyncSync, closeSync
+  openSync, writeSync, fsyncSync, closeSync, unlinkSync
 } from 'node:fs';
 import { join, relative, sep, isAbsolute } from 'node:path';
-import { createHash } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import { homedir } from 'node:os';
 
 export const SERVING_PROCESS_NAMES = [
@@ -877,23 +877,69 @@ function journalFilePath(journalDir, sourcePath) {
   return join(journalDir, `${journalKey(sourcePath)}.json`);
 }
 
+/** Minimal structural check for a parsed journal record. Anything that
+ * doesn't match — including a record that parsed as valid JSON but isn't
+ * actually one of ours (wrong shape) — is treated as unreadable, exactly
+ * like a truncated or corrupt file. */
+function isValidJournalRecordShape(record) {
+  return !!record
+    && typeof record === 'object'
+    && typeof record.sourcePath === 'string' && record.sourcePath.length > 0
+    && typeof record.stagedPath === 'string' && record.stagedPath.length > 0
+    && typeof record.linkPath === 'string' && record.linkPath.length > 0
+    && typeof record.targetPath === 'string' && record.targetPath.length > 0
+    && Array.isArray(record.manifest)
+    && typeof record.step === 'string' && record.step.length > 0;
+}
+
 /**
- * Write (or overwrite) the journal record for one unit, fsynced so it
- * survives a crash immediately after this call returns. Called BEFORE the
- * first filesystem mutation for a unit, and again after every subsequent
- * step, so the journal always reflects the furthest step actually reached.
+ * Write (or overwrite) the journal record for one unit, durably. Called
+ * BEFORE the first filesystem mutation for a unit, and again after every
+ * subsequent step, so the journal always reflects the furthest point
+ * actually reached — including across a hard crash.
+ *
+ * A naive `open(file, 'w')` + write + fsync has its own crash window: a
+ * kill between the truncating open and the write leaves an EMPTY or
+ * PARTIAL record at the well-known path readers expect — which would
+ * make a real, in-flight unit look like there's simply nothing to
+ * recover. Instead: write the full content to a throwaway temp file in
+ * the same directory, fsync THAT file, close it, atomically rename it
+ * over the real path (a same-directory rename is atomic — readers either
+ * see the old complete record or the new complete record, never a
+ * partial one), then fsync the directory itself so the rename survives a
+ * crash immediately after. On platforms where a directory can't be
+ * opened for fsync, that failure is swallowed (the rename itself is still
+ * safe there) — noted here in case it needs to change for a supported
+ * platform where journal loss would matter.
  */
 function writeJournalRecordSync(journalDir, record) {
   mkdirSync(journalDir, { recursive: true });
   const file = journalFilePath(journalDir, record.sourcePath);
+  const tmpFile = `${file}.tmp-${process.pid}-${randomBytes(6).toString('hex')}`;
   const data = JSON.stringify({ ...record, updatedAt: new Date().toISOString() }, null, 2);
-  const fd = openSync(file, 'w');
+
+  const fd = openSync(tmpFile, 'w');
   try {
     writeSync(fd, data);
     fsyncSync(fd);
   } finally {
     closeSync(fd);
   }
+  renameSync(tmpFile, file);
+
+  try {
+    const dirFd = openSync(journalDir, 'r');
+    try {
+      fsyncSync(dirFd);
+    } finally {
+      closeSync(dirFd);
+    }
+  } catch {
+    // Some platforms can't fsync a directory fd — the rename above is
+    // still atomic there, just not guaranteed durable against a crash in
+    // the same instant. Nothing further to do about it here.
+  }
+
   return file;
 }
 
@@ -906,20 +952,50 @@ function removeJournalRecord(journalDir, sourcePath) {
   }
 }
 
-/** All journal records currently on disk. A record that fails to parse is
- * still returned (with `record: null, corrupt: true`) so callers can
- * report it rather than silently skip it. */
+/**
+ * All journal records currently on disk. A record that is missing,
+ * empty, truncated, fails to parse, or doesn't match the expected schema
+ * is still returned — as `{record: null, corrupt: true, reason}` — so
+ * callers report it rather than silently skip it or, worse, act on
+ * whatever partial data it happens to contain. A leftover `.tmp-*` file
+ * from an interrupted journal WRITE (crashed between creating the temp
+ * file and the rename) is recognized by name and reported the same way;
+ * it is never parsed as a record.
+ */
 function listJournalRecords(journalDir) {
   if (!existsSync(journalDir)) return [];
   const out = [];
   for (const name of safeReaddir(journalDir)) {
-    if (!name.endsWith('.json')) continue;
     const file = join(journalDir, name);
-    try {
-      out.push({ file, record: JSON.parse(readFileSync(file, 'utf8')) });
-    } catch {
-      out.push({ file, record: null, corrupt: true });
+    if (name.includes('.tmp-')) {
+      out.push({ file, record: null, corrupt: true, reason: 'stray incomplete journal write (a .tmp file left over from an interrupted write); never parsed as a record' });
+      continue;
     }
+    if (!name.endsWith('.json')) continue;
+
+    let raw;
+    try {
+      raw = readFileSync(file, 'utf8');
+    } catch (e) {
+      out.push({ file, record: null, corrupt: true, reason: `journal file unreadable (${e.code || e.message})` });
+      continue;
+    }
+    if (raw.length === 0) {
+      out.push({ file, record: null, corrupt: true, reason: 'journal file is empty (zero bytes)' });
+      continue;
+    }
+    let parsed;
+    try {
+      parsed = JSON.parse(raw);
+    } catch (e) {
+      out.push({ file, record: null, corrupt: true, reason: `journal file is not valid JSON, likely truncated (${e.message})` });
+      continue;
+    }
+    if (!isValidJournalRecordShape(parsed)) {
+      out.push({ file, record: null, corrupt: true, reason: 'journal file does not match the expected record schema' });
+      continue;
+    }
+    out.push({ file, record: parsed });
   }
   return out;
 }
@@ -1030,6 +1106,64 @@ const QUARANTINE_SUFFIX_PREFIX = '.tidy-quarantine-';
  * when there is genuinely nothing good anywhere, this function refuses to
  * guess — it touches nothing rather than pick a side.
  */
+
+/**
+ * The ONLY way anything in this file removes a path it believes is a
+ * symlink it created. `rmSync(..., {recursive:true})` on an assumed
+ * symlink is dangerous: if that assumption is wrong — the path is
+ * actually a real directory someone else put there, or a symlink
+ * pointing somewhere unexpected — a recursive remove can delete an
+ * entire directory tree that was never ours to touch. This helper
+ * verifies before it ever unlinks anything, and never recurses:
+ *
+ *   1. lstatSync(path) — if it doesn't exist, or isn't a symlink at all
+ *      (a real file or directory sitting where we expected a symlink),
+ *      REFUSE. Touch nothing.
+ *   2. its realpath must resolve to exactly `expectedTargetPath`'s own
+ *      realpath — a symlink pointing somewhere else (tampered, or a
+ *      coincidentally-named path from something unrelated) is REFUSED,
+ *      not unlinked.
+ *   3. only then: `unlinkSync(path)` — never `rmSync`, never recursive.
+ *      A single unlink can only ever remove the one symlink entry itself,
+ *      never anything reachable through it.
+ *
+ * Callers treat a refusal as "left alone, reported" — never a reason to
+ * fall back to a more aggressive removal.
+ */
+function unlinkOwnedSymlink(path, expectedTargetPath) {
+  let lst;
+  try {
+    lst = lstatSync(path);
+  } catch (e) {
+    return { ok: false, reason: `expected an owned symlink at ${path}, but it does not exist (${e.code || e.message})` };
+  }
+  if (!lst.isSymbolicLink()) {
+    const kind = lst.isDirectory() ? 'a directory' : lst.isFile() ? 'a regular file' : 'a non-symlink entry';
+    return { ok: false, reason: `expected an owned symlink at ${path}, found ${kind} instead — refusing to touch it` };
+  }
+  let real;
+  try {
+    real = realpathSync(path);
+  } catch (e) {
+    return { ok: false, reason: `symlink at ${path} could not be resolved (${e.code || e.message}) — refusing to touch it` };
+  }
+  let expectedReal;
+  try {
+    expectedReal = realpathSync(expectedTargetPath);
+  } catch (e) {
+    return { ok: false, reason: `recorded target ${expectedTargetPath} could not be resolved (${e.code || e.message}) — refusing to touch ${path}` };
+  }
+  if (real !== expectedReal) {
+    return { ok: false, reason: `symlink at ${path} resolves to ${real}, not the recorded target ${expectedTargetPath} — refusing to touch it` };
+  }
+  try {
+    unlinkSync(path);
+  } catch (e) {
+    return { ok: false, reason: `unlink of verified symlink ${path} failed (${e.code || e.message})` };
+  }
+  return { ok: true };
+}
+
 function finalizeSwapOrRestore(journalDir, record) {
   const { sourcePath, stagedPath, linkPath, targetPath, manifest } = record;
 
@@ -1106,15 +1240,33 @@ function finalizeSwapOrRestore(journalDir, record) {
 
   // Row 3: live path has a problem, but the staged original is intact —
   // restore from it. Clears away a bad symlink wherever it currently
-  // sits (already at sourcePath, or still pending at linkPath).
+  // sits (already at sourcePath, or still pending at linkPath) — but ONLY
+  // via unlinkOwnedSymlink's verify-then-unlink, never a recursive
+  // remove on an assumed symlink. If that verification refuses (the path
+  // isn't actually a symlink, or resolves somewhere unexpected), row 3
+  // itself refuses too: touch nothing further, report, journal 'failed'.
   if (stagedState === 'matching') {
     const reason = reasons.join('; ');
-    try {
-      if (srcIsSymlink) rmSync(sourcePath);
-      else if (!srcExists && linkExists) rmSync(linkPath, { recursive: true });
-    } catch {
-      // best effort — the restore attempt below will surface a failure
+
+    let obstaclePath = null;
+    if (srcIsSymlink) obstaclePath = sourcePath;
+    else if (!srcExists && linkExists) obstaclePath = linkPath;
+    // else: sourcePath holds something that's neither a verifiable
+    // symlink nor absent-with-a-pending-link — nothing to clear first.
+
+    if (obstaclePath) {
+      const unlinkResult = unlinkOwnedSymlink(obstaclePath, targetPath);
+      if (!unlinkResult.ok) {
+        const combinedReason = `${reason}; additionally, could not safely clear the way for restore: ${unlinkResult.reason}`;
+        try {
+          writeJournalRecordSync(journalDir, { ...record, step: 'failed', failureReason: combinedReason });
+        } catch {
+          // best effort
+        }
+        return { ok: false, row: 3, reason: combinedReason, restored: false, refusedUnlink: true };
+      }
     }
+
     let restored = false;
     if (!existsSync(sourcePath)) {
       try {
@@ -1296,9 +1448,9 @@ export function detectInterruptedMoves(home, options = {}) {
   const findings = [];
   const journaledPaths = new Set();
 
-  for (const { file, record, corrupt } of listJournalRecords(journalDir)) {
+  for (const { file, record, corrupt, reason } of listJournalRecords(journalDir)) {
     if (corrupt || !record) {
-      findings.push({ path: null, journalFile: file, status: 'corrupt-journal', note: `journal file ${file} is corrupt or unreadable` });
+      findings.push({ path: null, journalFile: file, status: 'journal-unreadable', note: `journal file ${file} is unreadable: ${reason || 'unknown reason'} — the unit it may describe is left alone until this is resolved` });
       continue;
     }
     journaledPaths.add(record.sourcePath);
@@ -1352,12 +1504,12 @@ export function recoverInterruptedMoves(home, options = {}) {
   const recovered = [];
   const journaledPaths = new Set();
 
-  for (const { file, record, corrupt } of listJournalRecords(journalDir)) {
+  for (const { file, record, corrupt, reason: unreadableReason } of listJournalRecords(journalDir)) {
     if (corrupt || !record) {
-      recovered.push({ path: null, journalFile: file, action: 'left-alone', note: `journal file ${file} is corrupt or unreadable; left alone` });
+      recovered.push({ path: null, journalFile: file, action: 'left-alone', note: `journal file ${file} is unreadable: ${unreadableReason || 'unknown reason'} — left alone, never acted on` });
       continue;
     }
-    const { sourcePath, stagedPath, linkPath, manifest, step } = record;
+    const { sourcePath, stagedPath, linkPath, targetPath, manifest, step } = record;
     journaledPaths.add(sourcePath);
     if (record.quarantinePath) journaledPaths.add(record.quarantinePath);
 
@@ -1434,7 +1586,16 @@ export function recoverInterruptedMoves(home, options = {}) {
         removeJournalRecord(journalDir, sourcePath);
         recovered.push({ path: sourcePath, journalFile: file, action: 'restored-original', note: 'restored the original directory (no verified pending symlink existed to trust instead)' });
       } else if (srcExists && !srcIsSymlink && linkExists && !stagedExists) {
-        rmSync(linkPath, { recursive: true });
+        const unlinkResult = unlinkOwnedSymlink(linkPath, targetPath);
+        if (!unlinkResult.ok) {
+          try {
+            writeJournalRecordSync(journalDir, { ...record, step: 'failed', failureReason: unlinkResult.reason });
+          } catch {
+            // best effort
+          }
+          recovered.push({ path: sourcePath, journalFile: file, action: 'left-alone', note: `refused to remove the pending link (${unlinkResult.reason}); the original itself was never touched` });
+          continue;
+        }
         removeJournalRecord(journalDir, sourcePath);
         recovered.push({ path: sourcePath, journalFile: file, action: 'removed-stray-link', note: 'the original was never touched; removed the unused pending symlink' });
       } else if (srcExists && !srcIsSymlink && !linkExists && !stagedExists) {

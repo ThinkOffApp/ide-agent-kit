@@ -12,7 +12,7 @@ import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import {
   planRun, applyRun, discoverCandidates, loadKeepList, computeHardlinkGroups,
-  validateTarget, copyUnitPureNode, recoverInterruptedMoves
+  validateTarget, copyUnitPureNode, recoverInterruptedMoves, detectInterruptedMoves
 } from '../src/model-tidy.mjs';
 
 const MODEL_TIDY_MODULE_URL = new URL('../src/model-tidy.mjs', import.meta.url).href;
@@ -1088,5 +1088,266 @@ describe('GAP 2: crash-safety across a hard process kill (not just a thrown exce
     const secondPass = recoverInterruptedMoves(home);
     assert.deepEqual(snapshotData(), before);
     assert.equal(secondPass.find(r => r.path === src).action, 'left-alone-nothing-verified-good');
+  });
+
+  function journalDirFor(home) {
+    return join(home, '.cache', 'ide-agent-kit', 'model-tidy-journal');
+  }
+  function findJournalFile(home) {
+    const dir = journalDirFor(home);
+    const names = readdirSync(dir).filter(n => n.endsWith('.json'));
+    assert.equal(names.length, 1, `expected exactly one journal file, found ${names.length}: ${names.join(', ')}`);
+    return join(dir, names[0]);
+  }
+  function snapshotData(home, target) {
+    return { ...snapshotTree(join(home, 'models')), ...snapshotTree(target) };
+  }
+
+  describe('BLOCKER 1: never recursive-delete a path assumed to be a symlink (unlinkOwnedSymlink)', () => {
+    it('site 1 (finalizeSwapOrRestore row 3, sourcePath obstacle): a REAL DIRECTORY with a sentinel file sitting where a symlink was expected is never touched', () => {
+      const { home, src } = buildSingleIdleFixture();
+      const target = tempDir('model-tidy-gap2-target-');
+      const plan = planFor(home);
+
+      // afterSwap: src is already a symlink, staged still pending cleanup.
+      const child = runApplyInChildWithCrash(plan, home, target, 'afterSwap');
+      assert.equal(child.status, 77);
+      assert.equal(lstatSync(src).isSymbolicLink(), true);
+      const staging = `${src}.tidy-moving`;
+      assert.ok(existsSync(staging));
+
+      // Force row 3/4 by corrupting the target, THEN replace src (the
+      // symlink) with a real directory holding a sentinel file — as if
+      // something else had put a real directory exactly where model-tidy
+      // expected to find (and remove) its own symlink.
+      writeFileSync(join(target, 'models', 'idle', 'weights.gguf'), 'BADD');
+      rmSync(src);
+      mkdirSync(src, { recursive: true });
+      writeFileSync(join(src, 'SENTINEL.txt'), 'do not delete me');
+
+      const before = snapshotData(home, target);
+      const recovered = recoverInterruptedMoves(home);
+      const after = snapshotData(home, target);
+
+      assert.equal(existsSync(join(src, 'SENTINEL.txt')), true, 'the sentinel file must survive');
+      assert.equal(readFileSync(join(src, 'SENTINEL.txt'), 'utf8'), 'do not delete me');
+      assert.deepEqual(after, before, 'nothing on disk may change when a real directory sits where a symlink was expected');
+
+      const finding = recovered.find(r => r.path === src);
+      assert.ok(finding);
+      assert.notEqual(finding.action, 'completed-swap-and-cleaned');
+      assert.notEqual(finding.action, 'completed-partial-staging-quarantined');
+    });
+
+    it('site 2 (finalizeSwapOrRestore row 3, pending-link obstacle): a REAL DIRECTORY with a sentinel file at the .tidy-link path is refused, not recursively removed', () => {
+      const { home, src } = buildSingleIdleFixture();
+      const target = tempDir('model-tidy-gap2-target-');
+      const plan = planFor(home);
+
+      // afterStage: src missing, staged + pending link both present.
+      const child = runApplyInChildWithCrash(plan, home, target, 'afterStage');
+      assert.equal(child.status, 77);
+      const staging = `${src}.tidy-moving`;
+      const link = `${src}.tidy-link`;
+      assert.ok(existsSync(staging));
+      assert.equal(lstatSync(link).isSymbolicLink(), true);
+
+      // Replace the verified pending link with a real directory + sentinel.
+      rmSync(link);
+      mkdirSync(link, { recursive: true });
+      writeFileSync(join(link, 'SENTINEL.txt'), 'do not delete me');
+
+      const before = snapshotData(home, target);
+      const recovered = recoverInterruptedMoves(home);
+      const after = snapshotData(home, target);
+
+      assert.equal(existsSync(join(link, 'SENTINEL.txt')), true, 'the sentinel file must survive');
+      assert.equal(readFileSync(join(link, 'SENTINEL.txt'), 'utf8'), 'do not delete me');
+      assert.deepEqual(after, before, 'nothing on disk may change when a real directory sits where the pending link was expected');
+      assert.equal(existsSync(staging), true, 'the staged original must still be there too — nothing was renamed');
+
+      const finding = recovered.find(r => r.path === src);
+      assert.ok(finding);
+      assert.match(finding.note, /found a directory instead|expected an owned symlink/);
+    });
+
+    it('site 3 (recoverInterruptedMoves stray-link branch): a REAL DIRECTORY with a sentinel file at the .tidy-link path is refused, original untouched source survives', () => {
+      const { home, src } = buildSingleIdleFixture();
+      const target = tempDir('model-tidy-gap2-target-');
+      const plan = planFor(home);
+
+      // afterLink: src is STILL the real, untouched original; only a
+      // verified pending link exists so far (crashed before the first
+      // rename), so recovery routes through the "remove stray link, leave
+      // the never-touched original alone" branch.
+      const child = runApplyInChildWithCrash(plan, home, target, 'afterLink');
+      assert.equal(child.status, 77);
+      assert.equal(existsSync(src), true);
+      assert.equal(lstatSync(src).isSymbolicLink(), false);
+      const link = `${src}.tidy-link`;
+      assert.equal(lstatSync(link).isSymbolicLink(), true);
+      const originalContent = readFileSync(join(src, 'weights.gguf'), 'utf8');
+
+      rmSync(link);
+      mkdirSync(link, { recursive: true });
+      writeFileSync(join(link, 'SENTINEL.txt'), 'do not delete me');
+
+      const before = snapshotData(home, target);
+      const recovered = recoverInterruptedMoves(home);
+      const after = snapshotData(home, target);
+
+      assert.equal(existsSync(join(link, 'SENTINEL.txt')), true, 'the sentinel file must survive');
+      assert.deepEqual(after, before, 'nothing on disk may change');
+      assert.equal(existsSync(src), true);
+      assert.equal(lstatSync(src).isSymbolicLink(), false);
+      assert.equal(readFileSync(join(src, 'weights.gguf'), 'utf8'), originalContent, 'the original, never touched by the crash, must remain exactly as it was');
+
+      const finding = recovered.find(r => r.path === src);
+      assert.ok(finding);
+      assert.equal(finding.action, 'left-alone');
+      assert.match(finding.note, /found a directory instead|expected an owned symlink/);
+    });
+
+    it('a symlink at the pending-link path pointing somewhere OTHER than the recorded target must be refused, never unlinked', () => {
+      const { home, src } = buildSingleIdleFixture();
+      const target = tempDir('model-tidy-gap2-target-');
+      const plan = planFor(home);
+
+      const child = runApplyInChildWithCrash(plan, home, target, 'afterStage');
+      assert.equal(child.status, 77);
+      const staging = `${src}.tidy-moving`;
+      const link = `${src}.tidy-link`;
+      assert.ok(existsSync(staging));
+      assert.equal(lstatSync(link).isSymbolicLink(), true);
+
+      // Re-point the pending link at an unrelated decoy directory instead
+      // of the journal's recorded target. The target itself stays GOOD.
+      const decoy = tempDir('model-tidy-gap2-decoy-');
+      writeFileSync(join(decoy, 'weights.gguf'), 'DECOY-NOT-THE-REAL-TARGET');
+      rmSync(link);
+      symlinkSync(decoy, link);
+
+      const before = snapshotData(home, target);
+      const recovered = recoverInterruptedMoves(home);
+      const after = snapshotData(home, target);
+
+      // The wrong-target symlink itself must survive, unlinked-not:
+      assert.equal(lstatSync(link).isSymbolicLink(), true);
+      assert.equal(readlinkSync(link), decoy);
+      assert.deepEqual(after, before, 'nothing on disk may change when the pending link points to the wrong place');
+      assert.equal(existsSync(staging), true, 'the staged original must still be there — nothing was renamed');
+      assert.equal(existsSync(src), false, 'src must still be missing — never populated from the wrong-target link');
+
+      const finding = recovered.find(r => r.path === src);
+      assert.ok(finding);
+      assert.match(finding.note, /resolves to .*not the recorded target/);
+    });
+  });
+
+  describe('BLOCKER 2: journal durability — unreadable journal records are reported and left alone, never acted on', () => {
+    it('(a) a journal record truncated to HALF its bytes is reported unreadable by plan and recover, and every path is left unchanged', () => {
+      const { home, src } = buildSingleIdleFixture();
+      const target = tempDir('model-tidy-gap2-target-');
+      const plan1 = planFor(home);
+      const child = runApplyInChildWithCrash(plan1, home, target, 'afterStage');
+      assert.equal(child.status, 77);
+
+      const journalFile = findJournalFile(home);
+      const original = readFileSync(journalFile, 'utf8');
+      writeFileSync(journalFile, original.slice(0, Math.floor(original.length / 2)));
+
+      const before = snapshotData(home, target);
+
+      const plan2 = planFor(home);
+      const finding = plan2.interrupted.find(f => f.journalFile === journalFile);
+      assert.ok(finding, 'plan must report the unreadable journal file');
+      assert.equal(finding.status, 'journal-unreadable');
+      assert.match(finding.note, /truncated|not valid JSON/);
+
+      assert.deepEqual(snapshotData(home, target), before, 'plan must not mutate anything, including for an unreadable journal');
+
+      const recovered = recoverInterruptedMoves(home);
+      const recoverFinding = recovered.find(r => r.journalFile === journalFile);
+      assert.ok(recoverFinding);
+      assert.equal(recoverFinding.action, 'left-alone');
+      assert.match(recoverFinding.note, /unreadable/);
+
+      assert.deepEqual(snapshotData(home, target), before, 'recover must not act on an unreadable journal record either');
+    });
+
+    it('(a) a journal record truncated to ZERO bytes (empty file) is reported unreadable, and every path is left unchanged', () => {
+      const { home, src } = buildSingleIdleFixture();
+      const target = tempDir('model-tidy-gap2-target-');
+      const plan1 = planFor(home);
+      const child = runApplyInChildWithCrash(plan1, home, target, 'afterStage');
+      assert.equal(child.status, 77);
+
+      const journalFile = findJournalFile(home);
+      writeFileSync(journalFile, '');
+
+      const before = snapshotData(home, target);
+
+      const plan2 = planFor(home);
+      const finding = plan2.interrupted.find(f => f.journalFile === journalFile);
+      assert.ok(finding);
+      assert.equal(finding.status, 'journal-unreadable');
+      assert.match(finding.note, /empty/);
+      assert.deepEqual(snapshotData(home, target), before);
+
+      const recovered = recoverInterruptedMoves(home);
+      const recoverFinding = recovered.find(r => r.journalFile === journalFile);
+      assert.ok(recoverFinding);
+      assert.equal(recoverFinding.action, 'left-alone');
+      assert.match(recoverFinding.note, /unreadable/);
+      assert.deepEqual(snapshotData(home, target), before);
+    });
+
+    it('(b) a stray .tmp-* journal file (left over from an interrupted journal WRITE) is never parsed as a record, and is reported', () => {
+      const { home } = buildSingleIdleFixture();
+      const journalDir = journalDirFor(home);
+      mkdirSync(journalDir, { recursive: true });
+      const strayTmp = join(journalDir, 'deadbeefdeadbeef.json.tmp-99999-abc123def456');
+      writeFileSync(strayTmp, JSON.stringify({
+        sourcePath: join(home, 'models', 'not-a-real-unit'),
+        stagedPath: 'x', linkPath: 'y', targetPath: 'z', manifest: [], step: 'pending'
+      }));
+
+      const detected = detectInterruptedMoves(home);
+      const detectedFinding = detected.find(f => f.journalFile === strayTmp);
+      assert.ok(detectedFinding, 'plan-side detection must report the stray .tmp file');
+      assert.match(detectedFinding.note, /incomplete journal write|\.tmp/);
+
+      const recovered = recoverInterruptedMoves(home);
+      const finding = recovered.find(r => r.journalFile === strayTmp);
+      assert.ok(finding, 'recover must report the stray .tmp file too');
+      assert.equal(finding.action, 'left-alone');
+      assert.match(finding.note, /incomplete journal write|\.tmp/);
+      assert.equal(finding.path, null, 'a stray .tmp write describes no confirmed unit — it was never parsed as a record');
+
+      // Never touched: still sitting there exactly as it was.
+      assert.equal(existsSync(strayTmp), true);
+    });
+
+    it('(c) positive control: a complete, valid journal record still drives recovery normally', () => {
+      const { home, src } = buildSingleIdleFixture();
+      const target = tempDir('model-tidy-gap2-target-');
+      const plan = planFor(home);
+      const child = runApplyInChildWithCrash(plan, home, target, 'afterStage');
+      assert.equal(child.status, 77);
+
+      const journalFile = findJournalFile(home);
+      const parsed = JSON.parse(readFileSync(journalFile, 'utf8'));
+      assert.equal(parsed.sourcePath, src, 'sanity: this is a real, complete, readable record');
+
+      const detected = detectInterruptedMoves(home);
+      assert.equal(detected.length, 1);
+      assert.equal(detected[0].status, 'interrupted');
+
+      const recovered = recoverInterruptedMoves(home);
+      assert.equal(recovered.length, 1);
+      assert.equal(recovered[0].action, 'completed-swap-and-cleaned');
+      assert.equal(lstatSync(src).isSymbolicLink(), true);
+      assert.equal(readFileSync(join(src, 'weights.gguf'), 'utf8'), 'gap2-fixture-bytes'.repeat(50));
+    });
   });
 });
