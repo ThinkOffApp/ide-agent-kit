@@ -53,7 +53,7 @@ import {
   statSync, appendFileSync, constants as FS_CONSTANTS, accessSync, renameSync,
   openSync, writeSync, fsyncSync, closeSync, unlinkSync, readSync
 } from 'node:fs';
-import { join, relative, sep, isAbsolute } from 'node:path';
+import { join, relative, sep, isAbsolute, basename } from 'node:path';
 import { createHash, randomBytes } from 'node:crypto';
 import { homedir } from 'node:os';
 
@@ -550,6 +550,42 @@ export function planRun(options = {}) {
   const interruptedByPath = new Map(interrupted.filter(f => f.path).map(f => [f.path, f]));
 
   const rawCandidates = options.candidates || discoverCandidates(home);
+
+  // An unreadable/stray journal record (missing, empty, truncated,
+  // unparseable, or schema-invalid content) has `path: null` above — its
+  // CONTENT can't tell us which candidate it was protecting. But its
+  // FILENAME still encodes journalKey(sourcePath) (journalFilePath always
+  // names a record that way), so recover ownership from the name: match
+  // every unreadable/stray record's key against every currently
+  // discovered candidate. A match refuses that specific candidate. Any
+  // unreadable record whose filename doesn't match a current candidate at
+  // all (an unparseable name, or a key with no current candidate) means
+  // we cannot rule out that it was protecting something — fail closed
+  // GLOBALLY rather than guess which unit, if any, needs protecting.
+  const candidateKeyToPath = new Map();
+  for (const c of rawCandidates) candidateKeyToPath.set(journalKey(c.path), c.path);
+
+  const unresolvedJournalFiles = [];
+  for (const finding of interrupted) {
+    if (finding.path || !finding.journalFile) continue; // already attributable, or not a journal-file-shaped finding at all
+    const key = extractJournalKeyFromFilename(finding.journalFile);
+    const matchedPath = key ? candidateKeyToPath.get(key) : undefined;
+    if (matchedPath) {
+      interruptedByPath.set(matchedPath, {
+        path: matchedPath,
+        journalFile: finding.journalFile,
+        status: 'interrupted',
+        note: `interrupted move with unreadable journal record: ${finding.journalFile}`,
+        exactReason: `interrupted move with unreadable journal record: ${finding.journalFile}`
+      });
+    } else {
+      unresolvedJournalFiles.push(finding.journalFile);
+    }
+  }
+  const globalJournalBlockReason = unresolvedJournalFiles.length > 0
+    ? `unresolved journal state: ${unresolvedJournalFiles.join(', ')}; run recover, or resolve by hand`
+    : null;
+
   const { groupOf, groupMembers, groupSizeBytes, filesByCandidate, incompleteReasonByCandidate } = computeHardlinkGroups(rawCandidates);
 
   const perCandidate = new Map();
@@ -671,7 +707,10 @@ export function planRun(options = {}) {
   // never saw it at all.
   for (const finding of interruptedByPath.values()) {
     const existingIdx = results.findIndex(r => r.path === finding.path);
-    const reason = `interrupted move found: ${finding.note}`;
+    // A record recovered by filename-matching (GAP 1) already carries the
+    // exact required reason text; a normal readable record still gets the
+    // generic wrapper.
+    const reason = finding.exactReason || `interrupted move found: ${finding.note}`;
     if (existingIdx >= 0) {
       results[existingIdx].selected = false;
       results[existingIdx].reason = reason;
@@ -686,6 +725,22 @@ export function planRun(options = {}) {
         selected: false,
         reason
       });
+    }
+  }
+
+  // GAP 1, global fail-closed: an unreadable/stray journal file whose
+  // filename could not be matched to any current candidate means we
+  // cannot rule out that it was protecting something — plan selects
+  // NOTHING this run rather than guess. Candidates that already have a
+  // more specific reason (KEEP, an unrelated in-use check, a matched
+  // interrupted record, ...) keep that reason; only would-be-selected
+  // candidates are overridden here.
+  if (globalJournalBlockReason) {
+    for (const r of results) {
+      if (r.selected) {
+        r.selected = false;
+        r.reason = globalJournalBlockReason;
+      }
     }
   }
 
@@ -707,15 +762,17 @@ export function planRun(options = {}) {
   const interruptedLine = interrupted.length > 0
     ? ` ${interrupted.length} interrupted-move finding(s) detected (never mutated by plan — run 'recover' to resolve).`
     : '';
+  const globalBlockLine = globalJournalBlockReason ? ` REFUSING TO SELECT ANYTHING THIS RUN: ${globalJournalBlockReason}` : '';
   const summaryLine = `model-tidy plan: ${selected.length} dir(s) in ${selectedGroupIds.size} unit(s), ` +
     `${(totalSelectedBytes / 2 ** 30).toFixed(1)} GiB movable to target, ${skipped.length} skipped ` +
-    `(${unverifiedCount} unverified). ${freeLine}${interruptedLine}`;
+    `(${unverifiedCount} unverified). ${freeLine}${interruptedLine}${globalBlockLine}`;
 
   return {
     home,
     minIdleDays,
     maxGb,
     interrupted,
+    globalJournalBlockReason,
     selected,
     skipped,
     totalSelectedBytes,
@@ -907,6 +964,22 @@ function journalFilePath(journalDir, sourcePath) {
   return join(journalDir, `${journalKey(sourcePath)}.json`);
 }
 
+const JOURNAL_KEY_PATTERN = /^([0-9a-f]{64})\.json(?:\.tmp-.*)?$/;
+
+/**
+ * Recover ownership from a journal file's NAME alone — used when its
+ * CONTENT can't be trusted (missing, empty, truncated, unparseable, or
+ * schema-invalid). `journalFilePath` always names a record
+ * `<journalKey(sourcePath)>.json` (or, for a stray in-flight write,
+ * `...json.tmp-<pid>-<random>`), so the 64-hex-char key survives even
+ * when the record's content doesn't. Returns null if the filename doesn't
+ * match that shape at all (a genuinely unrecognizable file).
+ */
+function extractJournalKeyFromFilename(file) {
+  const match = basename(file).match(JOURNAL_KEY_PATTERN);
+  return match ? match[1] : null;
+}
+
 /** Minimal structural check for a parsed journal record. Anything that
  * doesn't match — including a record that parsed as valid JSON but isn't
  * actually one of ours (wrong shape) — is treated as unreadable, exactly
@@ -942,7 +1015,33 @@ function isValidJournalRecordShape(record) {
  * safe there) — noted here in case it needs to change for a supported
  * platform where journal loss would matter.
  */
-function writeJournalRecordSync(journalDir, record) {
+/**
+ * Write one journal record durably — or refuse to claim it was written
+ * durably at all. `opts.fsyncSync`/`opts.renameSync` are test-only
+ * injection points (default to the real `fsyncSync`/`renameSync`);
+ * `opts.platform` defaults to the real `process.platform` but is
+ * injectable so tests can exercise the Linux-vs-other-platform rule
+ * without actually running on both.
+ *
+ * On the supported target (Linux): ANY error from the temp-file fsync,
+ * the rename into place, or the journal-directory fsync throws — the
+ * caller aborts the unit before any source mutation that write was meant
+ * to guard, and no claim of durability is ever made silently.
+ *
+ * On a non-Linux dev platform: the same is true EXCEPT for the directory
+ * fsync specifically — `ENOTSUP` or `EINVAL` there (common on filesystems
+ * or platforms that don't support fsync-ing a directory fd at all) is
+ * tolerated, and the write still succeeds, but the returned
+ * `durabilityNote` says so explicitly rather than silently pretending
+ * durability was achieved. `EIO` and everything else still abort there
+ * too — only that specific "this platform doesn't support the operation"
+ * shape of failure is tolerated, never an I/O error.
+ */
+function writeJournalRecordSync(journalDir, record, opts = {}) {
+  const doFsync = opts.fsyncSync || fsyncSync;
+  const doRename = opts.renameSync || renameSync;
+  const platform = opts.platform || process.platform;
+
   mkdirSync(journalDir, { recursive: true });
   const file = journalFilePath(journalDir, record.sourcePath);
   const tmpFile = `${file}.tmp-${process.pid}-${randomBytes(6).toString('hex')}`;
@@ -951,26 +1050,40 @@ function writeJournalRecordSync(journalDir, record) {
   const fd = openSync(tmpFile, 'w');
   try {
     writeSync(fd, data);
-    fsyncSync(fd);
+    try {
+      doFsync(fd);
+    } catch (e) {
+      throw new Error(`journal write for ${file} aborted: could not fsync the temp file (${e.code || e.message})`);
+    }
   } finally {
     closeSync(fd);
   }
-  renameSync(tmpFile, file);
 
+  try {
+    doRename(tmpFile, file);
+  } catch (e) {
+    throw new Error(`journal write for ${file} aborted: could not rename the temp file into place (${e.code || e.message})`);
+  }
+
+  let durabilityNote = null;
   try {
     const dirFd = openSync(journalDir, 'r');
     try {
-      fsyncSync(dirFd);
+      doFsync(dirFd);
     } finally {
       closeSync(dirFd);
     }
-  } catch {
-    // Some platforms can't fsync a directory fd — the rename above is
-    // still atomic there, just not guaranteed durable against a crash in
-    // the same instant. Nothing further to do about it here.
+  } catch (e) {
+    const code = e.code || 'UNKNOWN';
+    const tolerable = platform !== 'linux' && (code === 'ENOTSUP' || code === 'EINVAL');
+    if (!tolerable) {
+      const platformNote = platform === 'linux' ? ' (no durability claim can be made on the supported Linux target)' : '';
+      throw new Error(`journal write for ${file} aborted: could not fsync the journal directory (${code})${platformNote}`);
+    }
+    durabilityNote = `durability degraded: ${code}`;
   }
 
-  return file;
+  return { file, durabilityNote };
 }
 
 function removeJournalRecord(journalDir, sourcePath) {
@@ -1194,7 +1307,7 @@ function unlinkOwnedSymlink(path, expectedTargetPath) {
   return { ok: true };
 }
 
-function finalizeSwapOrRestore(journalDir, record) {
+function finalizeSwapOrRestore(journalDir, record, opts = {}) {
   const { sourcePath, stagedPath, linkPath, targetPath, manifest } = record;
 
   const targetOk = manifestExactMatch(targetPath, manifest);
@@ -1260,8 +1373,8 @@ function finalizeSwapOrRestore(journalDir, record) {
     const quarantinePath = `${sourcePath}${QUARANTINE_SUFFIX_PREFIX}${journalKey(sourcePath)}`;
     const reason = 'the staged original was damaged (partial or corrupted content) but the live target and symlink are complete and correct; the live path was left untouched and the damaged staged copy was quarantined rather than deleted or silently trusted';
     renameSync(stagedPath, quarantinePath);
-    writeJournalRecordSync(journalDir, { ...record, step: 'completed-partial-staging-quarantined', quarantinePath });
-    return { ok: true, row: 2, quarantined: true, quarantinePath, reason };
+    const { durabilityNote } = writeJournalRecordSync(journalDir, { ...record, step: 'completed-partial-staging-quarantined', quarantinePath }, opts);
+    return { ok: true, row: 2, quarantined: true, quarantinePath, reason, durabilityNotes: durabilityNote ? [durabilityNote] : [] };
   }
 
   const reasons = [];
@@ -1289,7 +1402,7 @@ function finalizeSwapOrRestore(journalDir, record) {
       if (!unlinkResult.ok) {
         const combinedReason = `${reason}; additionally, could not safely clear the way for restore: ${unlinkResult.reason}`;
         try {
-          writeJournalRecordSync(journalDir, { ...record, step: 'failed', failureReason: combinedReason });
+          writeJournalRecordSync(journalDir, { ...record, step: 'failed', failureReason: combinedReason }, opts);
         } catch {
           // best effort
         }
@@ -1310,7 +1423,7 @@ function finalizeSwapOrRestore(journalDir, record) {
     // didn't apply) — leave both paths for manual inspection rather than
     // guess which is authoritative.
     try {
-      writeJournalRecordSync(journalDir, { ...record, step: 'failed', failureReason: reason });
+      writeJournalRecordSync(journalDir, { ...record, step: 'failed', failureReason: reason }, opts);
     } catch {
       // best effort — the reason is still returned to the caller either way
     }
@@ -1327,7 +1440,7 @@ function finalizeSwapOrRestore(journalDir, record) {
     : 'the staged original itself no longer matches the journaled manifest exactly');
   const reason = reasons.join('; ');
   try {
-    writeJournalRecordSync(journalDir, { ...record, step: 'failed-both-copies-damaged', failureReason: reason });
+    writeJournalRecordSync(journalDir, { ...record, step: 'failed-both-copies-damaged', failureReason: reason }, opts);
   } catch {
     // best effort
   }
@@ -1377,6 +1490,17 @@ function swapToSymlink(src, dst, opts = {}) {
   const staging = src + STAGING_SUFFIX;
   const link = src + LINK_SUFFIX;
   const journalDir = opts.journalDir;
+  const journalOpts = { fsyncSync: opts.journalFsyncSync, renameSync: opts.journalRenameSync, platform: opts.platform };
+  const durabilityNotes = [];
+  function journalWrite(rec) {
+    // GAP 2 (round 6): a failure here — temp-file fsync, rename into
+    // place, or (on Linux) directory fsync — THROWS, which this function
+    // does not catch, so it propagates to the caller and aborts the whole
+    // unit before whatever mutation this write was meant to guard. Never
+    // silently swallowed.
+    const { durabilityNote } = writeJournalRecordSync(journalDir, rec, journalOpts);
+    if (durabilityNote) durabilityNotes.push(durabilityNote);
+  }
 
   if (existsSync(staging) || existsSync(link)) {
     throw new Error(`refusing to touch ${src}: a leftover ${existsSync(staging) ? staging : link} already exists from a previous run — run the 'recover' subcommand first`);
@@ -1385,7 +1509,7 @@ function swapToSymlink(src, dst, opts = {}) {
   const manifest = computeManifest(src);
   const base = { sourcePath: src, stagedPath: staging, linkPath: link, targetPath: dst, manifest };
 
-  writeJournalRecordSync(journalDir, { ...base, step: 'pending' });
+  journalWrite({ ...base, step: 'pending' }); // BEFORE any mutation — a failure here aborts with the source completely untouched
   if (opts.beforeLink) opts.beforeLink(); // test-only hook: simulate a crash here
 
   doSymlink(dst, link);
@@ -1408,34 +1532,35 @@ function swapToSymlink(src, dst, opts = {}) {
     }
     const reason = `pre-swap symlink verification failed for ${link}, and it could not be safely removed: ${unlinkResult.reason}`;
     try {
-      writeJournalRecordSync(journalDir, { ...base, step: 'failed', failureReason: reason });
+      journalWrite({ ...base, step: 'failed', failureReason: reason });
     } catch {
       // best effort — the reason is still thrown below either way
     }
     throw new Error(reason);
   }
-  writeJournalRecordSync(journalDir, { ...base, step: 'linked' });
+  journalWrite({ ...base, step: 'linked' }); // still before the first source mutation (the rename below)
   if (opts.afterLink) opts.afterLink(); // test-only hook: simulate a crash here
 
   renameSync(src, staging);
-  writeJournalRecordSync(journalDir, { ...base, step: 'staged' });
+  journalWrite({ ...base, step: 'staged' });
   if (opts.afterStage) opts.afterStage(); // test-only hook: simulate a crash IN THE GAP between the two renames
 
   renameSync(link, src);
-  writeJournalRecordSync(journalDir, { ...base, step: 'swapped' });
+  journalWrite({ ...base, step: 'swapped' });
   if (opts.afterSwap) opts.afterSwap(); // test-only hook: simulate a crash here
 
   // The ONLY place a staged original is deleted, in this run or later via
   // recovery — see finalizeSwapOrRestore's docstring for the three checks.
   // "The link resolves to something" is deliberately not one of them.
-  const result = finalizeSwapOrRestore(journalDir, base);
+  const result = finalizeSwapOrRestore(journalDir, base, journalOpts);
   if (!result.ok) {
     const outcome = result.row === 4
       ? 'left every path exactly as found (nothing verified good anywhere)'
       : `restored the staged original to ${src}`;
     throw new Error(`post-swap finalize refused to delete the staged original and ${outcome}: ${result.reason}`);
   }
-  return result; // row 1: plain success. row 2: success, but carries {quarantined:true, quarantinePath, reason}.
+  return { ...result, durabilityNotes: [...durabilityNotes, ...(result.durabilityNotes || [])] };
+  // row 1: plain success. row 2: success, but carries {quarantined:true, quarantinePath, reason}.
 }
 
 /** Every location discoverCandidates() looks at, reused so detection and
@@ -1550,6 +1675,7 @@ export function detectInterruptedMoves(home, options = {}) {
  */
 export function recoverInterruptedMoves(home, options = {}) {
   const journalDir = options.journalDir || defaultJournalDir(home);
+  const journalOpts = { fsyncSync: options.journalFsyncSync, renameSync: options.journalRenameSync, platform: options.platform };
   const recovered = [];
   const journaledPaths = new Set();
 
@@ -1584,7 +1710,7 @@ export function recoverInterruptedMoves(home, options = {}) {
       // itself, only inside the row-1/row-2 branches that decide it's
       // warranted.
       if ((srcExists && srcIsSymlink) || (!srcExists && stagedExists && linkExists)) {
-        const result = finalizeSwapOrRestore(journalDir, record);
+        const result = finalizeSwapOrRestore(journalDir, record, journalOpts);
         if (result.ok && result.quarantined) {
           // Row 2: live path is correct and complete — preserved,
           // untouched. The damaged backup was quarantined, not deleted.
@@ -1695,11 +1821,31 @@ export function applyRun(options) {
   const symlinkFn = options.symlinkFn; // test-only injection; real default is symlinkSync inside swapToSymlink
   const recoverFn = options.recover || recoverInterruptedMoves;
   const journalDir = options.journalDir || defaultJournalDir(home);
+  // GAP 2 (round 6) test-only injection points: the real journal fsync,
+  // the real journal rename, and process.platform, all overridable so
+  // tests can exercise the Linux-vs-other-platform durability rule
+  // without branching on the real platform inside the test itself.
+  const journalFsyncSync = options.journalFsyncSync;
+  const journalRenameSync = options.journalRenameSync;
+  const journalPlatform = options.platform;
 
   // Self-heal any interrupted swap from a previous crash before this run's
   // own pre-checks and copy/verify/swap loop — see recoverInterruptedMoves.
   // Only reached here, in apply, never from planRun.
-  const recovered = recoverFn(home, { journalDir });
+  const recovered = recoverFn(home, { journalDir, journalFsyncSync, journalRenameSync, platform: journalPlatform });
+
+  // GAP 1 (round 6): recovery above deliberately leaves any unreadable or
+  // stray journal file alone rather than guess at it. apply must not
+  // proceed AT ALL while that's true — not just for whatever unit it
+  // might belong to, but globally, since an unreadable record's content
+  // can't tell us what it was protecting. This check runs before any
+  // mutation (before even --target validation).
+  const remainingUnreadable = listJournalRecords(journalDir).filter(r => r.corrupt || !r.record);
+  if (remainingUnreadable.length > 0) {
+    const files = remainingUnreadable.map(r => r.file);
+    const reason = `unresolved journal state: ${files.join(', ')}; run recover, or resolve by hand`;
+    return { ok: false, error: reason, moved: [], errors: [{ error: reason }], recovered };
+  }
 
   const validation = validateTargetFn(target, home);
   if (!validation.ok) {
@@ -1714,6 +1860,7 @@ export function applyRun(options) {
 
   const moved = [];
   const errors = [];
+  const durabilityNotes = []; // any 'durability degraded: <code>' notes from journal writes during this run
 
   for (const [groupId, members] of byGroup) {
     const sourceAbsPaths = members.map(m => m.path);
@@ -1752,6 +1899,9 @@ export function applyRun(options) {
         const finalizeResult = swapToSymlink(src, dst, {
           symlinkSync: symlinkFn,
           journalDir,
+          journalFsyncSync,
+          journalRenameSync,
+          platform: journalPlatform,
           beforeLink: options.beforeLink,
           afterLink: options.afterLink,
           afterStage: options.afterStage,
@@ -1762,6 +1912,10 @@ export function applyRun(options) {
           entry.quarantined = true;
           entry.quarantinePath = finalizeResult.quarantinePath;
           entry.note = finalizeResult.reason;
+        }
+        if (finalizeResult && finalizeResult.durabilityNotes && finalizeResult.durabilityNotes.length > 0) {
+          entry.durabilityNotes = finalizeResult.durabilityNotes;
+          durabilityNotes.push(...finalizeResult.durabilityNotes);
         }
         swapped.push(entry);
       } catch (e) {
@@ -1776,7 +1930,7 @@ export function applyRun(options) {
     }
   }
 
-  return { ok: errors.length === 0, moved, errors, recovered };
+  return { ok: errors.length === 0, moved, errors, recovered, durabilityNotes };
 }
 
 // ---------------------------------------------------------------------------

@@ -1536,3 +1536,230 @@ describe('ROUND 6 ITEM 3: swapToSymlink pre-swap verification failure never recu
     assert.match(record.failureReason, /could not be safely removed/);
   });
 });
+
+describe('ROUND 7', () => {
+  function journalDirFor(home) {
+    return join(home, '.cache', 'ide-agent-kit', 'model-tidy-journal');
+  }
+  function findJournalFile(home) {
+    const dir = journalDirFor(home);
+    const names = readdirSync(dir).filter(n => n.endsWith('.json') && !n.includes('.tmp-'));
+    assert.equal(names.length, 1, `expected exactly one journal file, found ${names.length}: ${names.join(', ')}`);
+    return join(dir, names[0]);
+  }
+  function buildIdleFixture(prefix) {
+    const home = tempDir(prefix || 'model-tidy-r7-home-');
+    const src = join(home, 'models', 'idle');
+    mkdirSync(src, { recursive: true });
+    writeFileSync(join(src, 'weights.gguf'), 'GOOD'.repeat(20));
+    utimesSync(join(src, 'weights.gguf'), daysAgo(30), daysAgo(30));
+    return { home, src };
+  }
+  function planFor(home) {
+    return planRun({
+      home,
+      minIdleDays: 14,
+      listProcessUsers: noProcessUsers,
+      listDockerBindUsers: dockerNotInUse,
+      diskFreeBytes: fixedDiskFree
+    });
+  }
+  function snapshotTree(root) {
+    const snap = {};
+    function recurse(dir) {
+      for (const name of readdirSync(dir)) {
+        const full = join(dir, name);
+        const lst = lstatSync(full);
+        if (lst.isSymbolicLink()) {
+          snap[full] = { type: 'symlink', linkTarget: readlinkSync(full) };
+        } else if (lst.isDirectory()) {
+          recurse(full);
+        } else if (lst.isFile()) {
+          snap[full] = { type: 'file', size: lst.size, sha256: createHash('sha256').update(readFileSync(full)).digest('hex') };
+        }
+      }
+    }
+    recurse(root);
+    return snap;
+  }
+  function escapeRe(s) {
+    return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  }
+
+  describe('GAP 1: an unreadable journal record must still protect its unit, recovered from the FILENAME', () => {
+    it("codexmb's probe verbatim: interrupt beforeLink, empty the journal record, rerun plan — the source must NOT be selected, and the reason names the record", () => {
+      const { home, src } = buildIdleFixture();
+      const target = tempDir('model-tidy-r7-target-');
+      const opts = { home, listProcessUsers: noProcessUsers, listDockerBindUsers: dockerNotInUse, diskFreeBytes: fixedDiskFree };
+      const interrupted = applyRun({
+        home,
+        target,
+        plan: planRun(opts),
+        validateTarget: () => ({ ok: true }),
+        beforeLink: () => { throw new Error('fixture interruption'); }
+      });
+      assert.equal(interrupted.ok, false);
+
+      const journalFile = findJournalFile(home);
+      writeFileSync(journalFile, '');
+
+      const next = planRun(opts);
+      assert.ok(!next.selected.some(r => r.path === src), 'the source must not be selected while its journal record is unreadable');
+      const skipped = next.skipped.find(r => r.path === src);
+      assert.ok(skipped, 'the source must be reported in skipped, recovered from the journal filename');
+      assert.match(skipped.reason, /interrupted move with unreadable journal record/);
+      assert.match(skipped.reason, new RegExp(escapeRe(journalFile)), 'the reason must name the record file');
+    });
+
+    it('a stray journal file with an UNPARSEABLE name: plan selects nothing, and apply refuses before any mutation', () => {
+      const { home } = buildIdleFixture();
+      const target = tempDir('model-tidy-r7-target-');
+      const journalDir = journalDirFor(home);
+      mkdirSync(journalDir, { recursive: true });
+      const strayFile = join(journalDir, 'not-a-real-hash-key.json');
+      writeFileSync(strayFile, '{ this is not valid json');
+
+      const before = snapshotTree(home);
+
+      const plan = planFor(home);
+      assert.equal(plan.selected.length, 0, 'plan must select nothing while an unresolvable journal file exists');
+      assert.ok(plan.globalJournalBlockReason);
+      assert.match(plan.globalJournalBlockReason, /unresolved journal state/);
+      assert.match(plan.globalJournalBlockReason, new RegExp(escapeRe(strayFile)));
+      assert.match(plan.summaryLine, /REFUSING TO SELECT ANYTHING THIS RUN/);
+
+      assert.deepEqual(snapshotTree(home), before, 'plan must not mutate anything');
+
+      const result = applyRun({ plan, target, home, validateTarget: bypassCrossFsCheck });
+      assert.equal(result.ok, false);
+      assert.match(result.error, /unresolved journal state/);
+      assert.match(result.error, new RegExp(escapeRe(strayFile)));
+
+      assert.deepEqual(snapshotTree(home), before, 'apply must not mutate anything either');
+      assert.equal(readdirSync(target).length, 0, 'apply must refuse before even attempting to copy anything into target');
+    });
+
+    it('positive control: a healthy, journal-free run still selects the idle dir', () => {
+      const { home, src } = buildIdleFixture();
+      const plan = planFor(home);
+      assert.ok(plan.selected.some(r => r.path === src));
+      assert.equal(plan.globalJournalBlockReason, null);
+    });
+  });
+
+  describe('GAP 2: a directory-fsync failure must never be silently swallowed', () => {
+    // Scoped to the SOURCE tree only, not model-tidy's own journal
+    // bookkeeping under home/.cache (a durability failure legitimately
+    // leaves journal-directory debris: a written-but-not-fsynced record,
+    // or an un-renamed temp file) and not the target dir (the copy step
+    // runs, and legitimately succeeds, BEFORE the swap step where the
+    // journal write under test happens — target ending up with a copy is
+    // expected, not a violation; what must never change is the source).
+    function snapshotSource(home) {
+      return snapshotTree(join(home, 'models'));
+    }
+
+    it('EIO on the journal-directory fsync, on a SIMULATED Linux platform: apply aborts, source untouched (full tree identical), report names the error', () => {
+      const { home, src } = buildIdleFixture('model-tidy-r7-gap2a-home-');
+      const target = tempDir('model-tidy-r7-gap2a-target-');
+      const plan = planFor(home);
+      assert.ok(plan.selected.some(r => r.path === src));
+
+      const before = snapshotSource(home);
+
+      // Within one writeJournalRecordSync call, fsyncSync is called on the
+      // temp-file fd first, then the directory fd second — fail every
+      // SECOND call (the directory fsync) and let the first (temp-file)
+      // succeed, so this test isolates the directory-fsync failure
+      // specifically. The very first journal write (step 'pending')
+      // happens before any source mutation, so its directory-fsync
+      // failure aborts before anything is touched.
+      let callCount = 0;
+      const result = applyRun({
+        plan,
+        target,
+        home,
+        validateTarget: bypassCrossFsCheck,
+        platform: 'linux',
+        journalFsyncSync: () => {
+          callCount++;
+          if (callCount % 2 === 0) {
+            throw Object.assign(new Error('input/output error'), { code: 'EIO' });
+          }
+        }
+      });
+
+      assert.equal(result.ok, false);
+      assert.equal(result.moved.length, 0);
+      assert.ok(result.errors.length >= 1);
+      assert.match(result.errors[0].error, /EIO/);
+      assert.match(result.errors[0].error, /journal directory/);
+      // The copy+verify step runs (and succeeds) BEFORE the swap step
+      // where this journal write happens, so target legitimately holds a
+      // copy — that's expected, not a violation. What must never change,
+      // durability failure or not, is the SOURCE.
+      assert.deepEqual(snapshotSource(home), before, 'the source must be completely untouched');
+      assert.equal(lstatSync(src).isSymbolicLink(), false, 'the source must still be a real directory, never swapped for a symlink');
+    });
+
+    it('ENOTSUP on the journal-directory fsync, on a non-Linux platform: proceeds with a "durability degraded" note', () => {
+      const { home, src } = buildIdleFixture('model-tidy-r7-gap2b-home-');
+      const target = tempDir('model-tidy-r7-gap2b-target-');
+      const plan = planFor(home);
+
+      let callCount = 0;
+      const result = applyRun({
+        plan,
+        target,
+        home,
+        validateTarget: bypassCrossFsCheck,
+        platform: 'darwin', // explicitly injected, never the real process.platform
+        journalFsyncSync: () => {
+          callCount++;
+          if (callCount % 2 === 0) {
+            throw Object.assign(new Error('operation not supported'), { code: 'ENOTSUP' });
+          }
+        }
+      });
+
+      assert.equal(result.ok, true, JSON.stringify(result.errors));
+      assert.equal(result.moved.length, 1);
+      assert.equal(lstatSync(src).isSymbolicLink(), true);
+      assert.ok(result.durabilityNotes.length > 0, 'a durability-degraded note must be reported, not silently dropped');
+      assert.ok(result.durabilityNotes.every(n => n.includes('durability degraded: ENOTSUP')));
+    });
+
+    it('EIO on the journal TEMP-FILE fsync aborts, on any platform', () => {
+      const { home, src } = buildIdleFixture('model-tidy-r7-gap2c-home-');
+      const target = tempDir('model-tidy-r7-gap2c-target-');
+      const plan = planFor(home);
+
+      const before = snapshotSource(home);
+
+      // Fail the FIRST fsyncSync call within each write (the temp file),
+      // regardless of platform — a temp-file fsync failure is never
+      // tolerated anywhere, unlike the directory fsync on non-Linux.
+      let callCount = 0;
+      const result = applyRun({
+        plan,
+        target,
+        home,
+        validateTarget: bypassCrossFsCheck,
+        platform: 'darwin',
+        journalFsyncSync: () => {
+          callCount++;
+          if (callCount % 2 === 1) {
+            throw Object.assign(new Error('input/output error'), { code: 'EIO' });
+          }
+        }
+      });
+
+      assert.equal(result.ok, false);
+      assert.equal(result.moved.length, 0);
+      assert.ok(result.errors.length >= 1);
+      assert.match(result.errors[0].error, /EIO/);
+      assert.match(result.errors[0].error, /temp file/);
+      assert.deepEqual(snapshotSource(home), before, 'the source must be completely untouched');
+    });
+  });
+});

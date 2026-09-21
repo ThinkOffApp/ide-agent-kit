@@ -251,15 +251,27 @@ PARTIAL record at the path readers expect — making a real, in-flight unit
 look like there's nothing to recover, or worse, giving a reader a document
 that parses as JSON but describes something incoherent.
 
-Every journal write now follows write-temp-fsync-rename: the full record
-is written to a throwaway `<file>.tmp-<pid>-<random>` in the same
-directory, that temp file is `fsync`ed and closed, then `renameSync`d
-atomically over the real path (same-directory renames are atomic — a
-reader sees either the old complete record or the new complete one, never
-a partial one), then the journal directory itself is `fsync`ed so the
-rename survives a crash immediately after (on a platform where a
-directory can't be opened for `fsync`, that failure is swallowed — the
-rename is still atomic there, just not immediately durable).
+Every journal write follows write-temp-fsync-rename: the full record is
+written to a throwaway `<file>.tmp-<pid>-<random>` in the same directory,
+that temp file is `fsync`ed and closed, then `renameSync`d atomically over
+the real path (same-directory renames are atomic — a reader sees either
+the old complete record or the new complete one, never a partial one),
+then the journal directory itself is `fsync`ed.
+
+**No step is allowed to fail silently.** On the supported target (Linux),
+ANY error from the temp-file fsync, the rename, or the directory fsync
+aborts the write — and the caller (`swapToSymlink`) does not catch that,
+so it aborts the whole unit before whatever mutation the write was meant
+to guard, and reports the error. On a non-Linux dev platform, the same is
+true with exactly one exception: `ENOTSUP` or `EINVAL` specifically from
+the *directory* fsync (common on filesystems/platforms that don't support
+fsync-ing a directory fd at all) is tolerated — the write still succeeds,
+but a `durability degraded: <code>` note is attached to the result rather
+than silently claiming durability that wasn't achieved. `EIO` and
+everything else still abort there too. The fsync/rename functions and the
+platform are all test-injectable (`--journal-fsync`-style options, not
+exposed on the CLI — internal to `applyRun`/`recoverInterruptedMoves`),
+so this rule is tested without needing two different operating systems.
 
 On the read side, a journal record that is **missing, empty, truncated,
 fails to parse, or doesn't match the expected schema** is never treated as
@@ -270,6 +282,29 @@ never acted on, never deleted, by any of `plan`, `apply`, or `recover`. A
 stray `<hash>.json.tmp-*` file — the leftover of a write that itself got
 interrupted — is recognized by name and reported the same way; it is never
 parsed as a record.
+
+**Recovering ownership from the filename.** An unreadable record's
+*content* can't say which candidate it was protecting — but its *name*
+still can: `journalFilePath` always names a record
+`<journalKey(sourcePath)>.json`, and that 64-hex-char key survives even
+when the content doesn't. `plan` builds a `journalKey(path) -> candidate`
+map from every currently discovered candidate and matches every unreadable
+record's filename against it:
+- a match refuses exactly that candidate, with reason `interrupted move
+  with unreadable journal record: <file>` — no other candidate is
+  affected;
+- **no match at all** (an unparseable filename, or a key that doesn't
+  correspond to any currently discovered candidate) means the unreadable
+  record *might* describe something plan can't even see right now — so
+  `plan` refuses to select **anything** this run, reporting exactly why
+  (`globalJournalBlockReason`, and `REFUSING TO SELECT ANYTHING THIS RUN`
+  in the summary line) rather than guess. `apply` enforces the same rule
+  even more strictly: after its own recovery pass, if any unreadable or
+  stray journal file remains, it refuses to touch anything at all —
+  `unresolved journal state: <files>; run recover, or resolve by hand` —
+  before validating `--target`, before copying, before anything. `recover`
+  itself never guesses either: an unreadable record is reported and both
+  it and every path it might touch are left alone.
 
 ## Selection rules (in order, each with an explicit reason string)
 
@@ -403,10 +438,19 @@ it never attempts to install anything itself.
   recorded target — a plain `unlinkSync`, never `rmSync`, only after both
   checks pass.
 - **Every journal write is crash-safe: write-temp-fsync-rename, then fsync
-  the directory.** A journal record that's missing, empty, truncated,
-  unparseable, or the wrong shape is treated as `journal-unreadable` by
-  every reader (`plan`, `apply`, `recover`) — that unit is reported and
-  left alone, never acted on.
+  the directory — and any failure in that sequence aborts the write rather
+  than silently claiming durability.** On Linux, no error is tolerated
+  anywhere in that sequence. Off Linux, only `ENOTSUP`/`EINVAL` from the
+  directory fsync specifically is tolerated, and only with an explicit
+  `durability degraded: <code>` note in the result — never silently.
+- A journal record that's missing, empty, truncated, unparseable, or the
+  wrong shape is treated as `journal-unreadable` by every reader (`plan`,
+  `apply`, `recover`) — that unit is reported and left alone, never acted
+  on. Its filename (not its content) is still used to identify which
+  candidate it protects: a match refuses that one candidate; no match at
+  all (unparseable name, or a key with no current candidate) makes `plan`
+  refuse to select anything and makes `apply` refuse to touch anything,
+  rather than risk missing what an unreadable record was protecting.
 - `plan` makes zero filesystem writes, ever — including for interrupted
   moves, which it only detects and reports. Only `recover` and `apply`
   (once, at its own start) mutate anything.
