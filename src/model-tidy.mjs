@@ -862,7 +862,7 @@ const LINK_SUFFIX = '.tidy-link';
 const JOURNAL_SUBDIR = 'model-tidy-journal';
 
 function isJournalSuffixed(name) {
-  return name.endsWith(STAGING_SUFFIX) || name.endsWith(LINK_SUFFIX);
+  return name.endsWith(STAGING_SUFFIX) || name.endsWith(LINK_SUFFIX) || name.includes(QUARANTINE_SUFFIX_PREFIX);
 }
 
 function defaultJournalDir(home) {
@@ -992,35 +992,46 @@ function manifestExactMatch(rootDir, manifest) {
   return actualCount === manifestRelPaths.size;
 }
 
+const QUARANTINE_SUFFIX_PREFIX = '.tidy-quarantine-';
+
 /**
- * The ONLY place in this file allowed to delete a staged original. Called
- * both from swapToSymlink's own final step (same run) and from recovery
- * (a later run) — one guarded function, one invariant, everywhere a
- * staged original could be discarded.
+ * The ONLY place in this file allowed to delete OR rename away a staged
+ * original. Called both from swapToSymlink's own final step (same run)
+ * and from recovery (a later run) — one guarded function, one invariant,
+ * everywhere a staged original could be discarded.
  *
- * A staged original is deleted ONLY when, at this exact moment:
- *   1. every file under the journal's targetPath matches the journal
- *      manifest by size and SHA-256, with no extra or missing paths —
- *      not just "the manifest's entries happen to be present". The link
- *      having been verified once, when it was CREATED, is not evidence
- *      about the target's content NOW; the target can change afterwards
- *      (corruption, a second process, disk issues) and "a link resolves
- *      to something" proves nothing about what it resolves to.
- *   2. the path at sourcePath is a symlink whose realpath resolves to
- *      exactly the journal's recorded targetPath.
- *   3. the staged original itself (if it still exists) still matches the
- *      journal manifest exactly — a partially damaged original is a red
- *      flag to report, not something to silently discard because a
- *      symlink elsewhere happens to look fine.
+ * Checks three independent facts, then follows an explicit 4-row decision
+ * table — no single pass/fail collapse, because "the live path is fine"
+ * and "the backup is fine" are NOT the same question, and conflating them
+ * caused two different real data-loss bugs (see git history):
+ *   targetOk    — every file under the journal's targetPath matches the
+ *                 manifest by size + SHA-256, no extra or missing paths.
+ *                 The link having been verified once, when it was
+ *                 CREATED, is not evidence about the target's content
+ *                 NOW — it can change afterwards (corruption, a second
+ *                 process, disk issues).
+ *   linkOk      — sourcePath is a symlink whose realpath resolves to
+ *                 exactly the journal's recorded targetPath.
+ *   stagedState — 'absent' (no staged copy exists — fine, nothing to
+ *                 protect), 'matching' (exists and matches the manifest
+ *                 exactly), or 'damaged' (exists but does not match).
  *
- * If ANY of the three fails: remove a bad/half symlink at sourcePath (if
- * one exists), restore the staged original to sourcePath (if the staged
- * copy still exists and sourcePath is clear), mark the journal record
- * `step: 'failed'` with the reason, and report — this function NEVER
- * deletes on the strength of "a link resolves".
+ * | # | targetOk && linkOk | stagedState        | Action |
+ * |---|---------------------|---------------------|--------|
+ * | 1 | true                | absent or matching  | complete: delete the staged copy if present, clear the journal. |
+ * | 2 | true                | damaged             | the live path is correct and complete — PRESERVE it untouched. Do NOT delete the damaged staging; QUARANTINE it to `<sourcePath>.tidy-quarantine-<journalId>` and record that path in the journal (`step: 'completed-partial-staging-quarantined'`). Nothing is deleted. |
+ * | 3 | false               | matching            | restore: remove a bad/half symlink at sourcePath if present, rename the staged copy back to sourcePath, verify it matches the manifest, journal `step: 'failed'`. |
+ * | 4 | false               | absent or damaged   | nothing verified good anywhere — DELETE NOTHING, RENAME NOTHING, leave every path exactly as found, journal `step: 'failed-both-copies-damaged'` with the per-check reasons. |
+ *
+ * Row 1 and row 3 never delete/restore a staged copy that's merely
+ * "absent" — there's nothing there to act on. Row 2 exists specifically
+ * so a live, correct, already-in-use path is never sacrificed just
+ * because its backup has a problem. Row 4 exists specifically so that,
+ * when there is genuinely nothing good anywhere, this function refuses to
+ * guess — it touches nothing rather than pick a side.
  */
 function finalizeSwapOrRestore(journalDir, record) {
-  const { sourcePath, stagedPath, targetPath, manifest } = record;
+  const { sourcePath, stagedPath, linkPath, targetPath, manifest } = record;
 
   const targetOk = manifestExactMatch(targetPath, manifest);
 
@@ -1030,68 +1041,122 @@ function finalizeSwapOrRestore(journalDir, record) {
   } catch {
     sourceLstat = null;
   }
-  let sourceIsCorrectSymlink = false;
-  if (sourceLstat && sourceLstat.isSymbolicLink()) {
+  const srcExists = !!sourceLstat;
+  const srcIsSymlink = !!(sourceLstat && sourceLstat.isSymbolicLink());
+  const linkExists = existsSync(linkPath);
+
+  // Is there a verifiably-correct symlink representing this unit's live
+  // path — already placed at sourcePath, or still pending (unconsumed) at
+  // linkPath? Either counts as "the link is fine"; WHICH one it is
+  // determines whether completing the pending rename is even on the
+  // table below (it only ever happens as part of executing row 1 or row
+  // 2 — never speculatively, and never for row 3 or row 4).
+  let linkOk = false;
+  let linkLocation = null; // 'source' | 'pending' | null
+  if (srcIsSymlink) {
     try {
-      sourceIsCorrectSymlink = realpathSync(sourcePath) === realpathSync(targetPath);
+      if (realpathSync(sourcePath) === realpathSync(targetPath)) {
+        linkOk = true;
+        linkLocation = 'source';
+      }
     } catch {
-      sourceIsCorrectSymlink = false;
+      linkOk = false;
+    }
+  } else if (!srcExists && linkExists) {
+    try {
+      if (lstatSync(linkPath).isSymbolicLink() && realpathSync(linkPath) === realpathSync(targetPath)) {
+        linkOk = true;
+        linkLocation = 'pending';
+      }
+    } catch {
+      linkOk = false;
     }
   }
 
-  const stagedExists = existsSync(stagedPath);
-  const stagedOk = !stagedExists || manifestExactMatch(stagedPath, manifest);
+  const stagedState = !existsSync(stagedPath)
+    ? 'absent'
+    : (manifestExactMatch(stagedPath, manifest) ? 'matching' : 'damaged');
 
-  if (targetOk && sourceIsCorrectSymlink && stagedOk) {
-    if (stagedExists) rmSync(stagedPath, { recursive: true });
+  // Row 1: live path correct, and there's either nothing staged to worry
+  // about or it matches too — complete normally. Only HERE does a
+  // pending rename actually get completed.
+  if (targetOk && linkOk && stagedState !== 'damaged') {
+    if (linkLocation === 'pending') renameSync(linkPath, sourcePath);
+    if (stagedState === 'matching') rmSync(stagedPath, { recursive: true });
     removeJournalRecord(journalDir, sourcePath);
-    return { ok: true };
+    return { ok: true, row: 1 };
+  }
+
+  // Row 2: live path correct and complete, but the backup is damaged.
+  // Preserve the live path exactly as-is (completing the pending rename
+  // if needed, since the target+link half of this unit is fully
+  // verified); never delete the damaged backup silently — quarantine it.
+  if (targetOk && linkOk && stagedState === 'damaged') {
+    if (linkLocation === 'pending') renameSync(linkPath, sourcePath);
+    const quarantinePath = `${sourcePath}${QUARANTINE_SUFFIX_PREFIX}${journalKey(sourcePath)}`;
+    const reason = 'the staged original was damaged (partial or corrupted content) but the live target and symlink are complete and correct; the live path was left untouched and the damaged staged copy was quarantined rather than deleted or silently trusted';
+    renameSync(stagedPath, quarantinePath);
+    writeJournalRecordSync(journalDir, { ...record, step: 'completed-partial-staging-quarantined', quarantinePath });
+    return { ok: true, row: 2, quarantined: true, quarantinePath, reason };
   }
 
   const reasons = [];
   if (!targetOk) reasons.push('target content does not match the journaled manifest exactly (missing, extra, or corrupted files)');
-  if (!sourceIsCorrectSymlink) reasons.push('source is not a symlink whose realpath resolves exactly to the recorded target path');
-  if (!stagedOk) reasons.push('the staged original itself no longer matches the journaled manifest exactly');
-  const reason = reasons.join('; ');
+  if (!linkOk) reasons.push('source is not a symlink whose realpath resolves exactly to the recorded target path');
 
-  // Never delete on this evidence. Only touch sourcePath at all if there
-  // is a staged original to fall back on — removing a bad symlink with
-  // NOTHING to put in its place would make things strictly worse (e.g.
-  // the case where the original was already legitimately deleted in a
-  // prior successful run and only the target has since degraded: there is
-  // nothing left to restore FROM, so the existing symlink — however
-  // suspect — is left exactly alone rather than removed for no benefit).
-  let restored = false;
-  if (stagedExists) {
+  // Row 3: live path has a problem, but the staged original is intact —
+  // restore from it. Clears away a bad symlink wherever it currently
+  // sits (already at sourcePath, or still pending at linkPath).
+  if (stagedState === 'matching') {
+    const reason = reasons.join('; ');
     try {
-      if (sourceLstat && sourceLstat.isSymbolicLink()) rmSync(sourcePath);
+      if (srcIsSymlink) rmSync(sourcePath);
+      else if (!srcExists && linkExists) rmSync(linkPath, { recursive: true });
     } catch {
       // best effort — the restore attempt below will surface a failure
     }
+    let restored = false;
     if (!existsSync(sourcePath)) {
       try {
         renameSync(stagedPath, sourcePath);
-        restored = existsSync(sourcePath) && !lstatSync(sourcePath).isSymbolicLink();
+        restored = manifestExactMatch(sourcePath, manifest);
       } catch {
         restored = false;
       }
     }
-    // else: sourcePath still holds something unexpected (not a symlink,
-    // and removal above didn't apply) — leave both paths for manual
-    // inspection rather than guess which is authoritative.
-  } else if (sourceLstat && !sourceLstat.isSymbolicLink()) {
-    // No staged copy, and sourcePath already holds a real directory —
-    // nothing to restore, but also nothing was ever at risk.
-    restored = true;
+    // else: sourcePath still holds something unexpected (removal above
+    // didn't apply) — leave both paths for manual inspection rather than
+    // guess which is authoritative.
+    try {
+      writeJournalRecordSync(journalDir, { ...record, step: 'failed', failureReason: reason });
+    } catch {
+      // best effort — the reason is still returned to the caller either way
+    }
+    return { ok: false, row: 3, reason, restored };
   }
 
+  // Row 4: nothing verified good anywhere (live path has a problem AND
+  // the backup is absent or also damaged). DELETE NOTHING, RENAME
+  // NOTHING — sourcePath, stagedPath, and linkPath are all left exactly
+  // as found, including a still-pending, uncompleted rename. Report
+  // loudly with every path so a human can recover by hand.
+  reasons.push(stagedState === 'absent'
+    ? 'no staged original exists to fall back on'
+    : 'the staged original itself no longer matches the journaled manifest exactly');
+  const reason = reasons.join('; ');
   try {
-    writeJournalRecordSync(journalDir, { ...record, step: 'failed', failureReason: reason });
+    writeJournalRecordSync(journalDir, { ...record, step: 'failed-both-copies-damaged', failureReason: reason });
   } catch {
-    // best effort — the reason is still returned to the caller either way
+    // best effort
   }
-
-  return { ok: false, reason, restored };
+  return {
+    ok: false,
+    row: 4,
+    reason,
+    restored: false,
+    untouched: true,
+    paths: { sourcePath, stagedPath, linkPath, targetPath }
+  };
 }
 
 /**
@@ -1164,8 +1229,12 @@ function swapToSymlink(src, dst, opts = {}) {
   // "The link resolves to something" is deliberately not one of them.
   const result = finalizeSwapOrRestore(journalDir, base);
   if (!result.ok) {
-    throw new Error(`post-swap finalize refused to delete the staged original and restored it instead: ${result.reason}`);
+    const outcome = result.row === 4
+      ? 'left every path exactly as found (nothing verified good anywhere)'
+      : `restored the staged original to ${src}`;
+    throw new Error(`post-swap finalize refused to delete the staged original and ${outcome}: ${result.reason}`);
   }
+  return result; // row 1: plain success. row 2: success, but carries {quarantined:true, quarantinePath, reason}.
 }
 
 /** Every location discoverCandidates() looks at, reused so detection and
@@ -1195,8 +1264,16 @@ function strayJournalSuffixedPaths(home, excludePaths) {
   for (const dir of candidateParentDirs(home)) {
     for (const name of safeReaddir(dir)) {
       if (!isJournalSuffixed(name)) continue;
-      const base = name.endsWith(STAGING_SUFFIX) ? name.slice(0, -STAGING_SUFFIX.length) : name.slice(0, -LINK_SUFFIX.length);
-      const src = join(dir, base);
+      let src;
+      if (name.includes(QUARANTINE_SUFFIX_PREFIX)) {
+        // A quarantine dir represents itself (not some other "base" name
+        // with a suffix stripped) — it's excluded by its own full path,
+        // which is what a journal record's `quarantinePath` field holds.
+        src = join(dir, name);
+      } else {
+        const base = name.endsWith(STAGING_SUFFIX) ? name.slice(0, -STAGING_SUFFIX.length) : name.slice(0, -LINK_SUFFIX.length);
+        src = join(dir, base);
+      }
       if (excludePaths.has(src)) continue;
       strays.push({ path: src, entryPath: join(dir, name) });
     }
@@ -1225,6 +1302,7 @@ export function detectInterruptedMoves(home, options = {}) {
       continue;
     }
     journaledPaths.add(record.sourcePath);
+    if (record.quarantinePath) journaledPaths.add(record.quarantinePath);
     const srcExists = existsSync(record.sourcePath);
     let srcIsSymlink = false;
     try {
@@ -1281,6 +1359,7 @@ export function recoverInterruptedMoves(home, options = {}) {
     }
     const { sourcePath, stagedPath, linkPath, manifest, step } = record;
     journaledPaths.add(sourcePath);
+    if (record.quarantinePath) journaledPaths.add(record.quarantinePath);
 
     try {
       const srcExists = existsSync(sourcePath);
@@ -1294,23 +1373,42 @@ export function recoverInterruptedMoves(home, options = {}) {
       const linkExists = existsSync(linkPath);
 
       // A symlink is either already in place, or one verified rename away
-      // from being in place: the ONLY safe way to decide whether the
-      // staged original may be deleted is finalizeSwapOrRestore's
-      // three-way check (target manifest, symlink realpath, staged
-      // manifest) — never a bare "does something exist at the realpath"
-      // check, which is exactly the data-loss bug this replaces.
+      // from being in place: the ONLY safe way to decide anything here —
+      // including whether it's even safe to COMPLETE that pending rename
+      // — is finalizeSwapOrRestore's own decision table (target manifest,
+      // symlink realpath, staged manifest, all re-checked now). It is
+      // NOT safe to complete the rename speculatively before that
+      // decision: row 4 (nothing verified good anywhere) must rename
+      // NOTHING, so finalizeSwapOrRestore performs the pending rename
+      // itself, only inside the row-1/row-2 branches that decide it's
+      // warranted.
       if ((srcExists && srcIsSymlink) || (!srcExists && stagedExists && linkExists)) {
-        if (!srcExists && stagedExists && linkExists) {
-          // Completing this rename alone never deletes anything — the
-          // original is still fully intact at stagedPath either way.
-          // finalizeSwapOrRestore below undoes this if it turns out
-          // unsafe to proceed past it.
-          renameSync(linkPath, sourcePath);
-        }
         const result = finalizeSwapOrRestore(journalDir, record);
-        if (result.ok) {
+        if (result.ok && result.quarantined) {
+          // Row 2: live path is correct and complete — preserved,
+          // untouched. The damaged backup was quarantined, not deleted.
+          // The journal record was just rewritten with this quarantine
+          // path, so exclude it from the stray scan below too.
+          journaledPaths.add(result.quarantinePath);
+          recovered.push({
+            path: sourcePath,
+            journalFile: file,
+            action: 'completed-partial-staging-quarantined',
+            note: `${result.reason} (quarantined at ${result.quarantinePath})`
+          });
+        } else if (result.ok) {
+          // Row 1.
           recovered.push({ path: sourcePath, journalFile: file, action: 'completed-swap-and-cleaned', note: 'completed the pending symlink swap (or finished cleanup of one already in place) and removed the staged original — target and symlink both re-verified against the journal manifest first' });
+        } else if (result.row === 4) {
+          // Row 4: nothing verified good anywhere — touched nothing.
+          recovered.push({
+            path: sourcePath,
+            journalFile: file,
+            action: 'left-alone-nothing-verified-good',
+            note: `${result.reason} — every path left exactly as found (source: ${result.paths.sourcePath}, staged: ${result.paths.stagedPath}, target: ${result.paths.targetPath}); recover by hand`
+          });
         } else {
+          // Row 3.
           recovered.push({
             path: sourcePath,
             journalFile: file,
@@ -1441,7 +1539,7 @@ export function applyRun(options) {
       const rel = relative(home, src);
       const dst = join(target, rel);
       try {
-        swapToSymlink(src, dst, {
+        const finalizeResult = swapToSymlink(src, dst, {
           symlinkSync: symlinkFn,
           journalDir,
           beforeLink: options.beforeLink,
@@ -1449,7 +1547,13 @@ export function applyRun(options) {
           afterStage: options.afterStage,
           afterSwap: options.afterSwap
         });
-        swapped.push({ source: src, target: dst });
+        const entry = { source: src, target: dst };
+        if (finalizeResult && finalizeResult.quarantined) {
+          entry.quarantined = true;
+          entry.quarantinePath = finalizeResult.quarantinePath;
+          entry.note = finalizeResult.reason;
+        }
+        swapped.push(entry);
       } catch (e) {
         swapFailed = { path: src, error: e.message };
         break;

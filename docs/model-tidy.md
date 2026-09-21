@@ -162,42 +162,60 @@ still matches that record's manifest, and only then acts:
 
 ### The guarded delete decision (`finalizeSwapOrRestore`)
 
-A second, earlier bug in this same recovery path deleted the last good
-original after the crash landed between the two renames: the code
-verified the *staged* copy's manifest, and that *a* realpath existed for
-the pending symlink — but never re-verified the **target's actual
-content**, nor that the symlink's realpath was **exactly** the journal's
-recorded target path. A target that changed after the link was created
-(corruption, a second process, disk issues) still made the old code
-delete the only good copy, because "a link resolves to something" was
-being treated as proof it resolves to something *correct*. It doesn't.
+This recovery path has had two different real data-loss bugs found by
+review, both from collapsing "is the live path OK?" and "is the backup OK?"
+into a single pass/fail:
 
-There is now exactly one function in the codebase allowed to delete a
+- **Round 2:** the code verified the staged copy's manifest and that *a*
+  realpath existed for the pending symlink, but never re-verified the
+  **target's actual content**, nor that the symlink's realpath was
+  **exactly** the recorded target path. A target that changed after the
+  link was created (corruption, a second process, disk issues) still made
+  the old code delete the only good copy — "a link resolves to something"
+  was being treated as proof it resolves to something *correct*.
+- **Round 3:** fixing that by requiring the staged copy to *also* match
+  its manifest before deleting created a NEW bug: if the live path (target
+  + symlink) was completely correct but the staged *backup* happened to be
+  partially damaged, the single pass/fail collapsed straight to "restore",
+  which **unlinked the good, working symlink and replaced it with the
+  known-damaged backup** — trading a verified-good live path for
+  known-bad data.
+
+There is now exactly one function allowed to delete OR rename away a
 staged original — `finalizeSwapOrRestore`, used by **both** `apply`'s own
-final step (same run) and `recoverInterruptedMoves` (a later run). It
-requires all three of:
+final step (same run) and `recoverInterruptedMoves` (a later run) — and it
+is an explicit 4-row decision table, not a single boolean, over three
+independently-checked facts:
 
-1. every file under the journal's **target path** matches the manifest by
-   size and SHA-256, with no extra or missing paths — re-checked now, not
-   trusted from when the link was created;
-2. the **source path** is a symlink whose realpath resolves to exactly the
-   journal's recorded target path;
-3. the **staged original itself**, if it still exists, still matches the
-   manifest exactly — a partially damaged original is reported, never
-   silently discarded just because a symlink elsewhere looks fine.
+- **targetOk** — every file under the journal's target path matches the
+  manifest by size + SHA-256, no extra or missing paths (re-checked now,
+  never trusted from when the link was created).
+- **linkOk** — the live path (already placed at the source, or still
+  pending, unconsumed, at the temp-link path) is a symlink whose realpath
+  resolves to exactly the recorded target path.
+- **stagedState** — `absent` (nothing to protect), `matching` (exists and
+  matches the manifest exactly), or `damaged` (exists but doesn't match).
 
-If any of the three fails: a bad/half symlink at the source path is
-removed, the staged original (if present) is renamed back to the source
-path and re-verified, the journal record is marked `step: 'failed'` with
-the reason, and the unit is reported — **never** deleted on the strength
-of a link merely resolving.
+| # | targetOk && linkOk | stagedState | Action |
+| --- | --- | --- | --- |
+| 1 | true | absent or matching | **Complete.** Finish the pending rename if one was still outstanding, delete the staged copy if it matched, clear the journal. |
+| 2 | true | damaged | **Preserve + quarantine.** The live path is correct and complete — it is left completely untouched (finishing the pending rename if needed). The damaged backup is never deleted or silently restored over the good live path: it's renamed to `<sourcePath>.tidy-quarantine-<journalId>`, and that path is recorded in the journal (`step: 'completed-partial-staging-quarantined'`). Nothing is deleted in this row. |
+| 3 | false | matching | **Restore.** Remove a bad/half symlink wherever it currently sits (source or the pending temp-link), rename the staged original back to the source path, re-verify it matches the manifest, journal `step: 'failed'`. |
+| 4 | false | absent or damaged | **Touch nothing.** Nothing verified good exists anywhere for this unit. DELETE NOTHING, RENAME NOTHING — not even a still-pending, uncompleted rename — leave every path exactly as found. Journal `step: 'failed-both-copies-damaged'` with the per-check reasons, and report every path involved so a human can recover by hand. |
 
-A `*.tidy-moving` or `*.tidy-link` directory with **no matching journal
-record at all** is reported but never touched, no matter how it's named —
-recovery does not treat a name as ownership. A failure for one unit does
-not roll back units that already succeeded earlier in the same `apply`
-run, but the process still exits non-zero and prints exactly which unit
-failed, at which step, and why.
+Row 1 only ever completes a pending rename as part of deciding the WHOLE
+unit is fine — it's never done speculatively "just in case" before the
+decision, which was exactly how the round-3 bug reached its bad state via
+a supposedly-harmless prep step. Row 4 exists specifically so that, when
+there is genuinely nothing good anywhere, this function refuses to guess
+— it does not pick a side.
+
+A `*.tidy-moving`, `*.tidy-link`, or `*.tidy-quarantine-*` path with **no
+matching journal record at all** is reported but never touched, no matter
+how it's named — recovery does not treat a name as ownership. A failure
+for one unit does not roll back units that already succeeded earlier in
+the same `apply` run, but the process still exits non-zero and prints
+exactly which unit failed, at which step, and why.
 
 ## Selection rules (in order, each with an explicit reason string)
 
@@ -341,15 +359,19 @@ it never attempts to install anything itself.
   like a leftover with no matching journal record — or a journaled unit
   whose content has since changed — is reported and left alone, never
   guessed at.
-- **A staged original is only ever deleted by `finalizeSwapOrRestore`, the
-  one function both `apply`'s own final step and `recoverInterruptedMoves`
-  call for that decision** — never on the strength of "a symlink resolves
-  to something." It re-checks the target's actual content against the
-  manifest, that the source symlink's realpath is exactly the recorded
-  target path, and that the staged original itself (if present) still
-  matches the manifest — all three, every time, even for a unit whose link
-  was already verified once when it was created. Any failure restores the
-  staged original rather than deleting it.
+- **A staged original is only ever deleted or renamed away by
+  `finalizeSwapOrRestore`, the one function both `apply`'s own final step
+  and `recoverInterruptedMoves` call for that decision** — never on the
+  strength of "a symlink resolves to something." It follows an explicit
+  4-row decision table (see "The guarded delete decision" above) over
+  three independently re-checked facts — target content, symlink
+  correctness, staged-copy state (absent/matching/damaged) — so that "the
+  live path is fine" and "the backup is fine" are never collapsed into one
+  answer: a live path that's correct and complete is always preserved
+  exactly as-is, even when its backup turns out to be damaged (the backup
+  is quarantined, not deleted, and never used to overwrite a working
+  symlink); and when nothing anywhere is verified good, nothing is deleted
+  or renamed at all.
 - A hardlink set moves as a unit or not at all — never partially — and the
   hardlink scan covers every discovered model root, not just the ones that
   already passed every other rule. It also refuses a candidate whose

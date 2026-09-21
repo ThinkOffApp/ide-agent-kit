@@ -9,6 +9,7 @@ import {
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { spawnSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import {
   planRun, applyRun, discoverCandidates, loadKeepList, computeHardlinkGroups,
   validateTarget, copyUnitPureNode, recoverInterruptedMoves
@@ -768,12 +769,15 @@ describe('GAP 2: crash-safety across a hard process kill (not just a thrown exce
         } else if (lst.isDirectory()) {
           recurse(full);
         } else if (lst.isFile()) {
-          snap[full] = { type: 'file', size: lst.size, mtimeMs: lst.mtimeMs };
+          snap[full] = { type: 'file', size: lst.size, mtimeMs: lst.mtimeMs, sha256: sha256Sync(full) };
         }
       }
     }
     recurse(root);
     return snap;
+  }
+  function sha256Sync(path) {
+    return createHash('sha256').update(readFileSync(path)).digest('hex');
   }
 
   it("AMENDMENT: plan is read-only — an interrupted move is reported per unit, and every byte on disk (full tree, sizes and mtimes) is untouched by plan", () => {
@@ -825,7 +829,15 @@ describe('GAP 2: crash-safety across a hard process kill (not just a thrown exce
     assert.match(finding.note, /no matching journal record/);
   });
 
-  it('AMENDMENT: recovery never silently discards a staged original whose own content no longer matches the journal — it restores (never deletes) and reports failure', () => {
+  it('AMENDMENT / decision-table row 2: recovery never silently discards a staged original whose own content no longer matches the journal — with the live path (target + link) still correct, it quarantines rather than deletes or restores over the good symlink', () => {
+    // NOTE: this scenario crashes 'afterStage' (between the two renames),
+    // but since the pending link was already verified BEFORE it was ever
+    // created, recovery completes that rename first — so by the time
+    // finalizeSwapOrRestore runs, target and link are both fine. Only the
+    // staged backup is damaged. That is row 2 of the decision table, not
+    // row 3: an earlier version of this fix used to restore the tampered
+    // staged copy over the good live symlink here, which was itself a
+    // (milder) data-loss bug — see the round-3 fix.
     const { home, src } = buildSingleIdleFixture();
     const target = tempDir('model-tidy-gap2-target-');
     const plan = planFor(home);
@@ -834,6 +846,7 @@ describe('GAP 2: crash-safety across a hard process kill (not just a thrown exce
     assert.equal(child.status, 77);
     const staging = `${src}.tidy-moving`;
     assert.ok(existsSync(staging));
+    const goodContent = 'gap2-fixture-bytes'.repeat(50);
 
     // Tamper with the staged original so it no longer matches what the
     // journal recorded — recovery must not trust its own naming
@@ -844,20 +857,22 @@ describe('GAP 2: crash-safety across a hard process kill (not just a thrown exce
     const recovered = recoverInterruptedMoves(home);
     const finding = recovered.find(r => r.path === src);
     assert.ok(finding);
-    assert.match(finding.action, /^(restored-after-failed-verification|left-alone-after-failed-verification)$/);
-    assert.match(finding.note, /staged original itself no longer matches the journaled manifest/);
+    assert.equal(finding.action, 'completed-partial-staging-quarantined');
+    assert.match(finding.note, /staged original was damaged/);
 
-    // Whatever happened, the staged content was neither silently deleted
-    // nor silently accepted as-is: it now lives at src (or, if that
-    // somehow could not happen, at the untouched staging path) and the
-    // journal itself is marked failed rather than cleared as successful.
-    const survivedAtSrc = existsSync(src) && !lstatSync(src).isSymbolicLink();
-    const survivedAtStaging = existsSync(staging);
-    assert.ok(survivedAtSrc || survivedAtStaging, 'the tampered content must not have been silently discarded');
-    if (survivedAtSrc) {
-      assert.equal(readFileSync(join(src, 'weights.gguf'), 'utf8'), 'TAMPERED-CONTENT-DOES-NOT-MATCH-MANIFEST');
-    }
-    assert.equal(lstatSync(src).isSymbolicLink(), false, 'the source must not be left as a symlink to an unverified copy after a failed check');
+    // The live path must be preserved exactly as it was: a working
+    // symlink to the good target.
+    assert.equal(lstatSync(src).isSymbolicLink(), true, 'the live symlink must be preserved, not replaced with the tampered staged copy');
+    assert.equal(readFileSync(join(src, 'weights.gguf'), 'utf8'), goodContent);
+
+    // The damaged staging must not have been silently deleted: it must
+    // now live at a quarantine path, still holding the tampered content
+    // for a human to inspect — never lost.
+    assert.equal(existsSync(staging), false, 'the staging path itself is gone (renamed to quarantine)');
+    const quarantineDirs = readdirSync(join(home, 'models')).filter(n => n.includes('.tidy-quarantine-'));
+    assert.equal(quarantineDirs.length, 1);
+    const quarantinePath = join(home, 'models', quarantineDirs[0]);
+    assert.equal(readFileSync(join(quarantinePath, 'weights.gguf'), 'utf8'), 'TAMPERED-CONTENT-DOES-NOT-MATCH-MANIFEST');
   });
 
   it("DATA-LOSS FIX, codexmb's round-2 probe kept verbatim: target corrupted after staging must not cost the last good original", () => {
@@ -1002,5 +1017,76 @@ describe('GAP 2: crash-safety across a hard process kill (not just a thrown exce
     if (restoredAtSrc) {
       assert.equal(readFileSync(join(src, 'weights.gguf'), 'utf8'), 'gap2-fixture-bytes'.repeat(50));
     }
+  });
+
+  it("decision-table row 3, reproducing codexmb's round-3 probe's own 'bad-target' scenario (afterSwap crash, not afterStage): a corrupted target still triggers restore-from-staged, never quarantine", () => {
+    // Exact mechanics of round-3's probe: crash at afterSwap (src is
+    // ALREADY a symlink, staged still pending cleanup), then corrupt the
+    // target's content. linkOk only checks that the symlink's realpath
+    // equals the recorded target PATH — it does not, and must not, imply
+    // the target's CONTENT is still correct. targetOk must independently
+    // fail here, landing on row 3 (restore), not row 1 or row 2.
+    const { home, src } = buildSingleIdleFixture();
+    const target = tempDir('model-tidy-gap2-target-');
+    const plan = planFor(home);
+
+    const child = runApplyInChildWithCrash(plan, home, target, 'afterSwap');
+    assert.equal(child.status, 77);
+    assert.equal(lstatSync(src).isSymbolicLink(), true, 'mid-crash: the swap already completed structurally');
+    const staging = `${src}.tidy-moving`;
+    assert.ok(existsSync(staging));
+
+    writeFileSync(join(target, 'models', 'idle', 'weights.gguf'), 'BADD-TARGET-CONTENT');
+
+    const recovered = recoverInterruptedMoves(home);
+    const finding = recovered.find(r => r.path === src);
+    assert.ok(finding);
+    assert.equal(finding.action, 'restored-after-failed-verification');
+    assert.match(finding.note, /target content does not match the journaled manifest/);
+
+    assert.equal(lstatSync(src).isSymbolicLink(), false, 'row 3 restores the real directory, it does not quarantine or preserve a symlink to a corrupted target');
+    assert.equal(readFileSync(join(src, 'weights.gguf'), 'utf8'), 'gap2-fixture-bytes'.repeat(50));
+    assert.equal(existsSync(staging), false);
+  });
+
+  it('decision-table row 4: nothing verified good anywhere (target corrupted AND staging partial) — recovery deletes nothing, renames nothing, and leaves every path exactly as found', () => {
+    const { home, src } = buildSingleIdleFixture();
+    const target = tempDir('model-tidy-gap2-target-');
+    const plan = planFor(home);
+
+    const child = runApplyInChildWithCrash(plan, home, target, 'afterStage');
+    assert.equal(child.status, 77);
+    const staging = `${src}.tidy-moving`;
+    assert.ok(existsSync(staging));
+
+    // Damage BOTH copies: the target (live) and the staged backup.
+    writeFileSync(join(target, 'models', 'idle', 'weights.gguf'), 'BADD-TARGET');
+    rmSync(join(staging, 'weights.gguf'));
+
+    // Snapshot only the DATA paths (source tree + target tree), not
+    // model-tidy's own journal bookkeeping under home/.cache — the
+    // journal is EXPECTED to record this failure (step
+    // 'failed-both-copies-damaged'); what must stay byte-for-byte
+    // unchanged is the actual model data.
+    const snapshotData = () => ({ ...snapshotTree(join(home, 'models')), ...snapshotTree(target) });
+
+    const before = snapshotData();
+    const recovered = recoverInterruptedMoves(home);
+    const after = snapshotData();
+
+    assert.deepEqual(after, before, 'row 4 must delete nothing and rename nothing — every data path (sizes and content hashes) must be byte-for-byte unchanged');
+
+    const finding = recovered.find(r => r.path === src);
+    assert.ok(finding);
+    assert.equal(finding.action, 'left-alone-nothing-verified-good');
+    assert.match(finding.note, /target content does not match the journaled manifest/);
+    assert.match(finding.note, /no staged original exists to fall back on|staged original itself no longer matches/);
+    assert.match(finding.note, new RegExp(src.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')), 'the report must name the affected paths so a human can recover by hand');
+
+    // A second recovery pass must be equally inert — refusing is stable,
+    // not just a one-time fluke.
+    const secondPass = recoverInterruptedMoves(home);
+    assert.deepEqual(snapshotData(), before);
+    assert.equal(secondPass.find(r => r.path === src).action, 'left-alone-nothing-verified-good');
   });
 });
