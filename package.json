@@ -7,11 +7,13 @@
     "ide-agent-kit": "./bin/cli.mjs",
     "ide-agent-kit-mcp": "./bin/iak-mcp.mjs",
     "iak-pending": "./bin/iak-pending.mjs",
-    "iak-scan-history": "./scripts/scan-history-for-secrets.mjs"
+    "iak-scan-history": "./scripts/scan-history-for-secrets.mjs",
+    "ide-agent-kit-model-tidy": "./bin/model-tidy.mjs"
   },
   "scripts": {
     "test": "node --test test/*.test.mjs packages/user-intent-kit/test/*.test.js",
     "scan:history": "node scripts/scan-history-for-secrets.mjs",
+    "model-tidy": "node bin/model-tidy.mjs",
     "start": "node bin/cli.mjs serve",
     "mcp": "node bin/iak-mcp.mjs",
     "relay": "node scripts/local-relay.mjs",

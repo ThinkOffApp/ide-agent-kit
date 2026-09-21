@@ -1,0 +1,20 @@
+[Unit]
+Description=model-tidy: plan (and optionally apply) idle-model cleanup
+Wants=network-online.target
+After=docker.service
+
+[Service]
+Type=oneshot
+# PLAN MODE ONLY by default — never moves, deletes, or symlinks anything.
+# To let the nightly timer actually move models, edit this line to add
+# "apply --apply --target /mnt/your-target" AFTER you have reviewed several
+# plan runs' output/logs yourself. Do not do this unattended on day one.
+ExecStart=/usr/bin/env node %h/ide-agent-kit/bin/model-tidy.mjs plan
+# Room reporting is opt-in and OFF here by default. To turn it on, add:
+#   --report-to-room --room thinkoff-development --config %h/ide-agent-kit/ide-agent-kit.json
+# to the ExecStart line above.
+Nice=19
+IOSchedulingClass=idle
+
+[Install]
+WantedBy=default.target

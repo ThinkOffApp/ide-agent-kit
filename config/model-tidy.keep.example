@@ -1,0 +1,16 @@
+# model-tidy KEEP list — example file, NOT active by default.
+#
+# One path or glob per line. Anything matching is never moved by
+# model-tidy, in either plan or apply mode. '#' starts a comment; blank
+# lines are ignored. A leading '~' is expanded to the home directory the
+# tool is run with (--home, or $HOME by default).
+#
+# To activate: copy this file to ~/.config/ide-agent-kit/model-tidy.keep
+# (the default --keep-file path) or pass --keep-file explicitly, then edit
+# it to match what you actually want kept.
+#
+# Seeded from the owner's notes (do not delete without petrus's word):
+~/models/glm53-flash-q6/UD-Q6_K_XL
+~/models/GLM-5.3-Flash-exl3-2.05bpw
+~/DeepSeek-v4.1-Flash-EXL3-2x-DGX-Sparks
+~/models/ltx-2.5

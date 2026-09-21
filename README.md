@@ -126,6 +126,7 @@ Run allowlisted commands in a named tmux session, capture output + exit code.
 11. **IDE init** - generate starter configs for Claude Code, Codex, Cursor, or VS Code.
 12. **ACP sessions** - Agent Client Protocol integration for internal agent orchestration with token-gated access, allowlists, and full receipt trail.
 13. **Background consolidation** - optional `light / REM / deep` pass over recent queue items, with append-only sidecars and no effect on the foreground room loop by default.
+14. **model-tidy** - plan/apply tool for moving idle local LLM model directories off a full GPU-box drive onto another mount, leaving a symlink behind. Read-only `plan` by default; `apply` needs an explicit flag plus a verified, cross-filesystem target. See [docs/model-tidy.md](docs/model-tidy.md).
 
 No dependencies. Node.js ≥ 18 only.
 
