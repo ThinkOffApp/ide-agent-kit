@@ -51,7 +51,7 @@ import {
   readdirSync, lstatSync, existsSync, readFileSync, readlinkSync,
   realpathSync, symlinkSync, rmSync, mkdirSync, copyFileSync, linkSync,
   statSync, appendFileSync, constants as FS_CONSTANTS, accessSync, renameSync,
-  openSync, writeSync, fsyncSync, closeSync, unlinkSync
+  openSync, writeSync, fsyncSync, closeSync, unlinkSync, readSync
 } from 'node:fs';
 import { join, relative, sep, isAbsolute } from 'node:path';
 import { createHash, randomBytes } from 'node:crypto';
@@ -293,6 +293,7 @@ export function matchesKeepList(path, keepEntries) {
  */
 export function findProcessUsers(path, opts = {}) {
   const procRoot = opts.procRoot || '/proc';
+  const doRealpath = opts.realpathSync || realpathSync; // test-only injection point for the exact fd-resolution boundary
   if (!existsSync(procRoot)) {
     return { checked: false, users: [], note: `${procRoot} not available (not Linux); process-in-use check skipped` };
   }
@@ -303,9 +304,10 @@ export function findProcessUsers(path, opts = {}) {
     return { checked: false, users: [], note: `cannot list ${procRoot}: ${e.message}` };
   }
   const users = [];
-  const unreadablePids = [];
+  const unreadable = []; // [{pid, code}] — every pid whose check could not be completed
   for (const pid of pids) {
-    let fdOk = true;
+    let pidErrorCode = null; // first non-ENOENT error code seen for this pid, if any
+
     try {
       const fdDir = join(procRoot, pid, 'fd');
       let fds;
@@ -315,26 +317,30 @@ export function findProcessUsers(path, opts = {}) {
         // ENOENT here means the process exited between the pid listing and
         // this read — a benign race, not a verification failure. Anything
         // else (EACCES/EPERM, or an unexpected error) means we genuinely
-        // could not check this pid's open files.
-        if (e.code !== 'ENOENT') fdOk = false;
+        // could not check this pid's open files, so this pid's check
+        // fails closed.
+        if (e.code !== 'ENOENT') pidErrorCode = e.code || 'UNKNOWN';
         fds = [];
       }
       for (const fd of fds) {
         try {
-          const target = realpathSync(join(fdDir, fd));
+          const target = doRealpath(join(fdDir, fd));
           if (target === path || target.startsWith(path + sep)) {
             users.push({ pid, via: 'fd', target });
             break;
           }
-        } catch {
-          // this one fd vanished mid-scan (ENOENT) — not a verification failure
+        } catch (e) {
+          // ENOENT: this one fd vanished mid-scan (closed, or the whole
+          // process exited) — a benign race, not a verification failure.
+          // EACCES/EPERM/anything else: we could not resolve this fd, so
+          // we cannot rule it out — fail this pid's check closed.
+          if (e.code !== 'ENOENT') pidErrorCode = pidErrorCode || e.code || 'UNKNOWN';
         }
       }
-    } catch {
-      fdOk = false;
+    } catch (e) {
+      pidErrorCode = pidErrorCode || e.code || 'UNKNOWN';
     }
 
-    let cmdlineOk = true;
     try {
       const cmdline = readFileSync(join(procRoot, pid, 'cmdline'), 'utf8').replace(/\0/g, ' ').trim();
       if (cmdline && cmdline.includes(path)) {
@@ -343,19 +349,19 @@ export function findProcessUsers(path, opts = {}) {
         users.push({ pid, via: 'cmdline', cmdline: cmdline.slice(0, 200), servingProcess });
       }
     } catch (e) {
-      if (e.code !== 'ENOENT') cmdlineOk = false;
+      if (e.code !== 'ENOENT') pidErrorCode = pidErrorCode || e.code || 'UNKNOWN';
     }
 
-    if (!fdOk || !cmdlineOk) unreadablePids.push(pid);
+    if (pidErrorCode) unreadable.push({ pid, code: pidErrorCode });
   }
 
-  if (unreadablePids.length > 0) {
-    const shown = unreadablePids.slice(0, 5).join(', ');
-    const more = unreadablePids.length > 5 ? `, +${unreadablePids.length - 5} more` : '';
+  if (unreadable.length > 0) {
+    const first = unreadable[0];
+    const more = unreadable.length > 1 ? ` (+${unreadable.length - 1} more pid(s) also unreadable)` : '';
     return {
       checked: false,
       users,
-      note: `could not read /proc for pid(s) ${shown}${more} (permission denied) — cannot rule out those processes using this path`
+      note: `${first.pid} ${first.code}${more} — cannot rule out ${unreadable.length === 1 ? 'that process' : 'those processes'} using this path`
     };
   }
   return { checked: true, users };
@@ -726,9 +732,33 @@ export function planRun(options = {}) {
 // Apply
 // ---------------------------------------------------------------------------
 
-function sha256File(path) {
+export const HASH_CHUNK_BYTES = 8 * 1024 * 1024; // 8 MiB — bounded memory regardless of file size
+
+/**
+ * SHA-256 of a file's content with BOUNDED memory: reads in fixed-size
+ * chunks via readSync into one reused buffer, never the whole file at
+ * once via readFileSync. Model shards are routinely multi-GiB
+ * (.safetensors/.gguf); loading one whole into a Buffer to hash it could
+ * exhaust memory or exceed Node's Buffer size limit on some builds. Every
+ * hashing call site in this file (manifest computation, manifest
+ * verification, and rsync-style copy verification) goes through this one
+ * function, so fixing it here fixes all of them.
+ */
+export function sha256File(path) {
   const hash = createHash('sha256');
-  hash.update(readFileSync(path));
+  const buffer = Buffer.allocUnsafe(HASH_CHUNK_BYTES);
+  const fd = openSync(path, 'r');
+  try {
+    let bytesRead;
+    do {
+      bytesRead = readSync(fd, buffer, 0, HASH_CHUNK_BYTES, null);
+      if (bytesRead > 0) {
+        hash.update(bytesRead === HASH_CHUNK_BYTES ? buffer : buffer.subarray(0, bytesRead));
+      }
+    } while (bytesRead > 0);
+  } finally {
+    closeSync(fd);
+  }
   return hash.digest('hex');
 }
 
@@ -1359,11 +1389,30 @@ function swapToSymlink(src, dst, opts = {}) {
   if (opts.beforeLink) opts.beforeLink(); // test-only hook: simulate a crash here
 
   doSymlink(dst, link);
-  const realLink = realpathSync(link);
-  if (realLink !== realpathSync(dst) || !lstatSync(link).isSymbolicLink()) {
-    rmSync(link, { recursive: true });
-    removeJournalRecord(journalDir, src);
-    throw new Error(`pre-swap symlink verification failed for ${link}`);
+  let preSwapVerified = false;
+  try {
+    preSwapVerified = lstatSync(link).isSymbolicLink() && realpathSync(link) === realpathSync(dst);
+  } catch {
+    preSwapVerified = false;
+  }
+  if (!preSwapVerified) {
+    // Clear the bad/half artifact at `link` — but only via the same
+    // verify-then-unlink guard every other removal in this file uses, in
+    // case `doSymlink` didn't actually create a symlink at all (e.g. a
+    // real directory ended up there instead): never rmSync/recursive on
+    // an assumption.
+    const unlinkResult = unlinkOwnedSymlink(link, dst);
+    if (unlinkResult.ok) {
+      removeJournalRecord(journalDir, src);
+      throw new Error(`pre-swap symlink verification failed for ${link}`);
+    }
+    const reason = `pre-swap symlink verification failed for ${link}, and it could not be safely removed: ${unlinkResult.reason}`;
+    try {
+      writeJournalRecordSync(journalDir, { ...base, step: 'failed', failureReason: reason });
+    } catch {
+      // best effort — the reason is still thrown below either way
+    }
+    throw new Error(reason);
   }
   writeJournalRecordSync(journalDir, { ...base, step: 'linked' });
   if (opts.afterLink) opts.afterLink(); // test-only hook: simulate a crash here

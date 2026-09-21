@@ -228,7 +228,9 @@ touch.
 
 `unlinkOwnedSymlink(path, expectedTargetPath)` is now the only way
 anything in this file removes a path it believes is one of its own
-symlinks. It never recurses:
+symlinks — including `swapToSymlink`'s own pre-swap cleanup when the
+freshly-created temp link fails its own verification (round 6 closed that
+fourth site the same way). It never recurses:
 
 1. `lstatSync(path)` — if the path doesn't exist, or isn't a symlink at
    all, **refuse**. Touch nothing.
@@ -294,15 +296,19 @@ parsed as a record.
      `ollama`, `mlx`, `text-generation`).
    **Fail-closed:** this check has to succeed for *every* pid on the box to
    count as verified. Off Linux (no `/proc`), if `/proc` itself can't be
-   listed, or if even one pid's `fd` directory or `cmdline` can't be read
-   (a permission failure, not the process simply having exited mid-scan —
-   that's a normal race and not a failure), the candidate is skipped with
-   `in-use status unverified: <why>` rather than treated as idle for lack
-   of evidence. In practice, on a typical non-root Linux host with other
-   users' or root's processes running, this makes the tool quite
-   conservative unless it runs with enough privilege to read every pid's
-   `/proc` entry — that is intentional: an unreadable process is exactly
-   the case where we cannot prove a model is idle.
+   listed, or if even one pid's `fd` directory, an individual fd's
+   `readlink`/`realpath`, or `cmdline` can't be read, the candidate is
+   skipped with `in-use status unverified: <pid> <error code>` rather than
+   treated as idle for lack of evidence. The one exception, at every one of
+   those read points: `ENOENT` specifically (the fd or process vanished
+   between being listed and being read) is a normal race, not a failure,
+   and is ignored — everything else (`EACCES`, `EPERM`, anything else) is
+   treated as "could not verify" and fails that pid's check closed. In
+   practice, on a typical non-root Linux host with other users' or root's
+   processes running, this makes the tool quite conservative unless it
+   runs with enough privilege to read every pid's `/proc` entry — that is
+   intentional: an unreadable process is exactly the case where we cannot
+   prove a model is idle.
 3. **Bind-mounted into (or containing) the bind-mount source of a running
    docker container, or unverifiable** — reads `docker inspect` of every
    running container's `Mounts`; a candidate is in use if it is at or under
@@ -485,17 +491,18 @@ it never attempts to install anything itself.
   `model-tidy`'s own user can read every relevant pid. This has not been
   checked against the real process list on either box, so it's unknown
   whether the tool would select anything at all there today.
-- Two findings from the automated Codex review are known and NOT addressed
-  in this pass (out of scope for the three defects above, tracked here
-  instead of silently dropped): (1) `verifyUnit`'s checksum step
-  (`sha256File`) reads each file whole via `readFileSync` rather than
-  streaming — for real multi-GiB `.safetensors`/`.gguf` shards this could
-  exhaust memory or exceed Node's Buffer limits, making `apply` fail at
-  the verify step for large real models even though the copy itself
-  succeeded; (2) there is no `lsof`-based fallback for the process-in-use
-  check, only `/proc`. `computeManifest`/`verifyManifest` (the journal's
-  own integrity check) have the exact same whole-file-`readFileSync`
-  property, so the same real-world risk applies there too.
+- One finding from the automated Codex review is known and NOT addressed in
+  this pass (out of scope, tracked here instead of silently dropped):
+  there is no `lsof`-based fallback for the process-in-use check, only
+  `/proc`. (The other Codex finding from that review — `sha256File`
+  reading whole files via `readFileSync` rather than streaming — was fixed
+  in round 6: it now hashes in bounded 8 MiB chunks via `readSync`, used
+  uniformly by manifest computation, manifest verification, and copy
+  verification. Tested against a file larger than the chunk size for
+  correctness, and with `Buffer.allocUnsafe`/`Buffer.alloc` instrumented to
+  assert no single allocation exceeds the chunk size — but never against
+  an actual multi-GiB model file on real hardware, only synthetic
+  multi-chunk files on this dev machine.)
 - The journal-based crash recovery (`recoverInterruptedMoves`, the
   `recover` subcommand) has only ever been exercised against synthetic
   fixtures with tiny files and a hard-killed child process on this dev

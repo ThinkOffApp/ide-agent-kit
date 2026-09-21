@@ -9,10 +9,11 @@ import {
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { spawnSync } from 'node:child_process';
-import { createHash } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import {
   planRun, applyRun, discoverCandidates, loadKeepList, computeHardlinkGroups,
-  validateTarget, copyUnitPureNode, recoverInterruptedMoves, detectInterruptedMoves
+  validateTarget, copyUnitPureNode, recoverInterruptedMoves, detectInterruptedMoves,
+  findProcessUsers, sha256File, HASH_CHUNK_BYTES
 } from '../src/model-tidy.mjs';
 
 const MODEL_TIDY_MODULE_URL = new URL('../src/model-tidy.mjs', import.meta.url).href;
@@ -1349,5 +1350,189 @@ describe('GAP 2: crash-safety across a hard process kill (not just a thrown exce
       assert.equal(lstatSync(src).isSymbolicLink(), true);
       assert.equal(readFileSync(join(src, 'weights.gguf'), 'utf8'), 'gap2-fixture-bytes'.repeat(50));
     });
+  });
+});
+
+describe('ROUND 6 ITEM 1: findProcessUsers fails closed on a real read-boundary error, not on every race', () => {
+  function buildFakeProcRoot() {
+    const procRoot = tempDir('model-tidy-fakeproc-');
+    mkdirSync(join(procRoot, '1234', 'fd'), { recursive: true });
+    writeFileSync(join(procRoot, '1234', 'fd', '3'), '');
+    writeFileSync(join(procRoot, '1234', 'cmdline'), 'unrelated-process\0--flag\0');
+    return procRoot;
+  }
+
+  it('ENOENT at the fd-resolution boundary (fd vanished mid-scan) is ignorable — checked stays true, candidate remains selectable', () => {
+    const procRoot = buildFakeProcRoot();
+    const result = findProcessUsers('/some/candidate/path', {
+      procRoot,
+      realpathSync: () => {
+        const e = new Error('no such file or directory');
+        e.code = 'ENOENT';
+        throw e;
+      }
+    });
+    assert.equal(result.checked, true, 'ENOENT at the fd boundary must not fail the check closed');
+    assert.equal(result.users.length, 0);
+  });
+
+  it('EACCES at the fd-resolution boundary marks that pid unverified and fails closed, naming the pid and the code', () => {
+    const procRoot = buildFakeProcRoot();
+    const result = findProcessUsers('/some/candidate/path', {
+      procRoot,
+      realpathSync: () => {
+        const e = new Error('permission denied');
+        e.code = 'EACCES';
+        throw e;
+      }
+    });
+    assert.equal(result.checked, false, 'EACCES at the fd boundary must fail the check closed');
+    assert.match(result.note, /1234/, 'the note must name the pid');
+    assert.match(result.note, /EACCES/, 'the note must name the error code');
+  });
+
+  it('positive control: with no read-boundary errors at all, the check completes normally', () => {
+    const procRoot = buildFakeProcRoot();
+    const result = findProcessUsers('/some/candidate/path', {
+      procRoot,
+      realpathSync: p => p // resolves to itself — never matches the candidate path, never throws
+    });
+    assert.equal(result.checked, true);
+    assert.equal(result.users.length, 0);
+  });
+
+  it('end-to-end: planRun skips the candidate with a reason naming the pid and code when the process check is unverified', () => {
+    const home = tempDir('model-tidy-r6-home-');
+    const src = join(home, 'models', 'idle');
+    mkdirSync(src, { recursive: true });
+    writeFileSync(join(src, 'weights.gguf'), 'x'.repeat(1024));
+    utimesSync(join(src, 'weights.gguf'), daysAgo(30), daysAgo(30));
+
+    const plan = planRun({
+      home,
+      minIdleDays: 14,
+      listProcessUsers: () => ({ checked: false, users: [], note: '4242 EACCES — cannot rule out that process using this path' }),
+      listDockerBindUsers: dockerNotInUse,
+      diskFreeBytes: fixedDiskFree
+    });
+    const skipped = plan.skipped.find(r => r.path === src);
+    assert.ok(skipped);
+    assert.match(skipped.reason, /in-use status unverified: 4242 EACCES/);
+  });
+});
+
+describe('ROUND 6 ITEM 2: sha256File hashes with bounded memory (streaming chunks), never a whole-file read', () => {
+  it('hashes a file LARGER than the chunk size identically to a whole-buffer digest', () => {
+    const dir = tempDir('model-tidy-hash-');
+    const file = join(dir, 'big.bin');
+    const size = HASH_CHUNK_BYTES + 3 * 1024 * 1024; // > 1 full chunk, plus a partial tail
+    const content = randomBytes(size);
+    writeFileSync(file, content);
+
+    const streamed = sha256File(file);
+    const wholeBuffer = createHash('sha256').update(content).digest('hex');
+    assert.equal(streamed, wholeBuffer, 'the chunked hash must exactly match the whole-buffer hash');
+  });
+
+  it('never allocates a buffer larger than the chunk size while hashing (proves bounded memory, not a hidden readFileSync)', () => {
+    const dir = tempDir('model-tidy-hash-');
+    const file = join(dir, 'big2.bin');
+    const size = HASH_CHUNK_BYTES * 2 + 12345; // several chunks, plus a partial tail
+    const content = randomBytes(size);
+    writeFileSync(file, content);
+
+    const originalAllocUnsafe = Buffer.allocUnsafe;
+    const originalAlloc = Buffer.alloc;
+    const seenSizes = [];
+    function guard(n) {
+      seenSizes.push(n);
+      if (n > HASH_CHUNK_BYTES) {
+        Buffer.allocUnsafe = originalAllocUnsafe;
+        Buffer.alloc = originalAlloc;
+        throw new Error(`sha256File allocated ${n} bytes, more than the ${HASH_CHUNK_BYTES}-byte chunk limit — it read some or all of the file into memory at once`);
+      }
+    }
+    Buffer.allocUnsafe = function (n) {
+      guard(n);
+      return originalAllocUnsafe.call(Buffer, n);
+    };
+    Buffer.alloc = function (n, ...rest) {
+      guard(n);
+      return originalAlloc.call(Buffer, n, ...rest);
+    };
+
+    let hash;
+    try {
+      hash = sha256File(file);
+    } finally {
+      Buffer.allocUnsafe = originalAllocUnsafe;
+      Buffer.alloc = originalAlloc;
+    }
+
+    assert.equal(hash, createHash('sha256').update(content).digest('hex'));
+    assert.ok(seenSizes.length >= 1, 'sanity: at least one allocation was observed');
+    assert.ok(seenSizes.every(n => n <= HASH_CHUNK_BYTES), `every allocation must be <= ${HASH_CHUNK_BYTES} bytes; saw ${JSON.stringify(seenSizes)}`);
+  });
+});
+
+describe('ROUND 6 ITEM 3: swapToSymlink pre-swap verification failure never recursively deletes an assumed symlink', () => {
+  it('sentinel test: symlinkFn creates a REAL DIRECTORY at the link path instead of a symlink — it and a sentinel file inside it survive, apply fails, and the journal record says failed', () => {
+    const home = tempDir('model-tidy-r6-item3-home-');
+    const target = tempDir('model-tidy-r6-item3-target-');
+    const src = join(home, 'models', 'idle');
+    mkdirSync(src, { recursive: true });
+    writeFileSync(join(src, 'weights.gguf'), 'r6-item3-bytes'.repeat(50));
+    utimesSync(join(src, 'weights.gguf'), daysAgo(30), daysAgo(30));
+
+    const plan = planRun({
+      home,
+      minIdleDays: 14,
+      listProcessUsers: noProcessUsers,
+      listDockerBindUsers: dockerNotInUse,
+      diskFreeBytes: fixedDiskFree
+    });
+    assert.ok(plan.selected.some(r => r.path === src));
+
+    const link = `${src}.tidy-link`;
+    const result = applyRun({
+      plan,
+      target,
+      home,
+      validateTarget: bypassCrossFsCheck,
+      symlinkFn: (dst, linkPath) => {
+        // Simulate something creating a real directory exactly where
+        // model-tidy expected to create — and, on verification failure,
+        // remove — its own symlink.
+        mkdirSync(linkPath, { recursive: true });
+        writeFileSync(join(linkPath, 'SENTINEL.txt'), 'do not delete me');
+      }
+    });
+
+    assert.equal(result.ok, false);
+    assert.equal(result.errors.length, 1);
+    assert.equal(result.errors[0].step, 'swap');
+    assert.match(result.errors[0].error, /pre-swap symlink verification failed/);
+    assert.match(result.errors[0].error, /could not be safely removed/);
+
+    // The directory and its sentinel file must survive, completely
+    // untouched — never rmSync'd.
+    assert.equal(existsSync(link), true);
+    assert.equal(lstatSync(link).isSymbolicLink(), false);
+    assert.equal(existsSync(join(link, 'SENTINEL.txt')), true);
+    assert.equal(readFileSync(join(link, 'SENTINEL.txt'), 'utf8'), 'do not delete me');
+
+    // The original source itself must also be untouched — swapToSymlink
+    // never got past the pre-swap step, so nothing was ever renamed away.
+    assert.equal(existsSync(src), true);
+    assert.equal(lstatSync(src).isSymbolicLink(), false);
+    assert.equal(readFileSync(join(src, 'weights.gguf'), 'utf8'), 'r6-item3-bytes'.repeat(50));
+
+    // The journal record must say failed, not be silently cleared.
+    const journalDir = join(home, '.cache', 'ide-agent-kit', 'model-tidy-journal');
+    const names = readdirSync(journalDir).filter(n => n.endsWith('.json'));
+    assert.equal(names.length, 1);
+    const record = JSON.parse(readFileSync(join(journalDir, names[0]), 'utf8'));
+    assert.equal(record.step, 'failed');
+    assert.match(record.failureReason, /could not be safely removed/);
   });
 });
