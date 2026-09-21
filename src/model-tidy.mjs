@@ -1829,23 +1829,30 @@ export function applyRun(options) {
   const journalRenameSync = options.journalRenameSync;
   const journalPlatform = options.platform;
 
+  // GAP (round 8): this preflight MUST run before recoverFn below, not
+  // after. Recovery is itself a mutation (it promotes valid interrupted
+  // units to symlinks and deletes their staged originals), and the whole
+  // point of this check is a GLOBAL refusal to mutate anything at all
+  // while any journal file's content can't be trusted — including units
+  // that recovery would otherwise have happily fixed. Running it after
+  // recovery meant apply could report "unresolved journal state, refusing"
+  // while having already mutated a perfectly valid unit moments earlier.
+  // recoverInterruptedMoves never touches an unreadable/corrupt record
+  // either way (it always reports and leaves those alone), so the set of
+  // unreadable files this check sees is identical whether it runs before
+  // or after recovery — only WHEN it's allowed to act differs.
+  const preflightUnreadable = listJournalRecords(journalDir).filter(r => r.corrupt || !r.record);
+  if (preflightUnreadable.length > 0) {
+    const files = preflightUnreadable.map(r => r.file);
+    const reason = `unresolved journal state: ${files.join(', ')}; run recover, or resolve by hand`;
+    return { ok: false, error: reason, moved: [], errors: [{ error: reason }], recovered: [] };
+  }
+
   // Self-heal any interrupted swap from a previous crash before this run's
   // own pre-checks and copy/verify/swap loop — see recoverInterruptedMoves.
-  // Only reached here, in apply, never from planRun.
+  // Only reached here, in apply, never from planRun. Only reached at all
+  // once the preflight above confirms every journal file is trustworthy.
   const recovered = recoverFn(home, { journalDir, journalFsyncSync, journalRenameSync, platform: journalPlatform });
-
-  // GAP 1 (round 6): recovery above deliberately leaves any unreadable or
-  // stray journal file alone rather than guess at it. apply must not
-  // proceed AT ALL while that's true — not just for whatever unit it
-  // might belong to, but globally, since an unreadable record's content
-  // can't tell us what it was protecting. This check runs before any
-  // mutation (before even --target validation).
-  const remainingUnreadable = listJournalRecords(journalDir).filter(r => r.corrupt || !r.record);
-  if (remainingUnreadable.length > 0) {
-    const files = remainingUnreadable.map(r => r.file);
-    const reason = `unresolved journal state: ${files.join(', ')}; run recover, or resolve by hand`;
-    return { ok: false, error: reason, moved: [], errors: [{ error: reason }], recovered };
-  }
 
   const validation = validateTargetFn(target, home);
   if (!validation.ok) {

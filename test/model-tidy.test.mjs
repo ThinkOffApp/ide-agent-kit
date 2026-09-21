@@ -1763,3 +1763,133 @@ describe('ROUND 7', () => {
     });
   });
 });
+
+describe('ROUND 8: the unresolved-journal preflight must run BEFORE any automatic recovery, not after', () => {
+  function journalDirFor(home) {
+    return join(home, '.cache', 'ide-agent-kit', 'model-tidy-journal');
+  }
+  function buildIdleFixture(prefix) {
+    const home = tempDir(prefix || 'model-tidy-r8-home-');
+    const src = join(home, 'models', 'idle');
+    mkdirSync(src, { recursive: true });
+    writeFileSync(join(src, 'weights.gguf'), 'GOOD');
+    utimesSync(join(src, 'weights.gguf'), new Date(0), new Date(0));
+    return { home, src };
+  }
+  function opts(home) {
+    return {
+      home,
+      listProcessUsers: () => ({ checked: true, users: [] }),
+      listDockerBindUsers: () => ({ available: true, inUse: false, containers: [] }),
+      diskFreeBytes: () => 0
+    };
+  }
+  function snapshotTree(root) {
+    const snap = {};
+    function recurse(dir) {
+      for (const name of readdirSync(dir)) {
+        const full = join(dir, name);
+        const lst = lstatSync(full);
+        if (lst.isSymbolicLink()) {
+          snap[full] = { type: 'symlink', linkTarget: readlinkSync(full) };
+        } else if (lst.isDirectory()) {
+          recurse(full);
+        } else if (lst.isFile()) {
+          snap[full] = { type: 'file', size: lst.size, sha256: createHash('sha256').update(readFileSync(full)).digest('hex') };
+        }
+      }
+    }
+    recurse(root);
+    return snap;
+  }
+  /** Build the mixed fixture: one VALID interrupted unit (afterStage, so
+   * its staging exists and its source is currently missing) plus one
+   * completely unrelated, unreadable journal file (empty unknown.json). */
+  function buildMixedFixture() {
+    const { home, src } = buildIdleFixture('model-tidy-r8-mixed-home-');
+    const target = tempDir('model-tidy-r8-mixed-target-');
+    const o = opts(home);
+    const interrupted = applyRun({
+      home, target, plan: planRun(o), validateTarget: () => ({ ok: true }),
+      afterStage: () => { throw new Error('fixture interruption'); }
+    });
+    assert.equal(interrupted.ok, false, 'sanity: the fixture interruption must have happened');
+    const journalDir = journalDirFor(home);
+    writeFileSync(join(journalDir, 'unknown.json'), '');
+    return { home, src, target, o };
+  }
+
+  it("codexmb's probe verbatim: apply on a mixed fixture (one valid afterStage interruption + one empty unknown.json) refuses with the unresolved-journal error, and the full tree is byte-identical before/after — the valid unit's staging is still present and its source is not yet a symlink", () => {
+    const { home, src, target, o } = buildMixedFixture();
+    const staging = `${src}.tidy-moving`;
+    assert.equal(existsSync(src), false, 'sanity: the valid unit is mid-swap, source currently missing');
+    assert.equal(existsSync(staging), true, 'sanity: its staged original is present');
+
+    const before = snapshotTree(home);
+
+    const result = applyRun({ home, target, plan: planRun(o), validateTarget: () => ({ ok: true }) });
+
+    assert.equal(result.ok, false);
+    assert.match(result.error, /unresolved journal state/);
+    assert.deepEqual(result.recovered, [], 'apply must not have run any recovery at all — not even for the valid unit');
+
+    assert.deepEqual(snapshotTree(home), before, 'the ENTIRE tree, including the valid interrupted unit, must be byte-identical before and after — apply touched nothing');
+    assert.equal(existsSync(src), false, 'the valid unit must still be mid-swap: source still missing');
+    assert.equal(existsSync(staging), true, 'the valid unit\'s staged original must still be present, not deleted');
+  });
+
+  it('the lone-corrupt case (no valid interrupted unit at all) still refuses', () => {
+    const { home } = buildIdleFixture('model-tidy-r8-lone-home-');
+    const target = tempDir('model-tidy-r8-lone-target-');
+    const journalDir = journalDirFor(home);
+    mkdirSync(journalDir, { recursive: true });
+    writeFileSync(join(journalDir, 'unknown.json'), '');
+
+    const plan = planRun(opts(home));
+    const result = applyRun({ home, target, plan, validateTarget: () => ({ ok: true }) });
+
+    assert.equal(result.ok, false);
+    assert.match(result.error, /unresolved journal state/);
+    assert.deepEqual(result.recovered, []);
+  });
+
+  it('positive control: a valid interruption with NO unreadable records still recovers and proceeds normally', () => {
+    const { home, src } = buildIdleFixture('model-tidy-r8-positive-home-');
+    const target = tempDir('model-tidy-r8-positive-target-');
+    const o = opts(home);
+    const interrupted = applyRun({
+      home, target, plan: planRun(o), validateTarget: () => ({ ok: true }),
+      afterStage: () => { throw new Error('fixture interruption'); }
+    });
+    assert.equal(interrupted.ok, false);
+    assert.equal(existsSync(src), false);
+
+    // No corrupt/unreadable journal file this time — just re-run apply.
+    const result = applyRun({ home, target, plan: planRun(o), validateTarget: () => ({ ok: true }) });
+
+    assert.equal(result.ok, true, JSON.stringify(result.errors));
+    assert.equal(result.recovered.length, 1);
+    assert.equal(result.recovered[0].action, 'completed-swap-and-cleaned');
+    assert.equal(existsSync(src), true);
+    assert.equal(lstatSync(src).isSymbolicLink(), true);
+  });
+
+  it("recover (the explicit subcommand's underlying function) on the mixed fixture heals the valid unit and reports the unreadable one — recover's own behavior is unchanged by this fix", () => {
+    const { home, src } = buildMixedFixture();
+    const staging = `${src}.tidy-moving`;
+
+    const recovered = recoverInterruptedMoves(home);
+
+    const validFinding = recovered.find(r => r.path === src);
+    assert.ok(validFinding, 'the valid unit must be reported');
+    assert.equal(validFinding.action, 'completed-swap-and-cleaned');
+    assert.equal(existsSync(src), true);
+    assert.equal(lstatSync(src).isSymbolicLink(), true);
+    assert.equal(existsSync(staging), false);
+
+    const unreadableFinding = recovered.find(r => r.journalFile && r.journalFile.endsWith('unknown.json'));
+    assert.ok(unreadableFinding, 'the unreadable record must be reported too');
+    assert.equal(unreadableFinding.action, 'left-alone');
+    assert.match(unreadableFinding.note, /unreadable/);
+  });
+});

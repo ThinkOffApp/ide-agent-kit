@@ -299,12 +299,18 @@ record's filename against it:
   `plan` refuses to select **anything** this run, reporting exactly why
   (`globalJournalBlockReason`, and `REFUSING TO SELECT ANYTHING THIS RUN`
   in the summary line) rather than guess. `apply` enforces the same rule
-  even more strictly: after its own recovery pass, if any unreadable or
-  stray journal file remains, it refuses to touch anything at all —
-  `unresolved journal state: <files>; run recover, or resolve by hand` —
-  before validating `--target`, before copying, before anything. `recover`
-  itself never guesses either: an unreadable record is reported and both
-  it and every path it might touch are left alone.
+  even more strictly, and — after a review round found the ordering itself
+  was a bug — checks it **first**: before its own automatic recovery pass,
+  before validating `--target`, before copying, before anything. If any
+  unreadable or stray journal file exists, `apply` refuses the *entire*
+  run — `unresolved journal state: <files>; run recover, or resolve by
+  hand` — without running recovery at all, so it never mutates so much as
+  one otherwise-valid interrupted unit while any journal file's content
+  can't be trusted. **`apply` refuses globally on any unreadable journal;
+  `recover` heals what it can and reports the rest** — the explicit
+  `recover` subcommand still recovers every valid journaled unit it finds
+  in the same run, reporting (never touching) any unreadable one
+  alongside them.
 
 ## Selection rules (in order, each with an explicit reason string)
 
