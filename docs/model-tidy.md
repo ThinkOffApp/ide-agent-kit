@@ -61,6 +61,24 @@ Prints, for every discovered candidate:
 "free before -> ~free after" estimate, and writes a JSON record to the log
 dir (`--log-dir`, default `~/.cache/ide-agent-kit/model-tidy-logs/`).
 
+**`plan` makes zero filesystem writes, full stop** — including when it
+finds a unit left mid-swap by an interrupted `apply`. It reports that as
+an "interrupted move found" skip (see "Crash safety" below) and moves on;
+resolving it is `recover`'s job, not `plan`'s.
+
+### `recover` — explicit, mutating, journal-validated
+
+```
+node bin/model-tidy.mjs recover [--home <dir>] [--json]
+```
+
+Heals units left mid-swap by an interrupted `apply` (a crash, a kill, a
+power loss). Acts **only** on units that have a matching journal record
+whose manifest still matches what's on disk; a directory merely *named*
+like a leftover, with no journal record, is reported and left alone. Safe
+to run any time, including against a fully healthy tree (a no-op). See
+"Crash safety" below for exactly what it checks and does.
+
 ### `apply` — only with `--apply --target </mount/path>`
 
 ```
@@ -74,36 +92,96 @@ Refuses immediately, before touching anything, unless `--target`:
   `stat().dev`, not by path string — a bind mount of the same device would
   still be refused)
 
-For each selected unit (a single directory, or a whole hardlink set moved
-together):
-0. Refuse if a `<source>.tidy-moving` directory already exists (see step 3)
-   — that means a previous `apply` was interrupted mid-swap for this unit,
-   and this run will not guess which of the two paths is authoritative.
-1. Copy every file into `--target`, preserving the relative-to-home path,
-   symlinks, and hardlink relationships.
-2. Verify every file: same relative paths, same symlink targets, same byte
-   size AND SHA-256 for every regular file.
-3. Only if verification passed for every file in the unit, swap the source
-   for a symlink via a crash-safe staged sequence:
-   `rename(source, source + '.tidy-moving')` (atomic on the same
-   filesystem) → `symlink(target-copy, source)` → verify the symlink
-   resolves (`realpathSync`) to the target copy → remove
-   `source + '.tidy-moving'`.
-4. If anything in step 3 fails after the rename, the symlink (if partially
-   created) is removed and `source + '.tidy-moving'` is renamed straight
-   back to `source`, so the unit ends up exactly as it started.
+`plan` is **read-only** — it never mutates anything, including when it
+finds a unit left mid-swap by a previous interrupted `apply`. It only
+*detects* that state (via the journal — see "Crash safety" below) and
+*reports* it per unit as skipped, with reason `"interrupted move found:
+..."`; it never touches the filesystem to fix it. Only two things ever run
+recovery: the explicit `model-tidy recover` subcommand, and `apply` itself
+(once, at its own start — reached only because `--apply` was actually
+given).
 
-**The safety claim is: a failure at any step leaves a unit's source EITHER
-with its original completely untouched (any failure in steps 0-2, or a
-step-3 failure that rolled back) OR with a working symlink to a verified
-copy (a step-3 swap that completed) — never neither, and never deleted
-without a verified copy existing both at the target and reachable through
-the symlink.** A failure for one unit does not roll back units that already
-succeeded earlier in the same run, but the process still exits non-zero and
-prints exactly which unit failed, at which step, and why.
+For each selected unit (a single directory, or a whole hardlink set moved
+together), `apply`:
+0. Refuses the whole run if a unit's journal record shows it's already
+   mid-swap in a way this run's own recovery pass (see below) couldn't
+   validate and resolve — that means an ambiguous leftover, and this run
+   will not guess which state is authoritative.
+1. Copies every file into `--target`, preserving the relative-to-home path,
+   symlinks, and hardlink relationships.
+2. Verifies every file: same relative paths, same symlink targets, same
+   byte size AND SHA-256 for every regular file.
+3. Only if verification passed for every file in the unit, swaps the
+   source for a symlink via the journaled, crash-safe sequence below.
+
+### Crash safety
+
+A plain "delete, then create the symlink" has a window where a **hard**
+crash — SIGKILL, an OOM kill, a power loss; anything a JS `try/catch`
+cannot intercept, unlike a thrown exception — leaves neither the original
+nor a symlink at the source path. Every path that referenced the model
+breaks, and nothing in the same process ever gets a chance to roll back.
+
+**Before touching a unit at all**, `apply` writes a journal record — JSON,
+one file per unit (named by a hash of the source path), under
+`<home>/.cache/ide-agent-kit/model-tidy-journal/`, written with an
+explicit `fsync` so it survives a crash immediately after the write
+returns. The record holds the source/staged/temp-link/target paths, the
+already-computed per-file size+SHA-256 manifest, and the step reached. It
+is rewritten (and re-fsynced) after every subsequent step:
+
+| Step written | What happens next |
+| --- | --- |
+| `pending` | build `<source>.tidy-link -> target-copy`; verify it resolves and matches the manifest. **The source itself is not touched by anything up to and including this step** — a crash here leaves the source exactly as it was. |
+| `linked` | `renameSync(source, source + '.tidy-moving')` — atomic. |
+| `staged` | `renameSync(source + '.tidy-link', source)` — atomic, run immediately after the previous rename. |
+| `swapped` | re-verify the symlink at `source` resolves to the target copy, then remove `source + '.tidy-moving'` and the journal record. |
+
+**The safety claim, exactly:** the original data is preserved and
+recoverable at every step; the original path is unavailable for the
+instant between the two renames, and until recovery runs if a crash lands
+there. It is not continuously available — that instant is real and the
+tests below cover it, not just the steps either side of it.
+
+Interrupted moves are **not** recovered automatically by `plan` or by the
+passage of time. They are recovered by `model-tidy recover` (or by the
+next `apply`, which runs the same recovery at its own start). Recovery is
+**journal-driven, not naming-driven**: it reads every journal record,
+checks that whichever of {source, staged copy} currently exists on disk
+still matches that record's manifest, and only then acts:
+
+| Journaled state found | Recovery action |
+| --- | --- |
+| staged exists, source missing, temp link exists | rename the link into place, verify, then remove staged and the journal record — the link was already verified before it was ever created, so completing it is safe |
+| staged exists, source missing, no temp link | rename staged back to source, remove the journal record — no verified pending swap existed to trust instead |
+| staged exists, source is a symlink | the swap itself already completed; re-verify the symlink target, then remove staged and the journal record |
+| temp link exists, source is a real directory, no staged | crashed before source was ever touched; remove the stray link and the journal record |
+| source is a symlink, no staged | the move had already fully completed; just remove the stale journal record |
+| source is a real directory, nothing else exists | never touched at all; remove the stale journal record |
+| manifest mismatch against whatever currently exists | **left alone**, reported, regardless of step |
+
+A `*.tidy-moving` or `*.tidy-link` directory with **no matching journal
+record at all** is reported but never touched, no matter how it's named —
+recovery does not treat a name as ownership. A failure for one unit does
+not roll back units that already succeeded earlier in the same `apply`
+run, but the process still exits non-zero and prints exactly which unit
+failed, at which step, and why.
 
 ## Selection rules (in order, each with an explicit reason string)
 
+0. **Interrupted move found** — highest priority, checked before anything
+   else. If the journal (see "Crash safety" above) shows this unit is
+   mid-swap from a previous interrupted `apply`, it is skipped with
+   `interrupted move found: <details>` and never selected, regardless of
+   any other rule. `plan` only reports this; run `recover` to resolve it.
+0.5. **Hardlink completeness** — also checked before KEEP/process/docker/
+   etc. If any file's `st_nlink` exceeds the number of links this scan
+   actually found under every discovered candidate root, the candidate is
+   skipped with `hardlinked N times, only M links found under scanned
+   roots; refusing incomplete set`. A hardlink partner can sit entirely
+   outside every discovered root (e.g. a manual backup copy directly under
+   `$HOME`, above `~/models`) — no amount of scanning wider closes this in
+   general, only comparing against `st_nlink` does.
 1. **KEEP list** — anything matching `--keep-file` (path or glob, `~`
    expanded, `#` comments) is always skipped. See
    `config/model-tidy.keep.example`.
@@ -210,7 +288,9 @@ it never attempts to install anything itself.
 
 ## Safety invariants
 
-- `plan` mode makes zero filesystem writes anywhere. It's the default.
+- `plan` makes zero filesystem writes, ever — including for interrupted
+  moves, which it only detects and reports. Only `recover` and `apply`
+  (once, at its own start) mutate anything.
 - `apply` requires both `--apply` AND `--target <path>` — neither alone is
   enough.
 - `--target` must be an absolute, existing, writable directory on a
@@ -219,18 +299,25 @@ it never attempts to install anything itself.
 - A source directory's original copy is only ever removed after (a) its
   copy has been verified byte-for-byte (size + SHA-256) at the target, and
   (b) the replacement symlink at the source has itself been created and
-  verified to resolve to that copy. There is no code path that removes the
-  original before both of those have happened — see the staged
-  rename/symlink/verify/cleanup sequence above. A crash between the rename
-  and the final cleanup leaves a `<source>.tidy-moving` directory, which a
-  later `apply` run detects and refuses to touch until it's resolved by
-  hand.
+  verified to resolve to that copy. **Exact claim: the original data is
+  preserved and recoverable at every step; the original path is
+  unavailable for the instant between the two renames, and until recovery
+  runs if a crash lands there. It is not continuously available.**
+- Recovery is journal-driven, not naming-driven: it only acts on a unit
+  whose on-disk state (source and/or staged copy, whichever exist) matches
+  the manifest recorded in that unit's own journal file. A directory named
+  like a leftover with no matching journal record — or a journaled unit
+  whose content has since changed — is reported and left alone, never
+  guessed at.
 - A hardlink set moves as a unit or not at all — never partially — and the
   hardlink scan covers every discovered model root, not just the ones that
-  already passed every other rule.
+  already passed every other rule. It also refuses a candidate whose
+  `st_nlink` exceeds the number of links actually found under the scanned
+  roots — a hardlink partner can sit entirely outside every discovered
+  candidate, where no amount of scanning wider would find it.
 - Process- and docker-in-use checks are fail-closed: anything that could
   not be fully verified is treated as in-use, never as idle.
-- KEEP-listed paths are never touched by either mode.
+- KEEP-listed paths are never touched by any mode.
 - `--report-to-room` and any nightly `apply` are both opt-in and off by
   default.
 
@@ -280,4 +367,16 @@ it never attempts to install anything itself.
   exhaust memory or exceed Node's Buffer limits, making `apply` fail at
   the verify step for large real models even though the copy itself
   succeeded; (2) there is no `lsof`-based fallback for the process-in-use
-  check, only `/proc`.
+  check, only `/proc`. `computeManifest`/`verifyManifest` (the journal's
+  own integrity check) have the exact same whole-file-`readFileSync`
+  property, so the same real-world risk applies there too.
+- The journal-based crash recovery (`recoverInterruptedMoves`, the
+  `recover` subcommand) has only ever been exercised against synthetic
+  fixtures with tiny files and a hard-killed child process on this dev
+  machine (macOS). It has never been exercised against a real interrupted
+  `apply` on asus1/asus2, against a multi-GiB real model, or against a
+  genuinely full disk (an `ENOSPC` mid-copy, mid-rename, or mid-journal-
+  write is untested). The journal directory
+  (`<home>/.cache/ide-agent-kit/model-tidy-journal/`) itself is assumed to
+  be on the same filesystem as `--home` and writable; that assumption is
+  untested on either box.

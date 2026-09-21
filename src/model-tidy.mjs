@@ -50,7 +50,8 @@ import { spawnSync } from 'node:child_process';
 import {
   readdirSync, lstatSync, existsSync, readFileSync, readlinkSync,
   realpathSync, symlinkSync, rmSync, mkdirSync, copyFileSync, linkSync,
-  statSync, appendFileSync, constants as FS_CONSTANTS, accessSync, renameSync
+  statSync, appendFileSync, constants as FS_CONSTANTS, accessSync, renameSync,
+  openSync, writeSync, fsyncSync, closeSync
 } from 'node:fs';
 import { join, relative, sep, isAbsolute } from 'node:path';
 import { createHash } from 'node:crypto';
@@ -99,7 +100,7 @@ export function walkFiles(root) {
         continue;
       }
       if (st.isFile()) {
-        results.push({ path: full, size: st.size, mtimeMs: st.mtimeMs, dev: st.dev, ino: st.ino });
+        results.push({ path: full, size: st.size, mtimeMs: st.mtimeMs, dev: st.dev, ino: st.ino, nlink: st.nlink });
       }
     }
   }
@@ -177,6 +178,7 @@ export function discoverCandidates(home) {
   const hfHub = join(home, '.cache', 'huggingface', 'hub');
   if (existsSync(hfHub)) {
     for (const entry of safeReaddir(hfHub)) {
+      if (isJournalSuffixed(entry)) continue;
       if (entry.startsWith('models--')) {
         add(join(hfHub, entry), 'hf-cache');
       }
@@ -186,12 +188,14 @@ export function discoverCandidates(home) {
   const modelsDir = join(home, 'models');
   if (existsSync(modelsDir)) {
     for (const entry of safeReaddir(modelsDir)) {
+      if (isJournalSuffixed(entry)) continue;
       add(join(modelsDir, entry), 'models-dir');
     }
   }
 
   for (const entry of safeReaddir(home)) {
     if (entry.startsWith('.')) continue;
+    if (isJournalSuffixed(entry)) continue;
     if (AD_HOC_EXCLUDE.has(entry)) continue;
     const full = join(home, entry);
     let st;
@@ -207,6 +211,7 @@ export function discoverCandidates(home) {
     }
     // one level deep: e.g. ~/GLM-5.3-Flash-EXL3-2x-DGX-Sparks/model
     for (const child of safeReaddir(full)) {
+      if (isJournalSuffixed(child)) continue;
       const childFull = join(full, child);
       let cst;
       try {
@@ -410,6 +415,8 @@ export function findDockerBindUsers(path, opts = {}) {
 export function computeHardlinkGroups(candidates) {
   const filesByCandidate = new Map();
   const inodeMap = new Map(); // "dev:ino" -> Set(candidateId)
+  const inodeObservedCount = new Map(); // "dev:ino" -> how many file entries we actually found
+  const inodeNlink = new Map(); // "dev:ino" -> st_nlink reported by the filesystem
 
   for (const c of candidates) {
     const files = walkFiles(c.path);
@@ -418,6 +425,35 @@ export function computeHardlinkGroups(candidates) {
       const key = `${f.dev}:${f.ino}`;
       if (!inodeMap.has(key)) inodeMap.set(key, new Set());
       inodeMap.get(key).add(c.id);
+      inodeObservedCount.set(key, (inodeObservedCount.get(key) || 0) + 1);
+      inodeNlink.set(key, f.nlink);
+    }
+  }
+
+  // Scanning wider cannot fully close this gap: st_nlink tells us how many
+  // directory entries point at this inode SYSTEM-WIDE, including ones
+  // completely outside any discovered candidate root (e.g. a manual backup
+  // hardlink sitting directly under $HOME, above ~/models). If the number
+  // of entries we actually found while walking the discovered candidates
+  // is less than st_nlink, there is at least one more link we cannot see
+  // and therefore cannot move safely — moving what we CAN see would still
+  // break the invisible link and double disk usage. Every candidate that
+  // owns such a file is flagged incomplete here; planRun turns this into a
+  // skip reason with top priority, before any other rule.
+  const incompleteReasonByCandidate = new Map();
+  for (const c of candidates) {
+    if (incompleteReasonByCandidate.has(c.id)) continue;
+    for (const f of filesByCandidate.get(c.id)) {
+      const key = `${f.dev}:${f.ino}`;
+      const observed = inodeObservedCount.get(key);
+      const nlink = inodeNlink.get(key);
+      if (nlink > observed) {
+        incompleteReasonByCandidate.set(
+          c.id,
+          `hardlinked ${nlink} times, only ${observed} links found under scanned roots; refusing incomplete set`
+        );
+        break;
+      }
     }
   }
 
@@ -463,7 +499,7 @@ export function computeHardlinkGroups(candidates) {
     groupSizeBytes.set(g, total);
   }
 
-  return { groupOf: id => find(id), groupMembers, groupSizeBytes, filesByCandidate };
+  return { groupOf: id => find(id), groupMembers, groupSizeBytes, filesByCandidate, incompleteReasonByCandidate };
 }
 
 // ---------------------------------------------------------------------------
@@ -497,15 +533,29 @@ export function planRun(options = {}) {
   const listDockerBindUsers = options.listDockerBindUsers || findDockerBindUsers;
   const getDiskFreeBytes = options.diskFreeBytes || diskFreeBytes;
   const nowMs = options.now ? options.now.getTime() : Date.now();
+  const journalDir = options.journalDir || defaultJournalDir(home);
+
+  // plan is READ-ONLY: it only DETECTS an interrupted apply from a previous
+  // crash (via the journal) and reports it per unit below — it never
+  // mutates anything. Only the explicit `recover` subcommand, or `apply`
+  // itself, actually heals interrupted state.
+  const detectFn = options.detect || detectInterruptedMoves;
+  const interrupted = detectFn(home, { journalDir });
+  const interruptedByPath = new Map(interrupted.filter(f => f.path).map(f => [f.path, f]));
 
   const rawCandidates = options.candidates || discoverCandidates(home);
-  const { groupOf, groupMembers, groupSizeBytes, filesByCandidate } = computeHardlinkGroups(rawCandidates);
+  const { groupOf, groupMembers, groupSizeBytes, filesByCandidate, incompleteReasonByCandidate } = computeHardlinkGroups(rawCandidates);
 
   const perCandidate = new Map();
   for (const c of rawCandidates) {
     let skipReason = null;
 
-    if (matchesKeepList(c.path, keepEntries)) {
+    // Rule 0, highest priority: a hardlink whose partner is invisible to
+    // this scan (outside every discovered candidate root) is a filesystem
+    // fact, not a policy choice — check it before KEEP/process/docker/etc.
+    if (incompleteReasonByCandidate.has(c.id)) {
+      skipReason = incompleteReasonByCandidate.get(c.id);
+    } else if (matchesKeepList(c.path, keepEntries)) {
       skipReason = 'on KEEP list';
     } else if (isSymlink(c.path)) {
       skipReason = 'already a symlink (tidied)';
@@ -607,6 +657,32 @@ export function planRun(options = {}) {
     }
   }
 
+  // An interrupted move takes absolute priority over every other rule: it
+  // is a filesystem fact discovered from the journal, not a policy choice,
+  // and this unit must never be selected until 'recover' resolves it.
+  // Override any existing result for this path, or synthesize one if the
+  // unit's real directory is currently missing (mid-swap) so discovery
+  // never saw it at all.
+  for (const finding of interruptedByPath.values()) {
+    const existingIdx = results.findIndex(r => r.path === finding.path);
+    const reason = `interrupted move found: ${finding.note}`;
+    if (existingIdx >= 0) {
+      results[existingIdx].selected = false;
+      results[existingIdx].reason = reason;
+    } else {
+      results.push({
+        id: finding.path,
+        path: finding.path,
+        kind: 'interrupted',
+        sizeBytes: 0,
+        groupId: finding.path,
+        groupSizeBytes: 0,
+        selected: false,
+        reason
+      });
+    }
+  }
+
   results.sort((a, b) => b.groupSizeBytes - a.groupSizeBytes || a.path.localeCompare(b.path));
 
   const selected = results.filter(r => r.selected);
@@ -622,14 +698,18 @@ export function planRun(options = {}) {
     ? 'free before/after: unknown (df unavailable)'
     : `free before/after: ${(freeBeforeBytes / 2 ** 30).toFixed(1)} GiB -> ~${(freeAfterEstimateBytes / 2 ** 30).toFixed(1)} GiB`;
 
+  const interruptedLine = interrupted.length > 0
+    ? ` ${interrupted.length} interrupted-move finding(s) detected (never mutated by plan — run 'recover' to resolve).`
+    : '';
   const summaryLine = `model-tidy plan: ${selected.length} dir(s) in ${selectedGroupIds.size} unit(s), ` +
     `${(totalSelectedBytes / 2 ** 30).toFixed(1)} GiB movable to target, ${skipped.length} skipped ` +
-    `(${unverifiedCount} unverified). ${freeLine}`;
+    `(${unverifiedCount} unverified). ${freeLine}${interruptedLine}`;
 
   return {
     home,
     minIdleDays,
     maxGb,
+    interrupted,
     selected,
     skipped,
     totalSelectedBytes,
@@ -778,60 +858,390 @@ export function validateTarget(target, home) {
 }
 
 const STAGING_SUFFIX = '.tidy-moving';
+const LINK_SUFFIX = '.tidy-link';
+const JOURNAL_SUBDIR = 'model-tidy-journal';
+
+function isJournalSuffixed(name) {
+  return name.endsWith(STAGING_SUFFIX) || name.endsWith(LINK_SUFFIX);
+}
+
+function defaultJournalDir(home) {
+  return join(home, '.cache', 'ide-agent-kit', JOURNAL_SUBDIR);
+}
+
+function journalKey(sourcePath) {
+  return createHash('sha256').update(sourcePath).digest('hex');
+}
+
+function journalFilePath(journalDir, sourcePath) {
+  return join(journalDir, `${journalKey(sourcePath)}.json`);
+}
 
 /**
- * Swap one source directory for a symlink to its already-verified copy,
- * crash-safely:
+ * Write (or overwrite) the journal record for one unit, fsynced so it
+ * survives a crash immediately after this call returns. Called BEFORE the
+ * first filesystem mutation for a unit, and again after every subsequent
+ * step, so the journal always reflects the furthest step actually reached.
+ */
+function writeJournalRecordSync(journalDir, record) {
+  mkdirSync(journalDir, { recursive: true });
+  const file = journalFilePath(journalDir, record.sourcePath);
+  const data = JSON.stringify({ ...record, updatedAt: new Date().toISOString() }, null, 2);
+  const fd = openSync(file, 'w');
+  try {
+    writeSync(fd, data);
+    fsyncSync(fd);
+  } finally {
+    closeSync(fd);
+  }
+  return file;
+}
+
+function removeJournalRecord(journalDir, sourcePath) {
+  const file = journalFilePath(journalDir, sourcePath);
+  try {
+    rmSync(file);
+  } catch {
+    // already gone — fine
+  }
+}
+
+/** All journal records currently on disk. A record that fails to parse is
+ * still returned (with `record: null, corrupt: true`) so callers can
+ * report it rather than silently skip it. */
+function listJournalRecords(journalDir) {
+  if (!existsSync(journalDir)) return [];
+  const out = [];
+  for (const name of safeReaddir(journalDir)) {
+    if (!name.endsWith('.json')) continue;
+    const file = join(journalDir, name);
+    try {
+      out.push({ file, record: JSON.parse(readFileSync(file, 'utf8')) });
+    } catch {
+      out.push({ file, record: null, corrupt: true });
+    }
+  }
+  return out;
+}
+
+/** size + sha256 (files) / link target (symlinks) for every entry under
+ * `rootDir`, relative to it. Directories are implied by their children's
+ * relPaths and not recorded individually. */
+function computeManifest(rootDir) {
+  const manifest = [];
+  for (const full of listAllEntries(rootDir)) {
+    let lst;
+    try {
+      lst = lstatSync(full);
+    } catch {
+      continue;
+    }
+    const relPath = relative(rootDir, full);
+    if (lst.isSymbolicLink()) {
+      manifest.push({ relPath, type: 'symlink', linkTarget: readlinkSync(full) });
+    } else if (lst.isFile()) {
+      manifest.push({ relPath, type: 'file', size: lst.size, sha256: sha256File(full) });
+    }
+  }
+  return manifest;
+}
+
+/** True only if every manifest entry exists under `rootDir` with matching
+ * size+sha256 (files) or link target (symlinks). Used by recovery to
+ * refuse to act on a journal record whose paths don't actually match what
+ * it claims — see recoverInterruptedMoves(). */
+function verifyManifest(rootDir, manifest) {
+  for (const entry of manifest) {
+    const full = join(rootDir, entry.relPath);
+    let lst;
+    try {
+      lst = lstatSync(full);
+    } catch {
+      return false;
+    }
+    if (entry.type === 'symlink') {
+      if (!lst.isSymbolicLink() || readlinkSync(full) !== entry.linkTarget) return false;
+    } else {
+      if (!lst.isFile() || lst.size !== entry.size || sha256File(full) !== entry.sha256) return false;
+    }
+  }
+  return true;
+}
+
+/**
+ * Swap one source directory for a symlink to its already-verified copy.
  *
- *   rename(src, src + STAGING_SUFFIX)   [atomic, same filesystem]
- *   symlink(dst, src)
- *   verify src resolves to dst
- *   remove src + STAGING_SUFFIX
+ * A plain "delete then symlink" (or even "rename then symlink") has a
+ * window where a hard crash (SIGKILL, power loss, OOM kill) — which a
+ * try/catch cannot intercept, unlike a thrown JS exception — leaves NEITHER
+ * the original NOR a symlink at `src`. To close that, the symlink is built
+ * and verified at a side path BEFORE `src` is touched at all, and every
+ * step (including this one) is journaled to `opts.journalDir` — fsynced —
+ * BEFORE the step's filesystem mutation happens, so recovery always knows
+ * the furthest point actually reached:
  *
- * A same-filesystem rename is atomic, so a crash at any point leaves EITHER
- * the original directory in place (still at its staging name, never lost)
- * OR a working symlink to the verified copy — never neither. If anything
- * after the rename fails, this function removes the half-made symlink (if
- * any) and renames the staging directory back to `src` before returning, so
- * the caller sees `src` exactly as it was on entry.
+ *   'pending' written -> symlink(dst, src+LINK_SUFFIX); verify it resolves
+ *       [src untouched so far — a crash here leaves src exactly as it was]
+ *   'linked'  written -> rename(src, src+STAGING_SUFFIX)        [atomic]
+ *       [a crash here leaves the original at STAGING_SUFFIX, recoverable]
+ *   'staged'  written -> rename(src+LINK_SUFFIX, src)           [atomic]
+ *       [THE GAP: for this instant, neither a real directory nor a symlink
+ *        exists at src — see the module docstring. A crash here needs
+ *        recovery to finish this exact rename from the journal.]
+ *   'swapped' written -> verify src resolves to dst again, remove staging
+ *       [a crash here leaves a working symlink at src already — the only
+ *        thing left undone is freeing the disk space, which recovery does]
+ *   journal record removed once cleanup succeeds.
+ *
+ * This function itself does NOT roll back on a thrown (catchable) failure
+ * — recovery is deliberately a separate, explicit, journal-validated step
+ * (recoverInterruptedMoves, run via the `recover` subcommand or at the
+ * start of `apply`), not an automatic side effect of error handling, so a
+ * hard kill and a thrown exception are recovered the exact same way.
  */
 function swapToSymlink(src, dst, opts = {}) {
   const doSymlink = opts.symlinkSync || symlinkSync;
   const staging = src + STAGING_SUFFIX;
-  if (existsSync(staging)) {
-    throw new Error(`refusing to touch ${src}: a leftover ${staging} from a previous interrupted apply already exists — resolve it manually (verify which of ${src}/${staging} is intact, then remove the other) before retrying`);
+  const link = src + LINK_SUFFIX;
+  const journalDir = opts.journalDir;
+
+  if (existsSync(staging) || existsSync(link)) {
+    throw new Error(`refusing to touch ${src}: a leftover ${existsSync(staging) ? staging : link} already exists from a previous run — run the 'recover' subcommand first`);
   }
+
+  const manifest = computeManifest(src);
+  const base = { sourcePath: src, stagedPath: staging, linkPath: link, targetPath: dst, manifest };
+
+  writeJournalRecordSync(journalDir, { ...base, step: 'pending' });
+  if (opts.beforeLink) opts.beforeLink(); // test-only hook: simulate a crash here
+
+  doSymlink(dst, link);
+  const realLink = realpathSync(link);
+  if (realLink !== realpathSync(dst) || !lstatSync(link).isSymbolicLink()) {
+    rmSync(link, { recursive: true });
+    removeJournalRecord(journalDir, src);
+    throw new Error(`pre-swap symlink verification failed for ${link}`);
+  }
+  writeJournalRecordSync(journalDir, { ...base, step: 'linked' });
+  if (opts.afterLink) opts.afterLink(); // test-only hook: simulate a crash here
+
   renameSync(src, staging);
-  try {
-    doSymlink(dst, src);
-    const real = realpathSync(src);
-    if (real !== realpathSync(dst) || !lstatSync(src).isSymbolicLink()) {
-      throw new Error(`post-symlink verification failed for ${src}`);
-    }
-    rmSync(staging, { recursive: true });
-  } catch (e) {
-    // Roll back: remove any half-made symlink, then restore the original
-    // from staging so the caller finds `src` exactly as it was.
-    try {
-      if (lstatSync(src).isSymbolicLink()) rmSync(src);
-    } catch {
-      // src may not exist at all if symlinkSync itself never ran — fine.
-    }
-    renameSync(staging, src);
-    throw e;
+  writeJournalRecordSync(journalDir, { ...base, step: 'staged' });
+  if (opts.afterStage) opts.afterStage(); // test-only hook: simulate a crash IN THE GAP between the two renames
+
+  renameSync(link, src);
+  writeJournalRecordSync(journalDir, { ...base, step: 'swapped' });
+  if (opts.afterSwap) opts.afterSwap(); // test-only hook: simulate a crash here
+
+  const real = realpathSync(src);
+  if (real !== realpathSync(dst) || !lstatSync(src).isSymbolicLink()) {
+    throw new Error(`post-swap verification failed for ${src}`);
   }
+  rmSync(staging, { recursive: true });
+  removeJournalRecord(journalDir, src);
+}
+
+/** Every location discoverCandidates() looks at, reused so detection and
+ * recovery scan for stray *.tidy-moving/*.tidy-link siblings in exactly
+ * the same places. */
+function candidateParentDirs(home) {
+  const dirs = new Set();
+  const hfHub = join(home, '.cache', 'huggingface', 'hub');
+  if (existsSync(hfHub)) dirs.add(hfHub);
+  const modelsDir = join(home, 'models');
+  if (existsSync(modelsDir)) dirs.add(modelsDir);
+  dirs.add(home);
+  for (const entry of safeReaddir(home)) {
+    if (entry.startsWith('.')) continue;
+    const full = join(home, entry);
+    try {
+      if (lstatSync(full).isDirectory()) dirs.add(full);
+    } catch {
+      // vanished between readdir and lstat — ignore
+    }
+  }
+  return [...dirs];
+}
+
+function strayJournalSuffixedPaths(home, excludePaths) {
+  const strays = [];
+  for (const dir of candidateParentDirs(home)) {
+    for (const name of safeReaddir(dir)) {
+      if (!isJournalSuffixed(name)) continue;
+      const base = name.endsWith(STAGING_SUFFIX) ? name.slice(0, -STAGING_SUFFIX.length) : name.slice(0, -LINK_SUFFIX.length);
+      const src = join(dir, base);
+      if (excludePaths.has(src)) continue;
+      strays.push({ path: src, entryPath: join(dir, name) });
+    }
+  }
+  return strays;
+}
+
+/**
+ * READ-ONLY detection of interrupted `apply` swaps, for `plan`. Never
+ * mutates anything. For every journal record found under
+ * `home/.cache/ide-agent-kit/model-tidy-journal`, reports the step reached
+ * and a human-readable description of the on-disk state, WITHOUT touching
+ * it. Also reports (but never touches) any `*.tidy-moving` / `*.tidy-link`
+ * sibling that has no matching journal record at all — those are not this
+ * tool's to interpret; only recoverInterruptedMoves() (a separate, explicit,
+ * mutating step) acts on journaled units, and only after validating them.
+ */
+export function detectInterruptedMoves(home, options = {}) {
+  const journalDir = options.journalDir || defaultJournalDir(home);
+  const findings = [];
+  const journaledPaths = new Set();
+
+  for (const { file, record, corrupt } of listJournalRecords(journalDir)) {
+    if (corrupt || !record) {
+      findings.push({ path: null, journalFile: file, status: 'corrupt-journal', note: `journal file ${file} is corrupt or unreadable` });
+      continue;
+    }
+    journaledPaths.add(record.sourcePath);
+    const srcExists = existsSync(record.sourcePath);
+    let srcIsSymlink = false;
+    try {
+      srcIsSymlink = lstatSync(record.sourcePath).isSymbolicLink();
+    } catch {
+      // does not exist — srcIsSymlink stays false
+    }
+    const stagedExists = existsSync(record.stagedPath);
+    const linkExists = existsSync(record.linkPath);
+    findings.push({
+      path: record.sourcePath,
+      journalFile: file,
+      step: record.step,
+      status: 'interrupted',
+      note: `journal step '${record.step}' — source ${srcExists ? (srcIsSymlink ? 'exists as a symlink' : 'exists as a real directory') : 'missing'}, ` +
+        `staged copy ${stagedExists ? 'present' : 'absent'}, pending link ${linkExists ? 'present' : 'absent'}. Run the 'recover' subcommand to resolve.`
+    });
+  }
+
+  for (const stray of strayJournalSuffixedPaths(home, journaledPaths)) {
+    findings.push({
+      path: stray.path,
+      journalFile: null,
+      status: 'orphan-no-journal',
+      note: `found ${stray.entryPath} with no matching journal record — not this tool's to interpret, left alone`
+    });
+  }
+
+  return findings;
+}
+
+/**
+ * MUTATING recovery for interrupted `apply` swaps. Only runs from the
+ * explicit `recover` subcommand, or at the very start of `apply` (i.e.
+ * only when `--apply` was actually given — `plan` never calls this).
+ *
+ * Acts ONLY on units that have a journal record — a directory merely
+ * *named* `*.tidy-moving` or `*.tidy-link` with no journal entry is never
+ * touched, regardless of how it looks. For a journaled unit, validates
+ * that whatever currently exists on disk (the source as a real directory,
+ * and/or the staged copy) matches the journal's recorded manifest before
+ * trusting the record enough to act; a mismatch is reported and left
+ * alone rather than guessed at.
+ */
+export function recoverInterruptedMoves(home, options = {}) {
+  const journalDir = options.journalDir || defaultJournalDir(home);
+  const recovered = [];
+  const journaledPaths = new Set();
+
+  for (const { file, record, corrupt } of listJournalRecords(journalDir)) {
+    if (corrupt || !record) {
+      recovered.push({ path: null, journalFile: file, action: 'left-alone', note: `journal file ${file} is corrupt or unreadable; left alone` });
+      continue;
+    }
+    const { sourcePath, stagedPath, linkPath, manifest, step } = record;
+    journaledPaths.add(sourcePath);
+
+    try {
+      const srcExists = existsSync(sourcePath);
+      let srcIsSymlink = false;
+      try {
+        srcIsSymlink = lstatSync(sourcePath).isSymbolicLink();
+      } catch {
+        // missing — srcIsSymlink stays false
+      }
+      const stagedExists = existsSync(stagedPath);
+      const linkExists = existsSync(linkPath);
+
+      const stagedOk = !stagedExists || verifyManifest(stagedPath, manifest);
+      const srcOk = !srcExists || srcIsSymlink || verifyManifest(sourcePath, manifest);
+      if (!stagedOk || !srcOk) {
+        recovered.push({ path: sourcePath, journalFile: file, action: 'left-alone', note: `on-disk content (step recorded as '${step}') does not match the journaled manifest; left alone for manual inspection` });
+        continue;
+      }
+
+      if (srcExists && srcIsSymlink && !stagedExists) {
+        removeJournalRecord(journalDir, sourcePath);
+        recovered.push({ path: sourcePath, journalFile: file, action: 'removed-stale-journal', note: 'the move had already fully completed; removed the stale journal record' });
+      } else if (srcExists && srcIsSymlink && stagedExists) {
+        const real = realpathSync(sourcePath);
+        if (existsSync(real)) {
+          rmSync(stagedPath, { recursive: true });
+          removeJournalRecord(journalDir, sourcePath);
+          recovered.push({ path: sourcePath, journalFile: file, action: 'finished-cleanup', note: 'symlink was already in place; finished removing the staged original' });
+        } else {
+          recovered.push({ path: sourcePath, journalFile: file, action: 'left-alone', note: `symlink target ${real} does not exist — leaving ${stagedPath} for manual inspection` });
+        }
+      } else if (!srcExists && stagedExists && linkExists) {
+        renameSync(linkPath, sourcePath);
+        const real = realpathSync(sourcePath);
+        if (existsSync(real)) {
+          rmSync(stagedPath, { recursive: true });
+          removeJournalRecord(journalDir, sourcePath);
+          recovered.push({ path: sourcePath, journalFile: file, action: 'completed-swap-and-cleaned', note: 'completed the pending symlink swap (the crash landed in the gap between the two renames) and finished cleanup' });
+        } else {
+          recovered.push({ path: sourcePath, journalFile: file, action: 'completed-swap', note: 'completed the pending symlink swap; leaving the staged original for manual inspection (symlink target unexpectedly missing)' });
+        }
+      } else if (!srcExists && stagedExists && !linkExists) {
+        renameSync(stagedPath, sourcePath);
+        removeJournalRecord(journalDir, sourcePath);
+        recovered.push({ path: sourcePath, journalFile: file, action: 'restored-original', note: 'restored the original directory (no verified pending symlink existed to trust instead)' });
+      } else if (srcExists && !srcIsSymlink && linkExists && !stagedExists) {
+        rmSync(linkPath, { recursive: true });
+        removeJournalRecord(journalDir, sourcePath);
+        recovered.push({ path: sourcePath, journalFile: file, action: 'removed-stray-link', note: 'the original was never touched; removed the unused pending symlink' });
+      } else if (srcExists && !srcIsSymlink && !linkExists && !stagedExists) {
+        removeJournalRecord(journalDir, sourcePath);
+        recovered.push({ path: sourcePath, journalFile: file, action: 'removed-stale-journal', note: 'the original was never touched; cleared the journal record' });
+      } else {
+        recovered.push({ path: sourcePath, journalFile: file, action: 'left-alone', note: `unrecognized on-disk state for a journaled unit (step='${step}'); left alone for manual inspection` });
+      }
+    } catch (e) {
+      recovered.push({ path: sourcePath, journalFile: file, action: 'error', note: `recovery failed: ${e.message}` });
+    }
+  }
+
+  for (const stray of strayJournalSuffixedPaths(home, journaledPaths)) {
+    recovered.push({
+      path: stray.path,
+      journalFile: null,
+      action: 'left-alone',
+      note: `found ${stray.entryPath} with no matching journal record — not this tool's to touch`
+    });
+  }
+
+  return recovered;
 }
 
 /**
  * Apply a plan: move every selected unit to `target`, unit by unit. Each
  * unit is copied, verified, and only THEN is its source directory swapped
- * for a symlink via swapToSymlink()'s rename/symlink/verify/cleanup
- * sequence. A failure at ANY step — copy, verify, or swap — leaves that
- * unit's source EITHER fully in place (copy/verify failures never touch
- * the source) OR replaced by a working symlink to a verified copy (a swap
- * failure rolls back to the original). There is no state in between. One
+ * for a symlink via swapToSymlink()'s journaled sequence (see its
+ * docstring). A failure at copy or verify leaves the source fully in
+ * place, untouched. Once the swap itself starts, the original data is
+ * preserved and recoverable at every step; the original path is
+ * unavailable for the instant between the two renames, and until recovery
+ * runs if a crash lands there — it is not continuously available. One
  * unit's failure does not roll back units that already succeeded earlier
  * in the same run; the process still exits non-zero overall.
+ *
+ * Recovery (recoverInterruptedMoves) runs once, here, at the very start —
+ * i.e. only when `--apply` was actually given. `planRun` never calls it;
+ * `plan` only detects and reports interrupted state (detectInterruptedMoves)
+ * without mutating anything.
  */
 export function applyRun(options) {
   const { plan, target, home } = options;
@@ -839,10 +1249,17 @@ export function applyRun(options) {
   const verifyFn = options.verifyFn || verifyUnit;
   const validateTargetFn = options.validateTarget || validateTarget;
   const symlinkFn = options.symlinkFn; // test-only injection; real default is symlinkSync inside swapToSymlink
+  const recoverFn = options.recover || recoverInterruptedMoves;
+  const journalDir = options.journalDir || defaultJournalDir(home);
+
+  // Self-heal any interrupted swap from a previous crash before this run's
+  // own pre-checks and copy/verify/swap loop — see recoverInterruptedMoves.
+  // Only reached here, in apply, never from planRun.
+  const recovered = recoverFn(home, { journalDir });
 
   const validation = validateTargetFn(target, home);
   if (!validation.ok) {
-    return { ok: false, error: validation.error, moved: [], errors: [{ error: validation.error }] };
+    return { ok: false, error: validation.error, moved: [], errors: [{ error: validation.error }], recovered };
   }
 
   const byGroup = new Map();
@@ -857,13 +1274,13 @@ export function applyRun(options) {
   for (const [groupId, members] of byGroup) {
     const sourceAbsPaths = members.map(m => m.path);
 
-    const leftoverStaging = sourceAbsPaths.filter(src => existsSync(src + STAGING_SUFFIX));
-    if (leftoverStaging.length > 0) {
+    const leftover = sourceAbsPaths.filter(src => existsSync(src + STAGING_SUFFIX) || existsSync(src + LINK_SUFFIX));
+    if (leftover.length > 0) {
       errors.push({
         groupId,
         paths: sourceAbsPaths,
         step: 'pre-check',
-        error: `refusing: ${leftoverStaging.map(p => `${p}${STAGING_SUFFIX}`).join(', ')} left over from a previous interrupted apply — resolve manually before retrying this unit`
+        error: `refusing: a leftover from a previous run still exists for ${leftover.join(', ')} — run the 'recover' subcommand first`
       });
       continue;
     }
@@ -888,7 +1305,14 @@ export function applyRun(options) {
       const rel = relative(home, src);
       const dst = join(target, rel);
       try {
-        swapToSymlink(src, dst, { symlinkSync: symlinkFn });
+        swapToSymlink(src, dst, {
+          symlinkSync: symlinkFn,
+          journalDir,
+          beforeLink: options.beforeLink,
+          afterLink: options.afterLink,
+          afterStage: options.afterStage,
+          afterSwap: options.afterSwap
+        });
         swapped.push({ source: src, target: dst });
       } catch (e) {
         swapFailed = { path: src, error: e.message };
@@ -902,7 +1326,7 @@ export function applyRun(options) {
     }
   }
 
-  return { ok: errors.length === 0, moved, errors };
+  return { ok: errors.length === 0, moved, errors, recovered };
 }
 
 // ---------------------------------------------------------------------------

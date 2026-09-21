@@ -7,8 +7,22 @@
  *   model-tidy plan  [--home <dir>] [--keep-file <path>] [--min-idle-days N]
  *                     [--max-gb N] [--json] [--log-dir <dir>]
  *                     [--report-to-room] [--room <name>] [--config <path>]
+ *     Read-only. Never mutates anything. If a previous `apply` was
+ *     interrupted (crash, kill, power loss), plan DETECTS and reports it
+ *     per unit ("interrupted move found: ...") and refuses to select that
+ *     unit — it does not attempt to fix it. Run `recover` for that.
  *
  *   model-tidy apply --apply --target </mount/path> [same options as plan]
+ *     Runs recovery once at the very start (only reached because --apply
+ *     was given), then copies/verifies/swaps every selected unit.
+ *
+ *   model-tidy recover [--home <dir>]
+ *     Explicit, mutating recovery pass for interrupted `apply` swaps. Acts
+ *     ONLY on units with a journal record whose on-disk state matches the
+ *     journaled manifest; anything else (including a directory merely
+ *     *named* like a leftover, with no journal) is reported and left
+ *     alone. Safe to run at any time, including on a healthy tree (a
+ *     no-op).
  *
  *   model-tidy --dry-run-remote <host> [--remote-home <dir>]
  *     ssh's to <host> and runs `plan` there, read-only. Never copies,
@@ -23,7 +37,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { homedir } from 'node:os';
-import { planRun, applyRun, writeRunLog } from '../src/model-tidy.mjs';
+import { planRun, applyRun, recoverInterruptedMoves, writeRunLog } from '../src/model-tidy.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = join(__dirname, '..');
@@ -74,6 +88,13 @@ function printPlan(plan, opts) {
   for (const r of plan.skipped) {
     const gib = (r.sizeBytes / 2 ** 30).toFixed(2);
     console.log(`  [skip]  ${r.path}  (${gib} GiB, ${r.kind}) — ${r.reason}`);
+  }
+  if (plan.interrupted && plan.interrupted.length > 0) {
+    console.log('');
+    console.log(`Interrupted-move findings (${plan.interrupted.length}) — plan never mutates these, run 'model-tidy recover':`);
+    for (const f of plan.interrupted) {
+      console.log(`  [${f.status}]  ${f.path || f.journalFile} — ${f.note}`);
+    }
   }
 }
 
@@ -170,6 +191,23 @@ function main() {
   }
   const logDir = args['log-dir'] || DEFAULT_LOG_DIR;
 
+  if (mode === 'recover') {
+    const recovered = recoverInterruptedMoves(home);
+    writeRunLog(logDir, { mode: 'recover', home, recovered, argv });
+    if (args.json) {
+      console.log(JSON.stringify(recovered, null, 2));
+    } else if (recovered.length === 0) {
+      console.log('recover: nothing to do (no journaled interrupted moves, no stray leftovers found).');
+    } else {
+      console.log(`recover: ${recovered.length} finding(s):`);
+      for (const r of recovered) {
+        console.log(`  [${r.action}]  ${r.path || r.journalFile} — ${r.note}`);
+      }
+    }
+    process.exit(recovered.some(r => r.action === 'error') ? 1 : 0);
+    return;
+  }
+
   const plan = planRun({ home, keepFile, minIdleDays, maxGb });
 
   const logFile = writeRunLog(logDir, {
@@ -210,7 +248,7 @@ function main() {
     process.exit(result.ok ? 0 : 1);
   }
 
-  console.error(`unknown mode: ${mode} (expected "plan" or "apply")`);
+  console.error(`unknown mode: ${mode} (expected "plan", "apply", or "recover")`);
   process.exit(2);
 }
 

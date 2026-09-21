@@ -4,14 +4,32 @@ import { describe, it, afterEach } from 'node:test';
 import { strict as assert } from 'node:assert';
 import {
   mkdtempSync, mkdirSync, writeFileSync, symlinkSync, linkSync, rmSync,
-  existsSync, readFileSync, utimesSync, lstatSync, readdirSync
+  existsSync, readFileSync, utimesSync, lstatSync, readdirSync, readlinkSync
 } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
+import { spawnSync } from 'node:child_process';
 import {
   planRun, applyRun, discoverCandidates, loadKeepList, computeHardlinkGroups,
-  validateTarget, copyUnitPureNode
+  validateTarget, copyUnitPureNode, recoverInterruptedMoves
 } from '../src/model-tidy.mjs';
+
+const MODEL_TIDY_MODULE_URL = new URL('../src/model-tidy.mjs', import.meta.url).href;
+
+/**
+ * Run applyRun in a CHILD process with one option forced to hard-exit
+ * (process.exit, not a throw — a try/catch in the parent's process cannot
+ * intercept this, which is exactly the real-world crash swapToSymlink's
+ * design has to survive: SIGKILL, OOM kill, power loss). Mirrors codexmb's
+ * review probe technique verbatim: serialize the plan, embed an absolute
+ * import URL, embed a literal crashing arrow function as one applyRun
+ * option keyed by `crashOptionKey` ('symlinkFn', 'afterStage', or
+ * 'afterSwap').
+ */
+function runApplyInChildWithCrash(plan, home, target, crashOptionKey) {
+  const code = `import {applyRun} from ${JSON.stringify(MODEL_TIDY_MODULE_URL)}; applyRun({plan:${JSON.stringify(plan)},home:${JSON.stringify(home)},target:${JSON.stringify(target)},validateTarget:()=>({ok:true}),${crashOptionKey}:()=>process.exit(77)});`;
+  return spawnSync(process.execPath, ['--input-type=module', '-e', code], { encoding: 'utf8' });
+}
 
 const tempPaths = [];
 
@@ -365,6 +383,48 @@ describe('planRun', () => {
     assert.match(skippedIdle.reason, /hardlinked to .*which is not moving/);
     assert.match(skippedIdle.reason, /on KEEP list/);
   });
+
+  it('GAP 1 regression: refuses a candidate hardlinked to a file OUTSIDE every discovered root (codexmb probe, reproduced exactly)', () => {
+    // Exact reproduction of the review's probe.mjs: link placed directly
+    // under the fixture root, ABOVE home/models, so no discovered
+    // candidate root ever contains that second path — scanning wider
+    // cannot see it. Only comparing st_nlink against what we actually
+    // observed can catch this.
+    const root = tempDir('model-tidy-gap1-');
+    const home = join(root, 'home');
+    const src = join(home, 'models', 'idle');
+    mkdirSync(src, { recursive: true });
+    writeFileSync(join(src, 'weights.gguf'), 'fixture-only');
+    utimesSync(join(src, 'weights.gguf'), new Date(0), new Date(0));
+    linkSync(join(src, 'weights.gguf'), join(root, 'outside-discovery.gguf'));
+
+    const plan = planRun({
+      home,
+      listProcessUsers: () => ({ checked: true, users: [] }),
+      listDockerBindUsers: () => ({ available: true, inUse: false, containers: [] }),
+      diskFreeBytes: () => 0
+    });
+
+    assert.ok(!plan.selected.some(r => r.path === src), 'must not select a candidate with an invisible extra hardlink');
+    const skipped = plan.skipped.find(r => r.path === src);
+    assert.ok(skipped);
+    assert.match(skipped.reason, /hardlinked 2 times, only 1 links found under scanned roots; refusing incomplete set/);
+  });
+
+  it('GAP 1 positive control: an idle dir whose hardlinks are ALL inside the scanned tree is still selected as a unit', () => {
+    const { home, keepFile, hardlinkA, hardlinkB } = buildFixture();
+    const plan = planRun({
+      home,
+      keepFile,
+      minIdleDays: 14,
+      listProcessUsers: noProcessUsers,
+      listDockerBindUsers: dockerNotInUse,
+      diskFreeBytes: fixedDiskFree
+    });
+    const selectedPaths = plan.selected.map(r => r.path);
+    assert.ok(selectedPaths.includes(hardlinkA));
+    assert.ok(selectedPaths.includes(hardlinkB));
+  });
 });
 
 // tmpdir()-based fixtures and their "target" dir are normally on the SAME
@@ -526,7 +586,7 @@ describe('applyRun', () => {
     assert.equal(restoredContent, originalContent);
   });
 
-  it('refuses a unit with a leftover *.tidy-moving from a previous crash, without touching it', () => {
+  it("refuses a unit with an UNJOURNALED leftover *.tidy-moving, without touching it (apply's own recovery pass only heals journaled units)", () => {
     const { home, keepFile, idleRoot } = buildFixture();
     const target = tempDir('model-tidy-target-');
     const staging = `${idleRoot}.tidy-moving`;
@@ -541,10 +601,11 @@ describe('applyRun', () => {
     });
     plan.selected = plan.selected.filter(r => r.path === idleRoot);
 
-    // Simulate a previous crash: idleRoot was already renamed to staging,
-    // and (for this test) never got its symlink, so both idleRoot and the
-    // staging dir happen to coexist here only in the sense that we recreate
-    // idleRoot fresh below to prove apply won't touch EITHER.
+    // Simulate a leftover with NO journal record at all (e.g. a directory
+    // that just happens to be named like one of ours, or a journal file
+    // that was separately lost). Recovery must never guess about this —
+    // it should be reported and left alone, and apply's own pre-check
+    // should then refuse the unit outright.
     mkdirSync(staging, { recursive: true });
     writeFileSync(join(staging, 'marker'), 'leftover-from-a-previous-crash');
     tempPaths.push(staging);
@@ -562,7 +623,8 @@ describe('applyRun', () => {
     assert.equal(result.moved.length, 0);
     assert.equal(result.errors.length, 1);
     assert.equal(result.errors[0].step, 'pre-check');
-    assert.match(result.errors[0].error, /tidy-moving/);
+    assert.match(result.errors[0].error, /leftover from a previous run/);
+    assert.match(result.errors[0].error, /recover/);
     assert.equal(copyCalled, false, 'apply must refuse before even attempting to copy this unit');
 
     // Neither the original nor the leftover staging dir were touched.
@@ -570,5 +632,223 @@ describe('applyRun', () => {
     assert.equal(lstatSync(idleRoot).isSymbolicLink(), false);
     assert.ok(existsSync(staging));
     assert.equal(readFileSync(join(staging, 'marker'), 'utf8'), 'leftover-from-a-previous-crash');
+  });
+});
+
+describe('GAP 2: crash-safety across a hard process kill (not just a thrown exception)', () => {
+  function buildSingleIdleFixture() {
+    const home = tempDir('model-tidy-gap2-home-');
+    const src = join(home, 'models', 'idle');
+    mkdirSync(src, { recursive: true });
+    writeFileSync(join(src, 'weights.gguf'), 'gap2-fixture-bytes'.repeat(50));
+    utimesSync(join(src, 'weights.gguf'), daysAgo(30), daysAgo(30));
+    return { home, src };
+  }
+
+  function planFor(home) {
+    return planRun({
+      home,
+      minIdleDays: 14,
+      listProcessUsers: noProcessUsers,
+      listDockerBindUsers: dockerNotInUse,
+      diskFreeBytes: fixedDiskFree
+    });
+  }
+
+  it("codexmb probe, kept verbatim: a hard crash during the symlink step leaves the original intact, and the invariant holds after one recovery pass", () => {
+    const { home, src } = buildSingleIdleFixture();
+    const target = tempDir('model-tidy-gap2-target-');
+    const plan = planFor(home);
+    assert.ok(plan.selected.some(r => r.path === src));
+
+    const child = runApplyInChildWithCrash(plan, home, target, 'symlinkFn');
+    assert.equal(child.status, 77);
+
+    recoverInterruptedMoves(home);
+
+    // codexmb's probe assertion, kept verbatim in spirit: after the crash
+    // and one recovery pass, either the original path exists, or a
+    // working symlink exists at src. Never neither.
+    let srcIsWorkingSymlink = false;
+    try {
+      srcIsWorkingSymlink = lstatSync(src).isSymbolicLink() && existsSync(src);
+    } catch {
+      srcIsWorkingSymlink = false;
+    }
+    const originalPathExists = existsSync(src) && !srcIsWorkingSymlink;
+    assert.ok(originalPathExists || srcIsWorkingSymlink, 'neither the original nor a working symlink exists at src');
+
+    // This specific crash point happens before any rename, so nothing
+    // should have moved at all: the original itself, untouched.
+    assert.equal(existsSync(src), true);
+    assert.equal(lstatSync(src).isSymbolicLink(), false);
+    assert.equal(existsSync(src + '.tidy-moving'), false);
+    assert.equal(existsSync(src + '.tidy-link'), false);
+  });
+
+  it('a hard crash between the two renames is healed by completing the pending symlink swap', () => {
+    const { home, src } = buildSingleIdleFixture();
+    const target = tempDir('model-tidy-gap2-target-');
+    const plan = planFor(home);
+
+    const child = runApplyInChildWithCrash(plan, home, target, 'afterStage');
+    assert.equal(child.status, 77);
+    // Mid-crash snapshot: src renamed away, symlink not yet swapped in.
+    assert.equal(existsSync(src), false);
+    assert.ok(existsSync(`${src}.tidy-moving`));
+
+    const recovered = recoverInterruptedMoves(home);
+    assert.ok(recovered.some(r => r.path === src && r.action === 'completed-swap-and-cleaned'), JSON.stringify(recovered));
+
+    assert.equal(existsSync(src), true, 'src must exist after recovery');
+    assert.equal(lstatSync(src).isSymbolicLink(), true, 'src must be a working symlink after recovery');
+    assert.equal(existsSync(`${src}.tidy-moving`), false, 'staged original should be fully cleaned up');
+    assert.equal(readFileSync(join(src, 'weights.gguf'), 'utf8'), 'gap2-fixture-bytes'.repeat(50));
+  });
+
+  it('a hard crash after the second rename (before cleanup) is healed by finishing the cleanup', () => {
+    const { home, src } = buildSingleIdleFixture();
+    const target = tempDir('model-tidy-gap2-target-');
+    const plan = planFor(home);
+
+    const child = runApplyInChildWithCrash(plan, home, target, 'afterSwap');
+    assert.equal(child.status, 77);
+    // Mid-crash snapshot: the swap already completed structurally — src is
+    // already a working symlink — only the old original's cleanup is
+    // pending.
+    assert.equal(existsSync(src), true);
+    assert.equal(lstatSync(src).isSymbolicLink(), true);
+    assert.ok(existsSync(`${src}.tidy-moving`));
+
+    const recovered = recoverInterruptedMoves(home);
+    assert.ok(recovered.some(r => r.path === src && r.action === 'finished-cleanup'), JSON.stringify(recovered));
+
+    assert.equal(existsSync(src), true);
+    assert.equal(lstatSync(src).isSymbolicLink(), true);
+    assert.equal(existsSync(`${src}.tidy-moving`), false, 'staged original should be cleaned up after recovery');
+    assert.equal(readFileSync(join(src, 'weights.gguf'), 'utf8'), 'gap2-fixture-bytes'.repeat(50));
+  });
+
+  it('recovery is idempotent and a no-op on a healthy tree', () => {
+    const { home } = buildSingleIdleFixture();
+    const first = recoverInterruptedMoves(home);
+    const second = recoverInterruptedMoves(home);
+    assert.deepEqual(first, []);
+    assert.deepEqual(second, []);
+  });
+
+  it('a hard crash right after the link is verified, before either rename, is healed with the original untouched', () => {
+    const { home, src } = buildSingleIdleFixture();
+    const target = tempDir('model-tidy-gap2-target-');
+    const plan = planFor(home);
+
+    const child = runApplyInChildWithCrash(plan, home, target, 'afterLink');
+    assert.equal(child.status, 77);
+    assert.equal(existsSync(src), true, 'mid-crash: src untouched, no rename has happened yet');
+    assert.equal(lstatSync(src).isSymbolicLink(), false);
+    assert.ok(existsSync(`${src}.tidy-link`));
+
+    const recovered = recoverInterruptedMoves(home);
+    assert.ok(recovered.some(r => r.path === src && r.action === 'removed-stray-link'), JSON.stringify(recovered));
+
+    assert.equal(existsSync(src), true);
+    assert.equal(lstatSync(src).isSymbolicLink(), false);
+    assert.equal(existsSync(`${src}.tidy-link`), false);
+    assert.equal(readFileSync(join(src, 'weights.gguf'), 'utf8'), 'gap2-fixture-bytes'.repeat(50));
+  });
+
+  function snapshotTree(root) {
+    const snap = {};
+    function recurse(dir) {
+      for (const name of readdirSync(dir)) {
+        const full = join(dir, name);
+        const lst = lstatSync(full);
+        if (lst.isSymbolicLink()) {
+          snap[full] = { type: 'symlink', linkTarget: readlinkSync(full) };
+        } else if (lst.isDirectory()) {
+          recurse(full);
+        } else if (lst.isFile()) {
+          snap[full] = { type: 'file', size: lst.size, mtimeMs: lst.mtimeMs };
+        }
+      }
+    }
+    recurse(root);
+    return snap;
+  }
+
+  it("AMENDMENT: plan is read-only — an interrupted move is reported per unit, and every byte on disk (full tree, sizes and mtimes) is untouched by plan", () => {
+    const { home, src } = buildSingleIdleFixture();
+    const target = tempDir('model-tidy-gap2-target-');
+    const firstPlan = planFor(home);
+    const child = runApplyInChildWithCrash(firstPlan, home, target, 'afterStage');
+    assert.equal(child.status, 77);
+    assert.equal(existsSync(src), false, 'mid-crash sanity check: src is gone, staged+link exist');
+
+    const before = snapshotTree(home);
+    const plan = planFor(home);
+    const after = snapshotTree(home);
+
+    assert.deepEqual(after, before, 'plan must not change any byte on disk (sizes/mtimes of the full tree)');
+
+    assert.ok(plan.interrupted.some(f => f.path === src), 'plan must report the interrupted move');
+    const finding = plan.interrupted.find(f => f.path === src);
+    assert.equal(finding.status, 'interrupted');
+    assert.match(finding.note, /journal step 'staged'/);
+
+    assert.ok(!plan.selected.some(r => r.path === src), 'the interrupted unit must never be selected');
+    const skipped = plan.skipped.find(r => r.path === src);
+    assert.ok(skipped, 'the interrupted unit must be reported in skipped, not silently dropped');
+    assert.match(skipped.reason, /interrupted move found/);
+
+    // Confirm it is really still interrupted (plan really did nothing) —
+    // recovery, called separately, still has work to do.
+    const recovered = recoverInterruptedMoves(home);
+    assert.ok(recovered.some(r => r.path === src));
+  });
+
+  it('AMENDMENT: recovery acts only on journaled units — a directory literally named *.tidy-moving with NO journal record is never touched', () => {
+    const { home } = buildSingleIdleFixture();
+    const strayBase = join(home, 'models', 'someone-elses-thing');
+    const stray = `${strayBase}.tidy-moving`;
+    mkdirSync(stray, { recursive: true });
+    writeFileSync(join(stray, 'not-ours.txt'), 'this directory is just named like one of ours, nothing to do with model-tidy');
+    tempPaths.push(stray);
+    const before = readFileSync(join(stray, 'not-ours.txt'), 'utf8');
+
+    const recovered = recoverInterruptedMoves(home);
+
+    assert.equal(existsSync(stray), true, 'the stray directory must still exist, completely untouched');
+    assert.equal(readFileSync(join(stray, 'not-ours.txt'), 'utf8'), before);
+    const finding = recovered.find(r => r.path === strayBase);
+    assert.ok(finding, 'the stray must be reported');
+    assert.equal(finding.action, 'left-alone');
+    assert.match(finding.note, /no matching journal record/);
+  });
+
+  it('AMENDMENT: recovery refuses a journaled unit whose on-disk content does not match the journaled manifest', () => {
+    const { home, src } = buildSingleIdleFixture();
+    const target = tempDir('model-tidy-gap2-target-');
+    const plan = planFor(home);
+
+    const child = runApplyInChildWithCrash(plan, home, target, 'afterStage');
+    assert.equal(child.status, 77);
+    const staging = `${src}.tidy-moving`;
+    assert.ok(existsSync(staging));
+
+    // Tamper with the staged original so it no longer matches what the
+    // journal recorded — recovery must not trust its own naming
+    // convention over the manifest.
+    writeFileSync(join(staging, 'weights.gguf'), 'TAMPERED-CONTENT-DOES-NOT-MATCH-MANIFEST');
+
+    const recovered = recoverInterruptedMoves(home);
+    const finding = recovered.find(r => r.path === src);
+    assert.ok(finding);
+    assert.equal(finding.action, 'left-alone');
+    assert.match(finding.note, /does not match the journaled manifest/);
+
+    // Nothing was renamed or removed.
+    assert.equal(existsSync(src), false);
+    assert.equal(existsSync(staging), true);
+    assert.equal(readFileSync(join(staging, 'weights.gguf'), 'utf8'), 'TAMPERED-CONTENT-DOES-NOT-MATCH-MANIFEST');
   });
 });
