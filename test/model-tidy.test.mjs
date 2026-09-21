@@ -177,15 +177,19 @@ describe('planRun', () => {
     assert.equal(plan.skipped.length, 3);
   });
 
-  it('skips a whole hardlink set if either member is not idle', () => {
+  it('skips a whole hardlink set if either member is in use', () => {
     const { home, keepFile, hardlinkA, hardlinkB } = buildFixture();
-    touch(join(hardlinkB, 'file.bin'), daysAgo(1)); // make B recent
-
+    // Note: touching hardlinkB's file.bin mtime would also move hardlinkA's
+    // mtime, since they are literally the same inode — that's not a useful
+    // way to make just one member fail independently. Use a per-path check
+    // (process-in-use) instead, which is genuinely independent per path.
     const plan = planRun({
       home,
       keepFile,
       minIdleDays: 14,
-      listProcessUsers: noProcessUsers,
+      listProcessUsers: (path) => (path === hardlinkB
+        ? { checked: true, users: [{ pid: '9999', via: 'fd', target: join(path, 'file.bin') }] }
+        : { checked: true, users: [] }),
       listDockerBindUsers: dockerNotInUse,
       diskFreeBytes: fixedDiskFree
     });
@@ -194,11 +198,17 @@ describe('planRun', () => {
     assert.ok(!selectedPaths.includes(hardlinkA));
     assert.ok(!selectedPaths.includes(hardlinkB));
     const skippedA = plan.skipped.find(r => r.path === hardlinkA);
-    assert.match(skippedA.reason, /hardlink set/);
+    assert.match(skippedA.reason, /hardlinked to .*which is not moving/);
+    assert.match(skippedA.reason, /in use/);
+    const skippedB = plan.skipped.find(r => r.path === hardlinkB);
+    assert.match(skippedB.reason, /in use: pid 9999/);
   });
 
-  it('treats ~/.cache/huggingface as in-use when docker is unreadable', () => {
-    const { home, keepFile, idleRoot } = buildFixture();
+  it('fails closed for EVERY candidate on the box when docker is unreadable, not just the HF cache', () => {
+    // Regression test for the fail-open defect: an unreadable docker used
+    // to only fail-safe ~/.cache/huggingface, leaving ~/models/* and ad-hoc
+    // dirs selectable even though a container could bind-mount anything.
+    const { home, keepFile, idleRoot, recentRoot, keepRoot, hardlinkA } = buildFixture();
     const plan = planRun({
       home,
       keepFile,
@@ -207,9 +217,71 @@ describe('planRun', () => {
       listDockerBindUsers: () => ({ available: false, inUse: false, reason: 'permission denied' }),
       diskFreeBytes: fixedDiskFree
     });
+
+    assert.equal(plan.selected.length, 0, 'nothing should be selected while docker is unreadable');
+
     const skippedIdle = plan.skipped.find(r => r.path === idleRoot);
-    assert.ok(skippedIdle, 'HF cache dir should be fail-safe skipped when docker is unreadable');
-    assert.match(skippedIdle.reason, /docker not readable/);
+    assert.ok(skippedIdle);
+    assert.match(skippedIdle.reason, /in-use status unverified: docker not readable/);
+
+    // The bug: hardlinkA lives under ~/models, NOT under ~/.cache/huggingface.
+    // It must ALSO be unverified now, box-wide.
+    const skippedHardlinkA = plan.skipped.find(r => r.path === hardlinkA);
+    assert.ok(skippedHardlinkA);
+    assert.match(skippedHardlinkA.reason, /unverified/);
+
+    // Rule priority is unchanged: KEEP list still wins before the docker
+    // check is ever reached.
+    const skippedKeep = plan.skipped.find(r => r.path === keepRoot);
+    assert.match(skippedKeep.reason, /on KEEP list/);
+
+    assert.match(plan.summaryLine, /\d+ unverified/);
+    assert.ok(plan.unverifiedCount >= 3, `expected several unverified candidates, got ${plan.unverifiedCount}`);
+  });
+
+  it('positive control: with a readable process list and docker, the idle dir is still selected', () => {
+    const { home, keepFile, idleRoot } = buildFixture();
+    const plan = planRun({
+      home,
+      keepFile,
+      minIdleDays: 14,
+      listProcessUsers: () => ({ checked: true, users: [] }),
+      listDockerBindUsers: () => ({ available: true, inUse: false, containers: [] }),
+      diskFreeBytes: fixedDiskFree
+    });
+    const selectedIdle = plan.selected.find(r => r.path === idleRoot);
+    assert.ok(selectedIdle, 'idle dir should be selected when everything is verifiably readable and idle');
+    assert.equal(plan.unverifiedCount, 0);
+  });
+
+  it('fails closed when the process check cannot be fully completed (e.g. EACCES on one pid)', () => {
+    const home = tempDir('model-tidy-unverified-');
+    const idleA = join(home, 'models', 'idle-a');
+    const idleB = join(home, 'models', 'idle-b');
+    writeFile(join(idleA, 'weights.gguf'), 'a'.repeat(2048));
+    writeFile(join(idleB, 'weights.gguf'), 'b'.repeat(2048));
+    touch(join(idleA, 'weights.gguf'), daysAgo(30));
+    touch(join(idleB, 'weights.gguf'), daysAgo(30));
+
+    const plan = planRun({
+      home,
+      minIdleDays: 14,
+      listProcessUsers: () => ({
+        checked: false,
+        users: [],
+        note: 'could not read /proc for pid(s) 4242 (permission denied) — cannot rule out those processes using this path'
+      }),
+      listDockerBindUsers: dockerNotInUse,
+      diskFreeBytes: fixedDiskFree
+    });
+
+    assert.equal(plan.selected.length, 0, 'nothing should be selected when process status cannot be verified');
+    assert.equal(plan.skipped.length, 2);
+    for (const r of plan.skipped) {
+      assert.match(r.reason, /in-use status unverified: could not read \/proc/);
+    }
+    assert.match(plan.summaryLine, /2 unverified/);
+    assert.equal(plan.unverifiedCount, 2);
   });
 
   it('skips a dir with an open file handle (simulated process check)', () => {
@@ -260,6 +332,38 @@ describe('planRun', () => {
     assert.equal(plan.selected.length, 0);
     const deferred = plan.skipped.filter(r => /max-gb.*cap/.test(r.reason));
     assert.ok(deferred.length > 0);
+  });
+
+  it('skips an idle dir hardlinked to a KEEP-listed dir, even though both are otherwise idle-eligible', () => {
+    // Regression test for hardlink-scan scope: the KEEP-listed copy lives
+    // outside the plain "idle" candidate set (it's filtered out by the
+    // KEEP rule), so the hardlink group it belongs to must still be
+    // detected and the whole group skipped — never just the KEEP-listed
+    // half, which would leave the idle-looking half free to move and
+    // silently double disk usage.
+    const { home, keepFile, idleRoot, keepRoot } = buildFixture();
+    // Make idleRoot's blob and keepRoot's file share an inode.
+    const idleBlobDir = join(idleRoot, 'blobs');
+    const idleBlobName = readdirSync(idleBlobDir)[0];
+    rmSync(join(keepRoot, 'weights.gguf'));
+    linkSync(join(idleBlobDir, idleBlobName), join(keepRoot, 'weights.gguf'));
+
+    const plan = planRun({
+      home,
+      keepFile,
+      minIdleDays: 14,
+      listProcessUsers: noProcessUsers,
+      listDockerBindUsers: dockerNotInUse,
+      diskFreeBytes: fixedDiskFree
+    });
+
+    const selectedPaths = plan.selected.map(r => r.path);
+    assert.ok(!selectedPaths.includes(idleRoot), 'idle dir must not move while hardlinked to a KEEP-listed copy');
+
+    const skippedIdle = plan.skipped.find(r => r.path === idleRoot);
+    assert.ok(skippedIdle);
+    assert.match(skippedIdle.reason, /hardlinked to .*which is not moving/);
+    assert.match(skippedIdle.reason, /on KEEP list/);
   });
 });
 
@@ -377,5 +481,94 @@ describe('applyRun', () => {
     const [blobName] = readdirSync(blobDir);
     const content = readFileSync(join(blobDir, blobName), 'utf8');
     assert.equal(content, 'idle-model-bytes'.repeat(100));
+  });
+
+  it('crash-window negative control: if symlink creation fails after the source was staged, the source is restored byte-identical', () => {
+    const { home, keepFile, idleRoot } = buildFixture();
+    const target = tempDir('model-tidy-target-');
+
+    const originalBlobName = readdirSync(join(idleRoot, 'blobs'))[0];
+    const originalContent = readFileSync(join(idleRoot, 'blobs', originalBlobName), 'utf8');
+
+    const plan = planRun({
+      home,
+      keepFile,
+      minIdleDays: 14,
+      listProcessUsers: noProcessUsers,
+      listDockerBindUsers: dockerNotInUse,
+      diskFreeBytes: fixedDiskFree
+    });
+    plan.selected = plan.selected.filter(r => r.path === idleRoot);
+
+    // Inject a failing symlink function (the same seam applyRun exposes
+    // for copyFn/verifyFn/validateTarget) so swapToSymlink's real call
+    // fails right after the real rename has already happened — the exact
+    // crash window the fix closes.
+    let callCount = 0;
+    const failingSymlinkSync = () => {
+      callCount++;
+      throw new Error('simulated symlink failure (disk full / EIO / etc.)');
+    };
+
+    const result = applyRun({ plan, target, home, validateTarget: bypassCrossFsCheck, symlinkFn: failingSymlinkSync });
+    assert.equal(result.ok, false);
+    assert.equal(result.moved.length, 0);
+    assert.equal(result.errors.length, 1);
+    assert.equal(result.errors[0].step, 'swap');
+    assert.ok(callCount > 0, 'the injected failing symlinkSync should have been invoked');
+
+    // The source must be back at its original path, not a symlink, and
+    // byte-identical — never left staged, never left half-swapped.
+    assert.equal(existsSync(idleRoot), true);
+    assert.equal(lstatSync(idleRoot).isSymbolicLink(), false);
+    assert.equal(existsSync(idleRoot + '.tidy-moving'), false);
+    const restoredContent = readFileSync(join(idleRoot, 'blobs', originalBlobName), 'utf8');
+    assert.equal(restoredContent, originalContent);
+  });
+
+  it('refuses a unit with a leftover *.tidy-moving from a previous crash, without touching it', () => {
+    const { home, keepFile, idleRoot } = buildFixture();
+    const target = tempDir('model-tidy-target-');
+    const staging = `${idleRoot}.tidy-moving`;
+
+    const plan = planRun({
+      home,
+      keepFile,
+      minIdleDays: 14,
+      listProcessUsers: noProcessUsers,
+      listDockerBindUsers: dockerNotInUse,
+      diskFreeBytes: fixedDiskFree
+    });
+    plan.selected = plan.selected.filter(r => r.path === idleRoot);
+
+    // Simulate a previous crash: idleRoot was already renamed to staging,
+    // and (for this test) never got its symlink, so both idleRoot and the
+    // staging dir happen to coexist here only in the sense that we recreate
+    // idleRoot fresh below to prove apply won't touch EITHER.
+    mkdirSync(staging, { recursive: true });
+    writeFileSync(join(staging, 'marker'), 'leftover-from-a-previous-crash');
+    tempPaths.push(staging);
+
+    let copyCalled = false;
+    const result = applyRun({
+      plan,
+      target,
+      home,
+      validateTarget: bypassCrossFsCheck,
+      copyFn: () => { copyCalled = true; }
+    });
+
+    assert.equal(result.ok, false);
+    assert.equal(result.moved.length, 0);
+    assert.equal(result.errors.length, 1);
+    assert.equal(result.errors[0].step, 'pre-check');
+    assert.match(result.errors[0].error, /tidy-moving/);
+    assert.equal(copyCalled, false, 'apply must refuse before even attempting to copy this unit');
+
+    // Neither the original nor the leftover staging dir were touched.
+    assert.ok(existsSync(idleRoot));
+    assert.equal(lstatSync(idleRoot).isSymbolicLink(), false);
+    assert.ok(existsSync(staging));
+    assert.equal(readFileSync(join(staging, 'marker'), 'utf8'), 'leftover-from-a-previous-crash');
   });
 });

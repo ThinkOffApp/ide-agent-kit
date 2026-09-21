@@ -76,48 +76,79 @@ Refuses immediately, before touching anything, unless `--target`:
 
 For each selected unit (a single directory, or a whole hardlink set moved
 together):
+0. Refuse if a `<source>.tidy-moving` directory already exists (see step 3)
+   — that means a previous `apply` was interrupted mid-swap for this unit,
+   and this run will not guess which of the two paths is authoritative.
 1. Copy every file into `--target`, preserving the relative-to-home path,
    symlinks, and hardlink relationships.
 2. Verify every file: same relative paths, same symlink targets, same byte
    size AND SHA-256 for every regular file.
-3. Only if verification passed for every file in the unit: delete the
-   source directory (`fs.rmSync`, not a shell `rm -rf`) and replace it with
-   a symlink to the target copy.
-4. Re-verify: the symlink resolves (`realpathSync`) to the target copy.
+3. Only if verification passed for every file in the unit, swap the source
+   for a symlink via a crash-safe staged sequence:
+   `rename(source, source + '.tidy-moving')` (atomic on the same
+   filesystem) → `symlink(target-copy, source)` → verify the symlink
+   resolves (`realpathSync`) to the target copy → remove
+   `source + '.tidy-moving'`.
+4. If anything in step 3 fails after the rename, the symlink (if partially
+   created) is removed and `source + '.tidy-moving'` is renamed straight
+   back to `source`, so the unit ends up exactly as it started.
 
-**Any failure at steps 1-2 leaves the source completely untouched** — the
-delete in step 3 only ever runs after verification has already passed for
-every file in that unit. A failure for one unit does not roll back units
-that already succeeded earlier in the same run, but the process still
-exits non-zero and prints exactly which unit failed and why.
+**The safety claim is: a failure at any step leaves a unit's source EITHER
+with its original completely untouched (any failure in steps 0-2, or a
+step-3 failure that rolled back) OR with a working symlink to a verified
+copy (a step-3 swap that completed) — never neither, and never deleted
+without a verified copy existing both at the target and reachable through
+the symlink.** A failure for one unit does not roll back units that already
+succeeded earlier in the same run, but the process still exits non-zero and
+prints exactly which unit failed, at which step, and why.
 
 ## Selection rules (in order, each with an explicit reason string)
 
 1. **KEEP list** — anything matching `--keep-file` (path or glob, `~`
    expanded, `#` comments) is always skipped. See
    `config/model-tidy.keep.example`.
-2. **In use by a process** — skipped if:
+2. **In use by a process, or unverifiable** — skipped if:
    - any process has one of the model's files open under `/proc/*/fd`, or
    - a recognized serving process's command line references the path
      (`vllm`, `llama-server`, `llama.cpp`, `sglang`, `exllama`, `tabby`,
      `ollama`, `mlx`, `text-generation`).
-   Off Linux (no `/proc`), this check reports `checked: false` rather than
-   silently passing — see "Not verified" below.
-3. **Bind-mounted into a running docker container** — reads
-   `docker inspect` of every running container's `Mounts`; if the
-   candidate path is the mount source (or under it), it's in use.
-   **Fail-safe:** if `docker` is not installed or not readable, the WHOLE
-   of `~/.cache/huggingface` is treated as in-use and the run says so —
-   nothing outside that tree is blanket-skipped by this rule.
+   **Fail-closed:** this check has to succeed for *every* pid on the box to
+   count as verified. Off Linux (no `/proc`), if `/proc` itself can't be
+   listed, or if even one pid's `fd` directory or `cmdline` can't be read
+   (a permission failure, not the process simply having exited mid-scan —
+   that's a normal race and not a failure), the candidate is skipped with
+   `in-use status unverified: <why>` rather than treated as idle for lack
+   of evidence. In practice, on a typical non-root Linux host with other
+   users' or root's processes running, this makes the tool quite
+   conservative unless it runs with enough privilege to read every pid's
+   `/proc` entry — that is intentional: an unreadable process is exactly
+   the case where we cannot prove a model is idle.
+3. **Bind-mounted into (or containing) the bind-mount source of a running
+   docker container, or unverifiable** — reads `docker inspect` of every
+   running container's `Mounts`; a candidate is in use if it is at or under
+   a mount source, OR if a mount source is at or under the candidate (a
+   container mounting a subdirectory of a larger candidate still makes
+   that whole candidate unsafe to move). **Fail-closed:** if `docker` is
+   not installed, not running, or its `ps`/`inspect` output can't be read,
+   EVERY candidate on the box is skipped with `in-use status unverified:
+   docker not readable: <why>` — not just `~/.cache/huggingface`. A
+   container can bind-mount anything; only being able to enumerate every
+   running container's mounts makes any candidate provably idle.
 4. **Too recent** — skipped if the newest mtime of any real file in the
-   directory is within `--min-idle-days` (default 14).
+   directory is within `--min-idle-days` (default 14). The CLI rejects a
+   non-finite or negative `--min-idle-days` up front (e.g. a typo like
+   `--min-idle-days fourteen`) rather than let a stray `NaN` silently
+   disable this check.
 5. **Already tidied** — skipped if the candidate is already a symlink.
 6. **Hardlink sets move as one unit** — candidates are grouped by shared
-   `dev:ino` across different candidate roots. A group is selected only if
+   `dev:ino`, scanning every discovered model root regardless of its own
+   KEEP/in-use/recent status (so a hardlink to a KEEP-listed copy, or to a
+   directory that's in use, is still detected). A group is selected only if
    *every* member independently passed rules 1-5; otherwise every member is
-   skipped with a reason naming which member failed and why (moving one
-   copy of a hardlinked pair to another filesystem breaks the hardlink and
-   doubles disk use — this is the whole point of the rule).
+   skipped with `hardlinked to <path>, which is not moving (<path>'s own
+   reason)` (moving one copy of a hardlinked pair to another filesystem
+   breaks the hardlink and doubles disk use — this is the whole point of
+   the rule).
 
 Remaining candidates are sorted by size (desc) and capped by `--max-gb`
 (whole units only — a unit is either fully included in this run's budget or
@@ -182,14 +213,23 @@ it never attempts to install anything itself.
 - `plan` mode makes zero filesystem writes anywhere. It's the default.
 - `apply` requires both `--apply` AND `--target <path>` — neither alone is
   enough.
-- `--target` must be an existing, writable directory on a different
-  filesystem device than `--home`, or apply refuses before touching
-  anything.
-- A source directory is only ever deleted after its copy has been verified
-  byte-for-byte (size + SHA-256) at the target. There is no code path that
-  deletes before verifying.
-- Deletion uses `fs.rmSync` (Node), never a shell `rm -rf`.
-- A hardlink set moves as a unit or not at all — never partially.
+- `--target` must be an absolute, existing, writable directory on a
+  different filesystem device than `--home`, or apply refuses before
+  touching anything.
+- A source directory's original copy is only ever removed after (a) its
+  copy has been verified byte-for-byte (size + SHA-256) at the target, and
+  (b) the replacement symlink at the source has itself been created and
+  verified to resolve to that copy. There is no code path that removes the
+  original before both of those have happened — see the staged
+  rename/symlink/verify/cleanup sequence above. A crash between the rename
+  and the final cleanup leaves a `<source>.tidy-moving` directory, which a
+  later `apply` run detects and refuses to touch until it's resolved by
+  hand.
+- A hardlink set moves as a unit or not at all — never partially — and the
+  hardlink scan covers every discovered model root, not just the ones that
+  already passed every other rule.
+- Process- and docker-in-use checks are fail-closed: anything that could
+  not be fully verified is treated as in-use, never as idle.
 - KEEP-listed paths are never touched by either mode.
 - `--report-to-room` and any nightly `apply` are both opt-in and off by
   default.
@@ -222,3 +262,22 @@ it never attempts to install anything itself.
 - No real hardlinked pair between `~/models/*` and the HF cache has been
   inspected on either box — the fixture in `test/model-tidy.test.mjs`
   constructs a synthetic one via `fs.linkSync`.
+- **Practical consequence of the fail-closed process check, not verified
+  on a real box:** on a typical multi-process Linux host, at least some
+  pids (root's, other users', kernel-adjacent processes) will be
+  unreadable to a non-root `model-tidy` process. As written, that makes
+  EVERY run report every non-KEEP/non-tidied candidate as unverified unless
+  `model-tidy` runs with enough privilege to read every pid's `/proc`
+  entry, or unless asus1/asus2 turn out to be single-user boxes where
+  `model-tidy`'s own user can read every relevant pid. This has not been
+  checked against the real process list on either box, so it's unknown
+  whether the tool would select anything at all there today.
+- Two findings from the automated Codex review are known and NOT addressed
+  in this pass (out of scope for the three defects above, tracked here
+  instead of silently dropped): (1) `verifyUnit`'s checksum step
+  (`sha256File`) reads each file whole via `readFileSync` rather than
+  streaming — for real multi-GiB `.safetensors`/`.gguf` shards this could
+  exhaust memory or exceed Node's Buffer limits, making `apply` fail at
+  the verify step for large real models even though the copy itself
+  succeeded; (2) there is no `lsof`-based fallback for the process-in-use
+  check, only `/proc`.

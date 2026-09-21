@@ -159,7 +159,15 @@ function main() {
   const home = args.home || homedir();
   const keepFile = args['keep-file'] || (existsSync(DEFAULT_KEEP_FILE) ? DEFAULT_KEEP_FILE : undefined);
   const minIdleDays = args['min-idle-days'] !== undefined ? Number(args['min-idle-days']) : 14;
+  if (!Number.isFinite(minIdleDays) || minIdleDays < 0) {
+    console.error(`--min-idle-days must be a finite, non-negative number (got ${JSON.stringify(args['min-idle-days'])}) — refusing, since a NaN here would silently disable the freshness guard`);
+    process.exit(2);
+  }
   const maxGb = args['max-gb'] !== undefined ? Number(args['max-gb']) : Infinity;
+  if (!Number.isFinite(maxGb) && args['max-gb'] !== undefined) {
+    console.error(`--max-gb must be a finite number (got ${JSON.stringify(args['max-gb'])})`);
+    process.exit(2);
+  }
   const logDir = args['log-dir'] || DEFAULT_LOG_DIR;
 
   const plan = planRun({ home, keepFile, minIdleDays, maxGb });

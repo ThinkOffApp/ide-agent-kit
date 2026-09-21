@@ -10,9 +10,13 @@
  *                      candidate is skipped. Never touches disk.
  *   apply             — only runs with --apply AND --target <mount>. Copies
  *                      (verified byte-for-byte), then replaces the source
- *                      directory with a symlink to the copy, then re-verifies
- *                      the symlink resolves. Any failure at any step leaves
- *                      the source untouched.
+ *                      directory with a symlink to the copy via a crash-safe
+ *                      rename/symlink/verify/cleanup sequence (swapToSymlink).
+ *                      A failure at any step leaves the unit EITHER with its
+ *                      original untouched (copy/verify failures, or a swap
+ *                      failure that rolled back) OR with a working symlink
+ *                      to a verified copy (a swap that completed) — never
+ *                      neither, and never a bare deletion with no symlink.
  *
  * Zero external dependencies (Node >= 18 only), matching the rest of
  * ide-agent-kit. The copy step is a small hand-written recursive copy
@@ -21,18 +25,23 @@
  * a plain recursive copy (or `cp -a` without `-H` semantics) would silently
  * double disk usage for a hardlinked model. See copyUnitPureNode().
  *
- * Selection rules run in this order, each producing an explicit reason:
+ * Selection rules run in this order, each producing an explicit reason.
+ * Rules 2 and 3 are FAIL-CLOSED: if either check cannot be fully completed
+ * for a candidate, it is skipped as unverified rather than treated as idle
+ * on absence of evidence.
  *   1. KEEP list match                              -> always skipped
- *   2. open by a process, or referenced by a         -> skipped, "in use"
- *      known serving process's command line
- *   3. under the bind-mount source of a RUNNING       -> skipped, "in use"
- *      docker container (fail-safe: if docker is
- *      unreadable, ~/.cache/huggingface is treated
- *      as in-use)
+ *   2. open by a process, or referenced by a         -> skipped, "in use", or
+ *      known serving process's command line             "in-use status unverified"
+ *      if /proc can't be fully read for every pid       if unverifiable
+ *   3. under (or containing) the bind-mount source    -> skipped, "in use", or
+ *      of a RUNNING docker container; if docker is        "in-use status unverified"
+ *      unreadable, EVERY candidate on the box is           if docker is unreadable
+ *      unverified, not just the HF cache
  *   4. newest mtime within --min-idle-days            -> skipped, "too recent"
  *   5. already a symlink (previously tidied)          -> skipped, "already tidied"
- *   6. hardlink sets move as one unit: every member   -> skipped, "hardlink set"
- *      must be a candidate or the whole set is skipped
+ *   6. hardlink sets move as one unit: every member   -> skipped, "hardlinked to
+ *      must independently clear rules 1-5 or the         <path>, which is not moving"
+ *      whole set is skipped
  *
  * Remaining candidates are sorted by size (desc) and capped by --max-gb.
  */
@@ -41,9 +50,9 @@ import { spawnSync } from 'node:child_process';
 import {
   readdirSync, lstatSync, existsSync, readFileSync, readlinkSync,
   realpathSync, symlinkSync, rmSync, mkdirSync, copyFileSync, linkSync,
-  statSync, appendFileSync, constants as FS_CONSTANTS, accessSync
+  statSync, appendFileSync, constants as FS_CONSTANTS, accessSync, renameSync
 } from 'node:fs';
-import { join, relative, sep } from 'node:path';
+import { join, relative, sep, isAbsolute } from 'node:path';
 import { createHash } from 'node:crypto';
 import { homedir } from 'node:os';
 
@@ -265,9 +274,17 @@ export function matchesKeepList(path, keepEntries) {
 /**
  * Detect processes using a path: (a) ANY process with the path open under
  * /proc/*\/fd, (b) a recognized serving process (vllm, ollama, ...) whose
- * command line references the path. Degrades to `{checked:false}` off Linux
- * or without /proc read access — callers should treat that as "could not
- * verify" rather than "confirmed idle".
+ * command line references the path.
+ *
+ * Returns `{checked:false}` whenever the check could NOT be completed for
+ * every process on the box — off Linux (no /proc), if /proc itself can't be
+ * listed, or if even a single pid's fd directory or cmdline is unreadable
+ * (a permission failure, not the process having simply exited mid-scan,
+ * which is expected and not a failure). A permission failure on ONE pid
+ * means we cannot rule out THAT pid holding any of our candidates open, so
+ * it taints the whole result rather than being silently skipped — callers
+ * MUST treat `checked:false` as "could not verify", never as "confirmed
+ * idle".
  */
 export function findProcessUsers(path, opts = {}) {
   const procRoot = opts.procRoot || '/proc';
@@ -281,10 +298,23 @@ export function findProcessUsers(path, opts = {}) {
     return { checked: false, users: [], note: `cannot list ${procRoot}: ${e.message}` };
   }
   const users = [];
+  const unreadablePids = [];
   for (const pid of pids) {
+    let fdOk = true;
     try {
       const fdDir = join(procRoot, pid, 'fd');
-      for (const fd of readdirSync(fdDir)) {
+      let fds;
+      try {
+        fds = readdirSync(fdDir);
+      } catch (e) {
+        // ENOENT here means the process exited between the pid listing and
+        // this read — a benign race, not a verification failure. Anything
+        // else (EACCES/EPERM, or an unexpected error) means we genuinely
+        // could not check this pid's open files.
+        if (e.code !== 'ENOENT') fdOk = false;
+        fds = [];
+      }
+      for (const fd of fds) {
         try {
           const target = realpathSync(join(fdDir, fd));
           if (target === path || target.startsWith(path + sep)) {
@@ -292,12 +322,14 @@ export function findProcessUsers(path, opts = {}) {
             break;
           }
         } catch {
-          // fd vanished mid-scan, or unreadable — ignore
+          // this one fd vanished mid-scan (ENOENT) — not a verification failure
         }
       }
     } catch {
-      // /proc/<pid>/fd unreadable (permission, or process exited) — ignore
+      fdOk = false;
     }
+
+    let cmdlineOk = true;
     try {
       const cmdline = readFileSync(join(procRoot, pid, 'cmdline'), 'utf8').replace(/\0/g, ' ').trim();
       if (cmdline && cmdline.includes(path)) {
@@ -305,9 +337,21 @@ export function findProcessUsers(path, opts = {}) {
         const servingProcess = SERVING_PROCESS_NAMES.some(n => lower.includes(n));
         users.push({ pid, via: 'cmdline', cmdline: cmdline.slice(0, 200), servingProcess });
       }
-    } catch {
-      // no permission to read cmdline — ignore
+    } catch (e) {
+      if (e.code !== 'ENOENT') cmdlineOk = false;
     }
+
+    if (!fdOk || !cmdlineOk) unreadablePids.push(pid);
+  }
+
+  if (unreadablePids.length > 0) {
+    const shown = unreadablePids.slice(0, 5).join(', ');
+    const more = unreadablePids.length > 5 ? `, +${unreadablePids.length - 5} more` : '';
+    return {
+      checked: false,
+      users,
+      note: `could not read /proc for pid(s) ${shown}${more} (permission denied) — cannot rule out those processes using this path`
+    };
   }
   return { checked: true, users };
 }
@@ -317,9 +361,13 @@ export function findProcessUsers(path, opts = {}) {
 // ---------------------------------------------------------------------------
 
 /**
- * Is `path` under the bind-mount source of a RUNNING docker container?
+ * Is `path` under, or does it CONTAIN, the bind-mount source of a RUNNING
+ * docker container? Both directions matter: `path` under the mount source
+ * means the whole candidate is served; the mount source under `path` means
+ * moving `path` would carry an actively-mounted subdirectory away with it.
  * `{available:false}` means docker itself could not be queried — callers
- * must apply the fail-safe rule (treat ~/.cache/huggingface as in-use).
+ * must fail closed (see planRun: an unreadable docker means every
+ * candidate on the box is treated as unverified, not just this one).
  */
 export function findDockerBindUsers(path, opts = {}) {
   const dockerBin = opts.dockerBin || 'docker';
@@ -342,7 +390,7 @@ export function findDockerBindUsers(path, opts = {}) {
   const hits = [];
   for (const c of parsed) {
     for (const m of c.Mounts || []) {
-      if (m.Source && (path === m.Source || path.startsWith(m.Source + sep))) {
+      if (m.Source && (path === m.Source || path.startsWith(m.Source + sep) || m.Source.startsWith(path + sep))) {
         hits.push({ container: (c.Name || '').replace(/^\//, '') || (c.Id || '').slice(0, 12), source: m.Source, destination: m.Destination });
       }
     }
@@ -449,7 +497,6 @@ export function planRun(options = {}) {
   const listDockerBindUsers = options.listDockerBindUsers || findDockerBindUsers;
   const getDiskFreeBytes = options.diskFreeBytes || diskFreeBytes;
   const nowMs = options.now ? options.now.getTime() : Date.now();
-  const hfCacheRoot = join(home, '.cache', 'huggingface');
 
   const rawCandidates = options.candidates || discoverCandidates(home);
   const { groupOf, groupMembers, groupSizeBytes, filesByCandidate } = computeHardlinkGroups(rawCandidates);
@@ -463,30 +510,38 @@ export function planRun(options = {}) {
     } else if (isSymlink(c.path)) {
       skipReason = 'already a symlink (tidied)';
     } else {
+      // Rules 2-3 (process / docker in-use) are fail-closed: if either
+      // check could not be fully completed, we cannot prove the candidate
+      // is idle, so it is skipped as unverified rather than allowed
+      // through on absence of evidence. An unreadable docker taints EVERY
+      // candidate on the box, not just the HF cache — a container could
+      // bind-mount anything.
       const procResult = listProcessUsers(c.path);
-      const fdHit = (procResult.users || []).find(u => u.via === 'fd');
-      const cmdHit = (procResult.users || []).find(u => u.via === 'cmdline' && u.servingProcess);
-      const hit = fdHit || cmdHit;
-      if (hit) {
-        skipReason = hit.via === 'fd'
-          ? `in use: pid ${hit.pid} has a file open under this path`
-          : `in use: pid ${hit.pid} serving process references this path (${hit.cmdline})`;
+      if (procResult.checked === false) {
+        skipReason = `in-use status unverified: ${procResult.note || 'process check could not be completed'}`;
       } else {
-        const dockerResult = listDockerBindUsers(c.path);
-        if (dockerResult.available === false) {
-          if (c.path === hfCacheRoot || c.path.startsWith(hfCacheRoot + sep)) {
-            skipReason = `docker not readable (${dockerResult.reason}); treating ~/.cache/huggingface as in-use, fail-safe`;
+        const fdHit = (procResult.users || []).find(u => u.via === 'fd');
+        const cmdHit = (procResult.users || []).find(u => u.via === 'cmdline' && u.servingProcess);
+        const hit = fdHit || cmdHit;
+        if (hit) {
+          skipReason = hit.via === 'fd'
+            ? `in use: pid ${hit.pid} has a file open under this path`
+            : `in use: pid ${hit.pid} serving process references this path (${hit.cmdline})`;
+        } else {
+          const dockerResult = listDockerBindUsers(c.path);
+          if (dockerResult.available === false) {
+            skipReason = `in-use status unverified: docker not readable (${dockerResult.reason})`;
+          } else if (dockerResult.inUse) {
+            const first = dockerResult.containers[0];
+            skipReason = `in use: bind-mounted into running container ${first.container} (${first.source} -> ${first.destination})`;
           }
-        } else if (dockerResult.inUse) {
-          const first = dockerResult.containers[0];
-          skipReason = `in use: bind-mounted into running container ${first.container} (${first.source} -> ${first.destination})`;
-        }
-        if (!skipReason) {
-          const files = filesByCandidate.get(c.id);
-          const newest = newestMtimeMs(c.path, files);
-          const ageDays = (nowMs - newest) / 86400000;
-          if (ageDays < minIdleDays) {
-            skipReason = `modified ${ageDays.toFixed(1)}d ago, newer than --min-idle-days ${minIdleDays}`;
+          if (!skipReason) {
+            const files = filesByCandidate.get(c.id);
+            const newest = newestMtimeMs(c.path, files);
+            const ageDays = (nowMs - newest) / 86400000;
+            if (ageDays < minIdleDays) {
+              skipReason = `modified ${ageDays.toFixed(1)}d ago, newer than --min-idle-days ${minIdleDays}`;
+            }
           }
         }
       }
@@ -513,8 +568,8 @@ export function planRun(options = {}) {
           groupId: gid,
           groupSizeBytes: groupSizeBytes.get(gid),
           selected: false,
-          reason: isHardlinkSet
-            ? `hardlink set with ${failing.path}, which is skipped: ${failing.skipReason}`
+          reason: isHardlinkSet && m.id !== failing.id
+            ? `hardlinked to ${failing.path}, which is not moving (${failing.skipReason})`
             : m.skipReason
         });
       }
@@ -558,6 +613,7 @@ export function planRun(options = {}) {
   const skipped = results.filter(r => !r.selected);
   const selectedGroupIds = new Set(selected.map(r => r.groupId));
   const totalSelectedBytes = [...selectedGroupIds].reduce((sum, gid) => sum + groupSizeBytes.get(gid), 0);
+  const unverifiedCount = skipped.filter(r => r.reason.includes('unverified')).length;
 
   const freeBeforeBytes = getDiskFreeBytes(home);
   const freeAfterEstimateBytes = freeBeforeBytes == null ? null : freeBeforeBytes + totalSelectedBytes;
@@ -567,7 +623,8 @@ export function planRun(options = {}) {
     : `free before/after: ${(freeBeforeBytes / 2 ** 30).toFixed(1)} GiB -> ~${(freeAfterEstimateBytes / 2 ** 30).toFixed(1)} GiB`;
 
   const summaryLine = `model-tidy plan: ${selected.length} dir(s) in ${selectedGroupIds.size} unit(s), ` +
-    `${(totalSelectedBytes / 2 ** 30).toFixed(1)} GiB movable to target, ${skipped.length} skipped. ${freeLine}`;
+    `${(totalSelectedBytes / 2 ** 30).toFixed(1)} GiB movable to target, ${skipped.length} skipped ` +
+    `(${unverifiedCount} unverified). ${freeLine}`;
 
   return {
     home,
@@ -576,6 +633,7 @@ export function planRun(options = {}) {
     selected,
     skipped,
     totalSelectedBytes,
+    unverifiedCount,
     freeBeforeBytes,
     freeAfterEstimateBytes,
     freeLine,
@@ -699,10 +757,11 @@ function listAllEntries(root) {
   return out;
 }
 
-/** Validate --target: must exist, be a directory, be writable, and be on a
- * different filesystem device than `home`. */
+/** Validate --target: must be an absolute path, must exist, be a directory,
+ * be writable, and be on a different filesystem device than `home`. */
 export function validateTarget(target, home) {
   if (!target) return { ok: false, error: '--target is required with --apply' };
+  if (!isAbsolute(target)) return { ok: false, error: `--target ${target} must be an absolute path (a relative target makes the resulting symlink text ambiguous)` };
   if (!existsSync(target)) return { ok: false, error: `--target ${target} does not exist` };
   const st = statSync(target);
   if (!st.isDirectory()) return { ok: false, error: `--target ${target} is not a directory` };
@@ -718,18 +777,68 @@ export function validateTarget(target, home) {
   return { ok: true };
 }
 
+const STAGING_SUFFIX = '.tidy-moving';
+
+/**
+ * Swap one source directory for a symlink to its already-verified copy,
+ * crash-safely:
+ *
+ *   rename(src, src + STAGING_SUFFIX)   [atomic, same filesystem]
+ *   symlink(dst, src)
+ *   verify src resolves to dst
+ *   remove src + STAGING_SUFFIX
+ *
+ * A same-filesystem rename is atomic, so a crash at any point leaves EITHER
+ * the original directory in place (still at its staging name, never lost)
+ * OR a working symlink to the verified copy — never neither. If anything
+ * after the rename fails, this function removes the half-made symlink (if
+ * any) and renames the staging directory back to `src` before returning, so
+ * the caller sees `src` exactly as it was on entry.
+ */
+function swapToSymlink(src, dst, opts = {}) {
+  const doSymlink = opts.symlinkSync || symlinkSync;
+  const staging = src + STAGING_SUFFIX;
+  if (existsSync(staging)) {
+    throw new Error(`refusing to touch ${src}: a leftover ${staging} from a previous interrupted apply already exists — resolve it manually (verify which of ${src}/${staging} is intact, then remove the other) before retrying`);
+  }
+  renameSync(src, staging);
+  try {
+    doSymlink(dst, src);
+    const real = realpathSync(src);
+    if (real !== realpathSync(dst) || !lstatSync(src).isSymbolicLink()) {
+      throw new Error(`post-symlink verification failed for ${src}`);
+    }
+    rmSync(staging, { recursive: true });
+  } catch (e) {
+    // Roll back: remove any half-made symlink, then restore the original
+    // from staging so the caller finds `src` exactly as it was.
+    try {
+      if (lstatSync(src).isSymbolicLink()) rmSync(src);
+    } catch {
+      // src may not exist at all if symlinkSync itself never ran — fine.
+    }
+    renameSync(staging, src);
+    throw e;
+  }
+}
+
 /**
  * Apply a plan: move every selected unit to `target`, unit by unit. Each
- * unit is copied, verified, and only THEN does its source directory get
- * replaced with a symlink — so a failure at any step for a unit leaves that
- * unit's source completely untouched. One unit's failure does not roll back
- * units that already succeeded; the run still exits non-zero overall.
+ * unit is copied, verified, and only THEN is its source directory swapped
+ * for a symlink via swapToSymlink()'s rename/symlink/verify/cleanup
+ * sequence. A failure at ANY step — copy, verify, or swap — leaves that
+ * unit's source EITHER fully in place (copy/verify failures never touch
+ * the source) OR replaced by a working symlink to a verified copy (a swap
+ * failure rolls back to the original). There is no state in between. One
+ * unit's failure does not roll back units that already succeeded earlier
+ * in the same run; the process still exits non-zero overall.
  */
 export function applyRun(options) {
   const { plan, target, home } = options;
   const copyFn = options.copyFn || copyUnitPureNode;
   const verifyFn = options.verifyFn || verifyUnit;
   const validateTargetFn = options.validateTarget || validateTarget;
+  const symlinkFn = options.symlinkFn; // test-only injection; real default is symlinkSync inside swapToSymlink
 
   const validation = validateTargetFn(target, home);
   if (!validation.ok) {
@@ -747,6 +856,18 @@ export function applyRun(options) {
 
   for (const [groupId, members] of byGroup) {
     const sourceAbsPaths = members.map(m => m.path);
+
+    const leftoverStaging = sourceAbsPaths.filter(src => existsSync(src + STAGING_SUFFIX));
+    if (leftoverStaging.length > 0) {
+      errors.push({
+        groupId,
+        paths: sourceAbsPaths,
+        step: 'pre-check',
+        error: `refusing: ${leftoverStaging.map(p => `${p}${STAGING_SUFFIX}`).join(', ')} left over from a previous interrupted apply — resolve manually before retrying this unit`
+      });
+      continue;
+    }
+
     try {
       copyFn(sourceAbsPaths, home, target);
     } catch (e) {
@@ -767,12 +888,7 @@ export function applyRun(options) {
       const rel = relative(home, src);
       const dst = join(target, rel);
       try {
-        rmSync(src, { recursive: true });
-        symlinkSync(dst, src);
-        const real = realpathSync(src);
-        if (real !== realpathSync(dst) || !lstatSync(src).isSymbolicLink()) {
-          throw new Error(`post-symlink verification failed for ${src}`);
-        }
+        swapToSymlink(src, dst, { symlinkSync: symlinkFn });
         swapped.push({ source: src, target: dst });
       } catch (e) {
         swapFailed = { path: src, error: e.message };
