@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
 import { execSync } from 'node:child_process';
-import { readFileSync, writeFileSync, appendFileSync, existsSync } from 'node:fs';
+import { readFileSync, writeFileSync, appendFileSync, existsSync, renameSync, unlinkSync } from 'node:fs';
+import { homedir } from 'node:os';
 import { randomUUID } from 'node:crypto';
 import { createReceipt, appendReceipt } from './receipt.mjs';
 import { canSend, markSent } from './rate-limiter.mjs';
@@ -60,27 +61,61 @@ function loadSeenIds(path) {
   }
 }
 
+// Write through a temp file and rename. A direct write that is interrupted
+// leaves a truncated or empty seen-file, and an empty seen-file on the next
+// start means every historical message is unseen again -- a crash during a
+// routine save becomes a replay of privileged commands (@codexmb). rename(2)
+// within a directory is atomic, so a reader sees the old file or the new one
+// and never a half-written one.
 function saveSeenIds(path, ids) {
   const arr = [...ids].slice(-2000);
-  writeFileSync(path, arr.join('\n') + '\n');
-}
-
-function fetchRoomMessages(room, apiKey, limit = 20) {
-  const url = `https://groupmind.one/api/v1/rooms/${room}/messages?limit=${limit}`;
+  const tmp = `${path}.tmp-${process.pid}`;
   try {
-    const result = execSync(
-      `curl -sS -H "X-API-Key: ${apiKey}" "${url}"`,
-      { encoding: 'utf8', timeout: 15000 }
-    );
-    const data = JSON.parse(result);
-    return data.messages || (Array.isArray(data) ? data : []);
+    writeFileSync(tmp, arr.join('\n') + '\n');
+    renameSync(tmp, path);
   } catch (e) {
-    console.error(`  fetch ${room} failed: ${e.message}`);
-    return [];
+    // Losing the save is survivable; losing it SILENTLY is not, because the
+    // consequence lands on the next startup as a replay.
+    console.error(`  FAILED to persist seen ids to ${path}: ${e.message}`);
+    try { unlinkSync(tmp); } catch {}
+    throw e;
   }
 }
 
-function postMessage(room, body, apiKey, config) {
+// Returns an array on success and NULL on failure. The difference matters: []
+// for a failed fetch made "the room is quiet" and "I could not ask" identical,
+// so seeding could complete on nothing and the first poll that DID succeed
+// treated the whole history as new -- fail-open seeding on a dispatch path
+// (@codexmb).
+//
+// The key also no longer goes through a shell: `curl -H "X-API-Key: ${key}"`
+// under execSync puts the credential in the process table for anyone running ps.
+export // The base is injectable ONLY so the startup/replay path can be exercised
+// against a stub room server. @codexmb: "handle tests alone do not exercise
+// poller startup/replay" -- and they cannot, if the host is hardcoded.
+let API_BASE = 'https://groupmind.one/api/v1';
+export function __setApiBaseForTest(base) { API_BASE = base || 'https://groupmind.one/api/v1'; }
+
+export async function fetchRoomMessages(room, apiKey, limit = 20) {
+  const url = `${API_BASE}/rooms/${encodeURIComponent(room)}/messages?limit=${limit}`;
+  try {
+    const res = await fetch(url, {
+      headers: { 'X-API-Key': apiKey },
+      signal: AbortSignal.timeout(15000),
+    });
+    if (!res.ok) {
+      console.error(`  fetch ${room} failed: HTTP ${res.status}`);
+      return null;
+    }
+    const data = await res.json();
+    return data.messages || (Array.isArray(data) ? data : []);
+  } catch (e) {
+    console.error(`  fetch ${room} failed: ${e.message}`);
+    return null;
+  }
+}
+
+async function postMessage(room, body, apiKey, config) {
   if (isAckOnly(body)) {
     console.log(`  ack-only message filtered, skipping post to ${room}: ${body.slice(0, 60)}`);
     return false;
@@ -89,23 +124,185 @@ function postMessage(room, body, apiKey, config) {
     console.log(`  rate-limited (${config?.rate_limit?.message_interval_sec || 30}s interval), skipping post to ${room}`);
     return false;
   }
-  const payload = JSON.stringify({ room, body });
-  try {
-    execSync(
-      `curl -sS -X POST "https://groupmind.one/api/v1/messages" -H "X-API-Key: ${apiKey}" -H "Content-Type: application/json" -d '${payload.replace(/'/g, "'\\''")}'`,
-      { timeout: 15000 }
-    );
-    markSent();
-    return true;
-  } catch (e) {
-    console.error(`  post failed: ${e.message}`);
-    return false;
-  }
+    // The old version shelled out to curl and returned true whenever curl exited
+    // 0 -- which it does for a 500. A receipt then said "completed" for a message
+    // that never reached the room (@codexmb). The status is checked now, and the
+    // key no longer travels through a command line where ps can read it.
+    try {
+      const res = await fetch(`${API_BASE}/messages`, {
+        method: 'POST',
+        headers: { 'X-API-Key': apiKey, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ room, body }),
+        signal: AbortSignal.timeout(15000),
+      });
+      if (!res.ok) {
+        console.error(`  post failed: HTTP ${res.status}`);
+        return false;
+      }
+      markSent();
+      return true;
+    } catch (e) {
+      console.error(`  post failed: ${e.message}`);
+      return false;
+    }
 }
 
 /**
  * Check if a message matches a rule's conditions.
  */
+// ---------------------------------------------------------------------------
+// /lead — the chat command Petrus asked for on 2026-09-18 07:25 ("Team lead
+// assigned by me dynamically (chat command?)").
+//
+//   /lead @agent   appoint or transfer     /lead status   who holds it
+//   /lead clear    vacate the post
+//
+// HANDLED HERE, NOT AS A CONFIGURABLE RULE, on purpose. Who may approve
+// commands on this machine is not something that should be editable by adding
+// an entry to a rules array in a JSON file — a rule that grants approval
+// rights is a rule someone can write by accident.
+//
+// AUTHORISATION IS DOUBLE-KEYED: the sender must be the owner handle AND the
+// message must be flagged as human. Either alone is too weak — agents post
+// under their own handles with isHuman false, and a tapped action button
+// arrives as `petrus` with isHuman false (see the action-button notes), so
+// requiring both means neither an agent quoting this syntax nor a replayed
+// button can appoint anyone. The daemon enforces the same rules again; this
+// is the outer key, not the only one.
+// ---------------------------------------------------------------------------
+
+const LEAD_COMMAND_RE = /^\s*\/lead\b\s*(.*)$/i;
+
+function parseLeadCommand(body) {
+  // Read the FIRST LINE only. The original regex ran against the whole body
+  // with no /m flag, so `$` demanded end-of-string and any second line made the
+  // command invisible: @claudeMB's test message was "/lead status" followed by
+  // a note to petrus, and it was silently ignored. Someone typing a command and
+  // then a sentence has still typed a command.
+  const lines = String(body || '').split('\n');
+  const m = LEAD_COMMAND_RE.exec(lines[0] || '');
+  if (!m) return null;
+  const rest = (m[1] || '').trim();
+  const hasMoreLines = lines.slice(1).join('').trim().length > 0;
+  if (!rest || /^status$/i.test(rest)) return { op: 'status' };
+  if (/^clear$/i.test(rest)) return { op: 'clear' };
+  // STRICT on purpose: exactly one token, nothing trailing. Taking the first
+  // word of "/lead somebody nice please" and appointing @somebody is a wrong
+  // guess that hands command-approval rights to the wrong agent. When the
+  // input is not unambiguous, refuse and say so.
+  if (!/^@?[A-Za-z0-9_.-]+$/.test(rest)) return { op: 'invalid', handle: rest };
+  // Appointing is a PRIVILEGE GRANT, so it stays maximally strict: the command
+  // must be the whole message. Reading it out of the first line of a longer
+  // post is how a quoted line becomes an appointment. Status and clear are
+  // harmless reads and may carry trailing prose.
+  if (hasMoreLines) return { op: 'not-alone', handle: rest };
+  return { op: 'assign', handle: rest.replace(/^@+/, '') };
+}
+
+async function callDaemon(daemonUrl, path, { method = 'GET', body, token } = {}) {
+  // `token` is the caller's PER-AGENT principal token. Without it the daemon
+  // cannot tell who is asking, and POST /lead refuses outright ("delegation is
+  // unavailable"). That refusal is correct and it is why /lead had never
+  // worked end to end: this function attached no identity at all, so a
+  // perfectly authorised owner command died at the last hop. Verified live
+  // 2026-09-19: POST /lead -> 403, GET /lead -> 200.
+  //
+  // Omitted when unset, so a daemon with no principals configured behaves
+  // exactly as before rather than sending an empty Bearer.
+  const headers = {};
+  if (body) headers['Content-Type'] = 'application/json';
+  if (token) headers.Authorization = `Bearer ${token}`;
+  const res = await fetch(`${daemonUrl.replace(/\/+$/, '')}${path}`, {
+    method,
+    headers: Object.keys(headers).length > 0 ? headers : undefined,
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  let payload = null;
+  try { payload = await res.json(); } catch { /* non-JSON error body */ }
+  return { status: res.status, payload };
+}
+
+function readPrincipalToken(config) {
+  const p = config?.mcp?.confirmations?.principal_token_file
+    || config?.confirmations?.principal_token_file;
+  if (!p) return undefined;
+  try {
+    const v = readFileSync(p.replace(/^~/, homedir()), 'utf8').trim();
+    return v || undefined;
+  } catch {
+    // A missing token file is not fatal: /lead then answers with the
+    // "not configured on this machine" reply rather than throwing and
+    // taking the whole poller down with it.
+    return undefined;
+  }
+}
+
+/**
+ * Returns a reply string when the message was a /lead command, or null when it
+ * was not one. Never throws: a daemon that is down must not stop the poller.
+ */
+export async function handleLeadCommand(msg, { daemonUrl, ownerHandle = 'petrus', principalToken } = {}) {
+  const parsed = parseLeadCommand(msg.body || '');
+  if (!parsed) return null;
+
+  const sender = (msg.user?.handle || msg.from || msg.sender || '').replace(/^@+/, '').toLowerCase();
+  const owner = ownerHandle.replace(/^@+/, '').toLowerCase();
+  const fromOwner = sender === owner && msg.isHuman === true;
+
+  try {
+    if (parsed.op === 'status') {
+      const { status, payload } = await callDaemon(daemonUrl, '/lead');
+      // A daemon that does not KNOW about /lead answers 404, and reading that
+      // as "unset" would be a false answer wearing a legitimate one — the same
+      // failure shape as an empty list that is really a broken query. Say the
+      // feature is not running instead.
+      if (status === 404 || !payload?.ok) {
+        return 'Team lead: this daemon does not have /lead — the feature is built but not '
+          + 'running here yet (it needs a restart). Confirmations are owner-only meanwhile.';
+      }
+      const lead = payload.lead;
+      return lead
+        ? `Team lead: ${lead.handle} (assigned by ${lead.assignedBy}).`
+        : 'Team lead: unset. Only the owner can decide confirmations, and only the owner can appoint a lead.';
+    }
+    if (parsed.op === 'not-alone') {
+      // Say WHY. "@grok is not a handle" would be false and would send whoever
+      // typed it looking for a typo that is not there.
+      return `Appointing a lead has to be the whole message. Send just "/lead @${parsed.handle.replace(/^@+/, '')}" `
+        + 'on its own, with nothing after it.';
+    }
+    if (parsed.op === 'invalid') {
+      return `"${parsed.handle}" is not a handle. Use /lead @agent, /lead status or /lead clear.`;
+    }
+    if (!fromOwner) {
+      // Say which key was missing rather than a flat refusal — a lead trying to
+      // hand over from chat needs to know the daemon route exists for that.
+      return `Only ${ownerHandle} can change the team lead from chat. A sitting lead may hand over via the daemon.`;
+    }
+    const { status, payload } = await callDaemon(daemonUrl, '/lead', {
+      method: 'POST',
+      body: { handle: parsed.op === 'clear' ? null : parsed.handle, actor: ownerHandle },
+      token: principalToken,
+    });
+    // A 403 here is the daemon saying it cannot identify the caller, which is
+    // a CONFIGURATION fault on this side, not a refusal of the user. Saying
+    // "forbidden" would send petrus looking for a permission he already has.
+    if (status === 403 && !principalToken) {
+      return 'Team lead is not configured on this machine: the room poller has no '
+        + 'principal token, so the daemon cannot tell that the request comes from it. '
+        + 'Nothing was changed.';
+    }
+    if (payload?.ok) {
+      return parsed.op === 'clear'
+        ? 'Team lead cleared. Confirmations are owner-only again.'
+        : `Team lead is now @${parsed.handle}. Destructive, credential and paid actions still wait for ${ownerHandle}.`;
+    }
+    return `Could not change the lead (${status}): ${payload?.error || 'no response'}`;
+  } catch (e) {
+    return `Could not reach the confirmations daemon: ${e.message}`;
+  }
+}
+
 function matchesRule(msg, rule) {
   const match = rule.match || {};
   const body = (msg.body || '').toLowerCase();
@@ -154,7 +351,7 @@ function matchesRule(msg, rule) {
 // silence agent chatter, not to make the room stop answering the person typing
 // in it -- a withheld reply to a command he just sent is indistinguishable from
 // a crash, which is a failure this repo keeps rediscovering.
-function executeAction(action, msg, apiKey, config, muted = false) {
+async function executeAction(action, msg, apiKey, config, muted = false) {
   const startedAt = new Date().toISOString();
   if (!action) {
     return createReceipt({
@@ -187,7 +384,7 @@ function executeAction(action, msg, apiKey, config, muted = false) {
         startedAt,
       });
     }
-    const ok = postMessage(targetRoom, body, apiKey, config);
+    const ok = await postMessage(targetRoom, body, apiKey, config);
     return createReceipt({
       actor: { name: config?.poller?.handle || 'ide-agent-kit', kind: 'automation' },
       action: `post to ${targetRoom}`,
@@ -268,6 +465,7 @@ export async function startRoomAutomation({ rooms, apiKey, handle, interval, con
   const receiptPath = config?.receipts?.path || './ide-agent-receipts.jsonl';
   const pollInterval = interval || config?.automation?.interval_sec || 30;
   const selfHandle = resolveSelfHandle({ explicit: handle, config });
+  if (config?.automation?.api_base) __setApiBaseForTest(config.automation.api_base);
   const cooldownMs = (config?.automation?.cooldown_sec || 5) * 1000;
 
   console.log(`Room automation started`);
@@ -283,18 +481,57 @@ export async function startRoomAutomation({ rooms, apiKey, handle, interval, con
   const seen = loadSeenIds(seenFile);
   const lastFired = new Map(); // rule name → timestamp
 
-  // Seed on first run
-  if (seen.size === 0) {
-    console.log(`  seeding seen IDs...`);
-    for (const room of rooms) {
-      const msgs = await fetchRoomMessages(room, apiKey, 50);
-      for (const m of msgs) {
-        if (m.id) seen.add(m.id);
-      }
-    }
-    saveSeenIds(seenFile, seen);
-    console.log(`  seeded ${seen.size} IDs`);
+  // Seed on first run, and REFUSE TO DISPATCH if seeding could not complete.
+  //
+  // The old version treated a failed fetch as an empty room, so a transient
+  // network error at startup produced a "successful" seed of nothing -- and the
+  // first poll that worked then saw every historical message as new. On a path
+  // that can execute /lead or /approve, that is a replay of privileged history
+  // caused by a dropped packet (@codexmb).
+  //
+  // Dispatch is gated on `ready`. Seeding retries on the poll interval until it
+  // succeeds; until then the loop executes nothing.
+  // Seeding is per ROOM, not per process. `seen.size > 0` was enough to declare
+  // the whole thing seeded, so adding a room to the list later meant its entire
+  // history arrived as new and any historical /lead in it would dispatch
+  // (@codexmb). The marker file records WHICH rooms have been seeded.
+  const seededFile = `${seenFile}.seeded`;
+  const seededRooms = new Set(
+    (() => { try { return readFileSync(seededFile, 'utf8').split('\n').filter(Boolean); } catch { return []; } })()
+  );
+  function markSeeded(room) {
+    seededRooms.add(room);
+    const tmp = `${seededFile}.tmp-${process.pid}`;
+    try { writeFileSync(tmp, [...seededRooms].join('\n') + '\n'); renameSync(tmp, seededFile); }
+    catch (e) { console.error(`  FAILED to record seeded rooms: ${e.message}`); try { unlinkSync(tmp); } catch {} throw e; }
   }
+  // A pre-existing seen-file from before this marker existed counts as having
+  // seeded the rooms configured at that time -- otherwise the upgrade itself
+  // would replay them. New rooms added after this point still seed properly.
+  if (seen.size > 0 && seededRooms.size === 0) {
+    for (const room of rooms) seededRooms.add(room);
+    try { markSeeded(rooms[0]); } catch {}
+    console.log(`  existing seen-file adopted for ${rooms.length} room(s)`);
+  }
+
+  async function trySeed() {
+    const pending = rooms.filter(r => !seededRooms.has(r));
+    if (!pending.length) return true;
+    console.log(`  seeding ${pending.length} room(s): ${pending.join(', ')}`);
+    for (const room of pending) {
+      const msgs = await fetchRoomMessages(room, apiKey, 50);
+      if (msgs === null) {
+        console.error(`  seeding ABORTED: could not read ${room}. Dispatch stays off until it succeeds.`);
+        return false;
+      }
+      for (const m of msgs) if (m.id) seen.add(m.id);
+      saveSeenIds(seenFile, seen);
+      markSeeded(room);
+      console.log(`  seeded ${room}; ${seen.size} ids known`);
+    }
+    return true;
+  }
+  let ready = await trySeed();
 
   async function poll() {
     let actionsRun = 0;
@@ -306,11 +543,23 @@ export async function startRoomAutomation({ rooms, apiKey, handle, interval, con
     const muted = await shouldSuppressNudge(config);
     if (muted) console.log('  emergency-only: agent-triggered posts withheld; his own still answered');
 
+    if (!ready) {
+      ready = await trySeed();
+      if (!ready) return;   // still blind: execute nothing
+    }
+
     for (const room of rooms) {
-      const msgs = fetchRoomMessages(room, apiKey);
+      const msgs = await fetchRoomMessages(room, apiKey);
+      if (msgs === null) continue;   // could not read this room; do not guess
       for (const m of msgs) {
         if (!m.id || seen.has(m.id)) continue;
+        // Mark seen and PERSIST before acting. The old order saved once at the
+        // end of the poll, so a crash between executing a command and saving
+        // replayed it on restart (@codexmb). At-most-once is the right bias for
+        // a privileged action: a missed /lead is a message petrus can send
+        // again, a repeated one is an appointment he never made.
         seen.add(m.id);
+        saveSeenIds(seenFile, seen);
 
         // Skip own messages (case-insensitive; see src/common/handles.mjs)
         const sender = m.user?.handle || m.from || m.sender || '';
@@ -318,6 +567,41 @@ export async function startRoomAutomation({ rooms, apiKey, handle, interval, con
 
         // Attach room for rule matching
         m.room = room;
+
+        // /lead runs BEFORE the configurable rules and consumes the message.
+        // It is a command about who may approve things, so it must not be
+        // shadowed, cooled down or overridden by whatever is in the rules
+        // array.
+        const leadReply = await handleLeadCommand(m, {
+          daemonUrl: config?.confirmations?.daemon_url || 'http://127.0.0.1:8788',
+          ownerHandle: config?.poller?.owner_handle || 'petrus',
+          // The poller's principal token. Read from a FILE, never inlined:
+          // config carries the path, the value stays in ~/.config/iak-gate.token
+          // at mode 600. Same token petrus's phone has presented since
+          // 2026-07-08, mapped to `petrus` in principals -- /lead needs
+          // actor == petrus because only the owner may appoint a lead.
+          principalToken: readPrincipalToken(config),
+        });
+        if (leadReply !== null) {
+          const posted = await postMessage(room, leadReply, apiKey, config);
+          if (!posted) {
+            // A receipt that says "completed" for a reply nobody can see is
+            // worse than no receipt: it is the silence petrus experienced,
+            // recorded as a success (@codexmb).
+            console.error('  /lead reply was NOT posted; not recording it as completed');
+          }
+          appendReceipt(receiptPath, createReceipt({
+            actor: { name: 'automation', kind: 'command' },
+            action: `/lead from ${m.user?.handle || m.from || '?'}`,
+            // The status is what HAPPENED, not what was attempted. This said
+            // 'completed' even when the post returned false, recording the exact
+            // silence petrus hit as a success (@codexmb).
+            status: posted ? 'completed' : 'failed',
+            startedAt: new Date().toISOString(),
+          }));
+          actionsRun++;
+          continue;
+        }
 
         // Check each rule
         for (const rule of rules) {
@@ -331,7 +615,7 @@ export async function startRoomAutomation({ rooms, apiKey, handle, interval, con
           }
 
           console.log(`  rule "${rule.name}" matched → ${rule.action?.type || '?'}`);
-          const receipt = executeAction(rule.action, m, apiKey, config, muted);
+          const receipt = await executeAction(rule.action, m, apiKey, config, muted);
           appendReceipt(receiptPath, receipt);
           lastFired.set(rule.name, now);
           actionsRun++;
@@ -349,23 +633,36 @@ export async function startRoomAutomation({ rooms, apiKey, handle, interval, con
     }
   }
 
-  // Initial poll
-  await poll();
-
-  // Start interval
-  const timer = setInterval(poll, pollInterval * 1000);
+  // setInterval(poll) fired an async function and dropped the promise, so a
+  // rejection inside a later poll went to unhandledRejection while the loop
+  // carried on looking healthy -- the CLI's .catch only ever covered the FIRST
+  // call (@codexmb). This schedules the next run only after the previous one
+  // settles, and a failure is loud without stopping the loop.
+  let stopped = false;
+  let timer = null;
+  const runLoop = async () => {
+    if (stopped) return;
+    try {
+      await poll();
+    } catch (e) {
+      console.error(`  poll failed: ${e?.message || e}`);
+      console.error('  automation continues; dispatch stays gated on a successful seed.');
+    }
+    if (!stopped) timer = setTimeout(runLoop, pollInterval * 1000);
+  };
+  await runLoop();
 
   process.on('SIGINT', () => {
     console.log('\nAutomation stopped.');
-    clearInterval(timer);
+    stopped = true; if (timer) clearTimeout(timer);
     process.exit(0);
   });
   process.on('SIGTERM', () => {
-    clearInterval(timer);
+    stopped = true; if (timer) clearTimeout(timer);
     process.exit(0);
   });
 
-  return timer;
+  return { stop: () => { stopped = true; if (timer) clearTimeout(timer); } };
 }
 
 // Exported for tests only: the mute carve-out is the kind of logic that must

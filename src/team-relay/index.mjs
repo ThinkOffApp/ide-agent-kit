@@ -2,7 +2,7 @@
 // team-relay — generic room/comms modules for IDE Agent Kit
 
 export { startRoomPoller, checkRoomMessages } from './room-poller.mjs';
-export { startRoomAutomation } from './room-automation.mjs';
+export { startRoomAutomation } from '../room-automation.mjs';
 export { startWebhookServer } from './webhook-server.mjs';
 export { pollDiscord, startDiscordPoller } from './discord-poller.mjs';
 export { UnifiedPoller } from './unified-poller.mjs';
