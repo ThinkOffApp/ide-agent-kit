@@ -27,6 +27,7 @@ import { defaultCallbackBase,
   makeCodewatchAnnouncer,
   composeAnnouncers,
   registerKindHandler,
+  loadPersistedState,
 } from '../src/confirmations.mjs';
 import { applyChoice, resolveModelRegistryPath, resolveModelSelectionPath } from '../src/model-selection.mjs';
 import { resolveCallerHost } from '../packages/user-intent-kit/src/model-capacity.js';
@@ -113,6 +114,22 @@ registerKindHandler('model', async ({ id, decision, offeredModels }) => {
     console.warn(`[iak-mcp-daemon] model choice ${id}: NOT applied (${result.outcome})${result.error ? ` — ${result.error}` : ''}`);
   }
 });
+// Replay persisted intents BEFORE the listener opens, so a card that was
+// pending when the old process died is decidable the moment the new one
+// answers. IAK #116 added loadPersistedState but never called it from here -
+// it was only ever invoked by tests - so persistence was merged and INACTIVE:
+// every restart still wiped the queue, which is the exact failure the PR was
+// for. Found by the Sep-16 Codex reviewer, confirmed by claudeMB, fixed here.
+//
+// Off unless `mcp.confirmations.state_file` is set: an operator opts in by
+// naming the file, and the log line below says what actually came back
+// rather than assuming the replay worked.
+if (cc.state_file) {
+  const replay = loadPersistedState(cc.state_file);
+  console.log(`[iak-mcp-daemon] persistence on: ${cc.state_file} - replayed ${replay.intents} intent(s), skipped ${replay.skipped} bad line(s)`);
+} else {
+  console.warn('[iak-mcp-daemon] mcp.confirmations.state_file not set - intents will NOT survive a restart');
+}
 
 // Start the HTTP listener first so any decisions can settle.
 // Wake script: defaults to scripts/claudemb-wake.sh in this repo.
@@ -124,6 +141,13 @@ startConfirmationsServer({
   port: cc.port || 8788,
   host: cc.host || '127.0.0.1',
   authToken: cc.auth_token || '',
+  // Per-agent principal tokens. startConfirmationsServer has accepted these
+  // since the team-lead work, but NOTHING EVER PASSED THEM: this call read
+  // auth_token and stopped, so `principals` in dogfood.json was inert and
+  // POST /lead answered "this daemon has no per-agent tokens" whatever was
+  // configured. That is why /lead never worked end to end -- the missing
+  // bearer in callDaemon was only half of it.
+  principals: cc.principals || {},
   receiptsPath: config?.receipts?.path,
   announce: serverAnnounce,
   wakeScript,

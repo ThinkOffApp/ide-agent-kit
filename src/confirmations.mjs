@@ -327,6 +327,12 @@ export function listIntents() {
     // output cannot disagree about what is known.
     announceSummary: announceSummaryLine(i),
     announcements: announcementsView(i),
+    // Who decided, and under which rule. The queue and the dashboard both read
+    // this projection, so leaving it out hid the audit trail in the one place
+    // anyone would go looking for it.
+    decidedBy: i.decidedBy ?? null,
+    decidedByRole: i.decidedByRole ?? null,
+    requiresHuman: Boolean(i.requiresHuman),
   }));
 }
 
@@ -347,13 +353,142 @@ export function getIntent(id) {
     announceState: announceStateOf(i),
     announceSummary: announceSummaryLine(i),
     announcements: announcementsView(i),
+    decidedBy: i.decidedBy ?? null,
+    decidedByRole: i.decidedByRole ?? null,
+    requiresHuman: Boolean(i.requiresHuman),
   };
 }
 
 // Decide an intent. Returns true if decided, false if id unknown or already
 // decided. Idempotent for same decision; rejects different decision after
 // settle.
-export function decideIntent(id, rawDecision, { receiptsPath } = {}) {
+// ---------------------------------------------------------------------------
+// TEAM-LEAD APPROVALS
+//
+// Petrus, 2026-09-18 07:20: "we need autoapprove or team lead approve for these
+// if i sleep", and 07:25: "Ok lets do 2 and 3. Team lead assigned by me
+// dynamically (chat command?) and lead can move the duty to another agent if
+// they need to".
+//
+// So: a single lead may decide ordinary confirmations in his place. The rules
+// below are what keep that from becoming "any agent can approve anything".
+//
+//   * The lead starts UNSET and there is no default. An unset lead means only
+//     the human owner decides, which is exactly today's behaviour — this
+//     feature can never weaken the gate by simply being deployed.
+//   * NO SELF-APPOINTMENT. An agent cannot make itself lead, and cannot appoint
+//     one while the post is empty; only the human owner can fill it. Otherwise
+//     the first agent to boot grants itself approval rights.
+//   * The sitting lead MAY hand over, because Petrus asked for exactly that.
+//     It may not appoint a second lead: handing over clears its own claim.
+//   * The human owner can always assign, transfer or clear, and can always
+//     decide regardless of who holds the post.
+//   * Intents marked `requiresHuman` are never delegable. Destructive,
+//     credential and paid actions are the owner's alone; a sleeping owner is a
+//     reason to delay those, not to widen who may authorise them.
+//   * Every assignment and every decision records WHO did it. Before this, the
+//     receipt said `actor: 'petrus'` no matter who called the endpoint, so the
+//     audit trail asserted something nobody had checked.
+// ---------------------------------------------------------------------------
+
+/** Handle of the human owner — the only identity that can fill an empty post. */
+export const OWNER_HANDLE = 'petrus';
+
+let teamLead = null; // { handle, assignedBy, assignedAt }
+
+function normalizeHandle(handle) {
+  if (typeof handle !== 'string') return null;
+  // Lowercased: handles are identities, and every comparison below goes
+  // through here. Without this a lead could raise an intent as "@Lead" and
+  // clear it as "@lead", which is the self-approval bypass canDecide exists to
+  // refuse (claudeMB, review of #131, reproduced live).
+  const trimmed = handle.trim().replace(/^@+/, '').toLowerCase();
+  return trimmed ? `@${trimmed}` : null;
+}
+
+function isOwner(actor) {
+  return normalizeHandle(actor) === normalizeHandle(OWNER_HANDLE);
+}
+
+/** Current lead, or null. Safe to call before any assignment. */
+export function getLead() {
+  return teamLead ? { ...teamLead } : null;
+}
+
+/**
+ * Assign, transfer or clear the lead.
+ *   - owner may do anything;
+ *   - the sitting lead may transfer the duty onward, or clear it;
+ *   - nobody else may touch it, and nobody may appoint themselves.
+ * Pass `handle: null` to clear.
+ */
+export function setLead(handle, { actor, receiptsPath } = {}) {
+  const by = normalizeHandle(actor);
+  if (!by) return { ok: false, error: 'actor is required' };
+  const target = handle === null ? null : normalizeHandle(handle);
+  if (handle !== null && !target) return { ok: false, error: 'handle is required' };
+
+  const owner = isOwner(by);
+  const sitting = teamLead && normalizeHandle(teamLead.handle) === by;
+  if (!owner && !sitting) {
+    return {
+      ok: false,
+      forbidden: true,
+      error: teamLead
+        ? `only ${OWNER_HANDLE} or the current lead (${teamLead.handle}) may change the lead`
+        : `the lead is unset; only ${OWNER_HANDLE} may appoint one`,
+    };
+  }
+  // A lead handing over must name someone else. Re-appointing yourself is a
+  // no-op dressed as an action, and self-appointment is the thing we forbid.
+  if (!owner && target && target === by) {
+    return { ok: false, forbidden: true, error: 'a lead cannot re-appoint itself; name another agent or clear' };
+  }
+
+  const previous = teamLead ? teamLead.handle : null;
+  teamLead = target ? { handle: target, assignedBy: by, assignedAt: Date.now() } : null;
+  postReceipt(receiptsPath, {
+    kind: 'lead.changed', lead: target, previous, actor: by, at: Date.now(),
+  });
+  return { ok: true, lead: getLead(), previous };
+}
+
+/**
+ * May `actor` decide this intent? Returns a reason when not, so the caller can
+ * say which rule refused rather than a bare 403.
+ */
+export function canDecide(intent, actor) {
+  const who = normalizeHandle(actor);
+  if (!who) return { ok: false, forbidden: true, error: 'actor is required' };
+  if (isOwner(who)) return { ok: true, role: 'owner' };
+  if (intent?.requiresHuman) {
+    return {
+      ok: false,
+      forbidden: true,
+      error: `this action is reserved for ${OWNER_HANDLE} and cannot be delegated`,
+    };
+  }
+  if (teamLead && normalizeHandle(teamLead.handle) === who) {
+    // A lead may clear other agents' work, never its own request.
+    if (intent?.requestedBy && normalizeHandle(intent.requestedBy) === who) {
+      return {
+        ok: false,
+        forbidden: true,
+        error: 'a team lead cannot approve its own request; this one needs the owner',
+      };
+    }
+    return { ok: true, role: 'lead' };
+  }
+  return {
+    ok: false,
+    forbidden: true,
+    error: teamLead
+      ? `only ${OWNER_HANDLE} or the team lead (${teamLead.handle}) may decide`
+      : `only ${OWNER_HANDLE} may decide; no team lead is assigned`,
+  };
+}
+
+export function decideIntent(id, rawDecision, { receiptsPath, actor = OWNER_HANDLE } = {}) {
   // Look the intent up BEFORE validating, because what counts as a legal
   // answer depends on the intent: a choice intent's legal answers are its own
   // declared options, and nothing else. Validating first against a fixed
@@ -381,12 +516,18 @@ export function decideIntent(id, rawDecision, { receiptsPath } = {}) {
     if (i.decision === decision) return { ok: true, idempotent: true };
     return { ok: false, error: `intent ${id} already decided as ${i.decision}` };
   }
+  const permitted = canDecide(i, actor);
+  if (!permitted.ok) return { ok: false, forbidden: true, error: permitted.error };
+
   i.status = 'decided';
   i.decision = decision;
   i.decidedAt = Date.now();
+  i.decidedBy = normalizeHandle(actor);
+  i.decidedByRole = permitted.role;
   persistIntent(id, i);
   postReceipt(receiptsPath, {
     kind: 'intent.decided', id, decision, decidedAt: i.decidedAt, prompt: i.prompt,
+    actor: i.decidedBy, role: permitted.role,
   });
   // Resolve waiters.
   for (const r of i.resolvers) {
@@ -404,7 +545,7 @@ export function decideIntent(id, rawDecision, { receiptsPath } = {}) {
     if (decision === 'deny') {
       settleAction(action, {
         status: 'denied',
-        actor: 'petrus',
+        actor: i.decidedBy,
         decided_at: new Date(i.decidedAt).toISOString(),
         ran_at: null,
         command: null,
@@ -425,7 +566,7 @@ export function decideIntent(id, rawDecision, { receiptsPath } = {}) {
       runApprovedAction(action, { receiptsPath }).catch((e) => {
         settleAction(action, {
           status: 'failed',
-          actor: 'petrus',
+          actor: i.decidedBy,
           decided_at: action.decided_at,
           ran_at: new Date().toISOString(),
           command: action.command || null,
@@ -443,7 +584,7 @@ export function decideIntent(id, rawDecision, { receiptsPath } = {}) {
     // rather than inventing a state that could move a row backwards.
     pushStatus(id, (options || decision === 'approve') ? 'approved' : 'denied', {
       decision,
-      approver: 'petrus',
+      approver: i.decidedBy,
       decided_at: new Date(i.decidedAt).toISOString(),
     });
   }
@@ -490,6 +631,10 @@ export async function createIntent({
   receiptsPath,
   fromHandle,  // optional originator handle (e.g. "@CodexMB") for per-agent
                // chat-author attribution; passed through to announcers.
+  requiresHuman = false, // destructive/credential/paid: never delegable to a
+                         // team lead, however sound the lead is. A sleeping
+                         // owner is a reason to WAIT on these, not to widen
+                         // who may authorise them.
 }) {
   const id = randomUUID().slice(0, 8);
   // ROUTE-DEPENDENT CAP, verified on GroupMind origin/main 159b16b. This
@@ -531,11 +676,18 @@ export async function createIntent({
     // before this existed, which reads as 'unknown'. The distinction is the
     // backward-compatibility rule, so do not drop this to save a few bytes.
     announcements: {},
+    requiresHuman: Boolean(requiresHuman),
+    decidedBy: null,
+    // Retained so canDecide can refuse self-approval. Without it a lead could
+    // raise a confirmation and clear it themselves, which is not delegation,
+    // it is a bypass with extra steps (codexmb, 2026-09-18).
+    requestedBy: typeof fromHandle === 'string' ? fromHandle : null,
   };
   intents.set(id, intent);
   persistIntent(id, intent);
   postReceipt(receiptsPath, {
     kind: 'intent.created', id, prompt, session, options: cleanOptions, channels, createdAt: intent.createdAt,
+    requiresHuman: intent.requiresHuman,
   });
   pushStatus(id, 'pending', { target_summary: prompt });
   // Record what happens to each channel's post. Handed DOWN to the announcer,
@@ -965,19 +1117,51 @@ export function startConfirmationsServer({
   port = 8788,
   host = '127.0.0.1',
   authToken = '',
+  // Per-agent tokens: { "<token>": "@handle" }. THIS is what makes an actor an
+  // identity rather than a claim. `authToken` is a SHARED secret — everyone who
+  // has it looks identical — so a body field saying actor:"petrus" proves
+  // nothing (codexmb, 2026-09-18, reproduced against a real daemon).
+  //
+  // With no principals configured, privileged routes refuse and delegation is
+  // simply unavailable. That is deliberate: this feature ships INERT rather
+  // than insecure, and an unconfigured daemon behaves exactly as it does today.
+  principals = {},
   receiptsPath,
   announce, // optional: enables POST /intent to create new intents externally
   wakeScript, // optional: shell script path; enables POST /wake to nudge the local IDE
   sessions, // optional: {agents: {...}} enables POST /sessions/send + GET /sessions/agents
 } = {}) {
+  const principalByToken = new Map(
+    Object.entries(principals || {}).map(([token, handle]) => [token, handle])
+  );
+
+  /**
+   * The handle this request has PROVEN, or null. Never reads the body: an
+   * actor supplied by the caller is a self-declaration. Returns null when the
+   * bearer is the shared token, because the shared token identifies no one.
+   */
+  function resolvePrincipal(req) {
+    const got = (req.headers.authorization || '').replace(/^Bearer\s+/i, '');
+    if (!got) return null;
+    return principalByToken.get(got) ?? null;
+  }
+
   const server = createServer((req, res) => {
     const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
     // Auth check (constant-time when token configured).
+    //
+    // A registered PER-AGENT token is also a valid bearer. Without this the
+    // shared token is the only thing that gets past the door, so an agent
+    // presenting its own identity is rejected at 401 before anything can read
+    // it — delegation would be unusable on exactly the daemons that configure
+    // auth. Found by the HTTP-level tests; the function-level ones could not
+    // see it, because they never went through the door at all.
     if (authToken) {
       const got = (req.headers.authorization || '').replace(/^Bearer\s+/i, '');
       const a = Buffer.from(got);
       const b = Buffer.from(authToken);
-      const ok = a.length === b.length && timingSafeEqual(a, b);
+      const ok = (a.length === b.length && timingSafeEqual(a, b))
+        || principalByToken.has(got);
       if (!ok) {
         res.writeHead(401, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ ok: false, error: 'unauthorized' }));
@@ -996,8 +1180,102 @@ export function startConfirmationsServer({
           res.end(JSON.stringify({ ok: false, error: 'invalid json' }));
           return;
         }
-        const result = decideIntent(id, payload.decision, { receiptsPath });
-        res.writeHead(result.ok ? 200 : 400, { 'Content-Type': 'application/json' });
+        // The actor is the PROVEN principal, never `payload.actor`. A caller
+        // that says actor:"petrus" has said nothing (codexmb, 2026-09-18).
+        //
+        // With no per-agent principals configured, an unauthenticated caller
+        // is still treated as the owner. That is today's trust model — the
+        // daemon binds locally and Petrus's phone buttons carry no identity —
+        // and changing it here would lock him out of his own approvals. What
+        // it must NOT do is let that same anonymous caller act as a lead or
+        // clear an owner-only intent, which is why delegation requires a
+        // proven principal and never this fallback.
+        const principal = resolvePrincipal(req);
+        if (payload.actor && !principal) {
+          res.writeHead(403, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({
+            ok: false,
+            error: 'actor was supplied but this request proves no identity; '
+              + 'use a per-agent token (principals) or omit actor',
+          }));
+          return;
+        }
+        // THE ANONYMOUS-IS-OWNER FALLBACK IS LEGACY MODE ONLY.
+        //
+        // @codexmb, 2026-09-18: with principals configured, the lead's own
+        // token got 403 on a requiresHuman intent and then the SHARED token
+        // with no actor got 200 on the same one. `principal || OWNER_HANDLE`
+        // handed every caller the owner's authority by omission, so the
+        // boundary I had just written was bypassable by deleting a field.
+        //
+        // Once a daemon configures principals it has said it can tell callers
+        // apart, so from then on it must: every decision needs a proven
+        // principal, the owner's included. Configuring principals therefore
+        // means also issuing Petrus one — which is the point, not an
+        // oversight. A daemon with NO principals keeps today's behaviour
+        // exactly, so nothing that works now stops working
+        // ([[never lock Petrus out]]).
+        if (!principal && principalByToken.size > 0) {
+          res.writeHead(403, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({
+            ok: false,
+            error: 'this daemon identifies callers; present your own token. '
+              + 'Anonymous decisions are only accepted when no principals are configured.',
+          }));
+          return;
+        }
+        const result = decideIntent(id, payload.decision, {
+          receiptsPath,
+          actor: principal || OWNER_HANDLE,
+        });
+        // 403, not 400: the request was well formed and a RULE refused it.
+        // Read from a flag rather than by matching the message text — a status
+        // code inferred from prose breaks silently the next time someone
+        // rewords an error, and this one guards who may run commands.
+        const code = result.ok ? 200 : result.forbidden ? 403 : 400;
+        res.writeHead(code, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify(result));
+      });
+      return;
+    }
+    if (req.method === 'GET' && url.pathname === '/lead') {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ ok: true, lead: getLead(), owner: OWNER_HANDLE }));
+      return;
+    }
+    if (req.method === 'POST' && url.pathname === '/lead') {
+      let body = '';
+      req.on('data', (c) => { body += c; });
+      req.on('end', () => {
+        let payload;
+        try { payload = JSON.parse(body); } catch {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: false, error: 'invalid json' }));
+          return;
+        }
+        // Appointing a lead is a PRIVILEGE GRANT, not a routine approval, so
+        // it never falls back to "anonymous means petrus". Without a proven
+        // principal this route refuses outright, which is why an unconfigured
+        // daemon simply has no delegation rather than a forgeable one.
+        const principal = resolvePrincipal(req);
+        if (!principal) {
+          res.writeHead(403, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({
+            ok: false,
+            error: principalByToken.size === 0
+              ? 'delegation is unavailable: this daemon has no per-agent tokens '
+                + '(principals), so it cannot tell who is asking'
+              : 'this request proves no identity; use your per-agent token',
+          }));
+          return;
+        }
+        // `handle: null` clears the post. The actor is the proven principal.
+        const result = setLead(
+          Object.prototype.hasOwnProperty.call(payload, 'handle') ? payload.handle : undefined,
+          { actor: principal, receiptsPath }
+        );
+        const code = result.ok ? 200 : result.forbidden ? 403 : 400;
+        res.writeHead(code, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify(result));
       });
       return;
@@ -1128,6 +1406,13 @@ export function startConfirmationsServer({
             // `from_handle` so the GroupMind announcer authors the chat
             // post as the originating agent rather than the daemon owner.
             fromHandle: typeof payload.from_handle === 'string' ? payload.from_handle : undefined,
+            // The CALLER classifies. The precommand gate already knows which
+            // commands are destructive, credential-touching or paid — it has
+            // the command text and the patterns — and marks those here so a
+            // team lead can never approve them. The daemon does not re-derive
+            // that from a prompt string: guessing intent from prose is exactly
+            // how a gate quietly stops gating.
+            requiresHuman: payload.requires_human === true,
           });
           res.writeHead(201, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ ok: true, id }));
@@ -1991,4 +2276,8 @@ export function _resetForTests() {
     }
   }
   intents.clear();
+  // The lead is global state too: a test that appoints one must not leak that
+  // appointment into the next test, or a later "an agent cannot decide" case
+  // passes for the wrong reason.
+  teamLead = null;
 }
