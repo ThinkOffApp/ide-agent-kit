@@ -14,6 +14,9 @@
 //
 // Run: node bin/iak-mcp-daemon.mjs [--config path/to/config.json]
 
+import { join, dirname } from 'node:path';
+import { fileURLToPath } from 'node:url';
+
 import { loadConfig } from '../src/config.mjs';
 import { defaultCallbackBase,
   startConfirmationsServer,
@@ -23,7 +26,12 @@ import { defaultCallbackBase,
   makeGroupmindAnnouncer,
   makeCodewatchAnnouncer,
   composeAnnouncers,
+  registerKindHandler,
 } from '../src/confirmations.mjs';
+import { applyChoice, resolveModelRegistryPath, resolveModelSelectionPath } from '../src/model-selection.mjs';
+import { resolveCallerHost } from '../packages/user-intent-kit/src/model-capacity.js';
+
+const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 
 const argv = process.argv.slice(2);
 let configPath;
@@ -63,6 +71,48 @@ if (cc.codewatch_gate_url) {
   });
 }
 const serverAnnounce = composeAnnouncers(serverAnnouncerMap);
+
+// Wire the picker's apply step to the ONE place every decision path already
+// funnels through (decideIntent, inside src/confirmations.mjs) instead of the
+// daemon having to notice a decided model intent itself. Whether the tap
+// arrived via CodeWatch's /intent/:id/decision POST, the GroupMind
+// chat-reply poller below, or a manual approve_intent/deny_intent call, this
+// fires once, here, on this box. bin/model-picker.mjs's OWN raise-and-wait
+// flow does NOT tag its intents with kind: "model" (see src/model-selection.mjs),
+// so a `model-picker.mjs` run against this daemon applies via its own
+// in-process re-probe exactly as before, and this hook only fires for
+// choices raised WITHOUT the CLI (request_model_choice, or any future
+// caller) — never both, so a tap is never applied twice.
+// resolveModelRegistryPath/resolveModelSelectionPath are the SAME functions
+// src/mcp-server.mjs's request_model_choice calls to decide what to probe and
+// offer - both read mcp.confirmations.model_registry /
+// .model_selection_path off the same config shape, so a custom path
+// configured once is seen identically by the offer and the apply. Reading
+// the key at two different nesting levels in two files was the exact bug
+// this replaced: a custom registry would silently offer from one file and
+// apply against another.
+const modelRegistryPath = resolveModelRegistryPath(config, ROOT);
+const modelSelectionPath = resolveModelSelectionPath(config);
+registerKindHandler('model', async ({ id, decision, offeredModels }) => {
+  const callerHost = await resolveCallerHost();
+  const offeredModel = offeredModels?.[decision] ?? null;
+  const result = await applyChoice({
+    registryPath: modelRegistryPath,
+    selectionPath: modelSelectionPath,
+    entryId: decision,
+    callerHost,
+    intentId: id,
+    offeredModel,
+  });
+  if (result.outcome === 'applied' || result.outcome === 'applied-sole-up') {
+    const changedNote = result.modelChanged
+      ? ` [model changed since offer: ${result.modelChanged.offered} -> ${result.modelChanged.applied}]`
+      : '';
+    console.log(`[iak-mcp-daemon] model choice ${id}: applied ${result.selection.selectedId} -> ${result.selection.baseUrl} (model=${result.selection.model})${changedNote}`);
+  } else {
+    console.warn(`[iak-mcp-daemon] model choice ${id}: NOT applied (${result.outcome})${result.error ? ` — ${result.error}` : ''}`);
+  }
+});
 
 // Start the HTTP listener first so any decisions can settle.
 // Wake script: defaults to scripts/claudemb-wake.sh in this repo.
