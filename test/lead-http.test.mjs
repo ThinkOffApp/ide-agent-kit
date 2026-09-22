@@ -124,7 +124,9 @@ test('a lead cannot approve its own request by changing the case of its handle',
   });
   const res = await post(`/intent/${id}/decision`, { decision: 'approve' }, LEAD_TOKEN);
   assert.equal(res.status, 403, 'a case-variant of the lead\'s own handle must still be refused');
-  assert.match(res.body.error, /own request/, 'refused, but for the wrong reason');
+  // post() returns the raw fetch Response here (not the {status, body} shape
+  // authorization-boundary.test.mjs uses), so read the JSON explicitly.
+  assert.match((await res.json()).error, /own request/, 'refused, but for the wrong reason');
   assert.equal(listIntents().find(i => i.id === id).status, 'pending');
 });
 
