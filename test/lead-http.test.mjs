@@ -112,6 +112,22 @@ test('a lead cannot approve its own request', async () => {
   assert.equal(listIntents().find(i => i.id === id).status, 'pending');
 });
 
+test('a lead cannot approve its own request by changing the case of its handle', async () => {
+  // claudeMB, review of #131, reproduced live: requestedBy was stored as
+  // typed and compared as typed, so "@Hermes" at creation and "@hermes" at
+  // decision time read as two agents. Handles are identities; case is not.
+  _resetForTests();
+  const { setLead } = await import('../src/confirmations.mjs');
+  setLead('hermes', { actor: 'petrus' });
+  const id = await createIntent({
+    prompt: 'ls', session: 's', channels: [], fromHandle: '@HeRmEs', announce: async () => {},
+  });
+  const res = await post(`/intent/${id}/decision`, { decision: 'approve' }, LEAD_TOKEN);
+  assert.equal(res.status, 403, 'a case-variant of the lead\'s own handle must still be refused');
+  assert.match(res.body.error, /own request/, 'refused, but for the wrong reason');
+  assert.equal(listIntents().find(i => i.id === id).status, 'pending');
+});
+
 test('a proven lead still cannot clear a requiresHuman intent', async () => {
   _resetForTests();
   const { setLead } = await import('../src/confirmations.mjs');

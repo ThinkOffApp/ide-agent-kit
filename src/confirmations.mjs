@@ -398,7 +398,11 @@ let teamLead = null; // { handle, assignedBy, assignedAt }
 
 function normalizeHandle(handle) {
   if (typeof handle !== 'string') return null;
-  const trimmed = handle.trim().replace(/^@+/, '');
+  // Lowercased: handles are identities, and every comparison below goes
+  // through here. Without this a lead could raise an intent as "@Lead" and
+  // clear it as "@lead", which is the self-approval bypass canDecide exists to
+  // refuse (claudeMB, review of #131, reproduced live).
+  const trimmed = handle.trim().replace(/^@+/, '').toLowerCase();
   return trimmed ? `@${trimmed}` : null;
 }
 
