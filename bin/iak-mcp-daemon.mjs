@@ -28,7 +28,7 @@ import { defaultCallbackBase,
   composeAnnouncers,
   registerKindHandler,
 } from '../src/confirmations.mjs';
-import { applyChoice, DEFAULT_SELECTION_PATH } from '../src/model-selection.mjs';
+import { applyChoice, resolveModelRegistryPath, resolveModelSelectionPath } from '../src/model-selection.mjs';
 import { resolveCallerHost } from '../packages/user-intent-kit/src/model-capacity.js';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
@@ -83,19 +83,32 @@ const serverAnnounce = composeAnnouncers(serverAnnouncerMap);
 // in-process re-probe exactly as before, and this hook only fires for
 // choices raised WITHOUT the CLI (request_model_choice, or any future
 // caller) — never both, so a tap is never applied twice.
-const modelRegistryPath = cc.model_registry || join(ROOT, 'config', 'models.json');
-const modelSelectionPath = cc.model_selection_path || DEFAULT_SELECTION_PATH;
-registerKindHandler('model', async ({ id, decision }) => {
+// resolveModelRegistryPath/resolveModelSelectionPath are the SAME functions
+// src/mcp-server.mjs's request_model_choice calls to decide what to probe and
+// offer - both read mcp.confirmations.model_registry /
+// .model_selection_path off the same config shape, so a custom path
+// configured once is seen identically by the offer and the apply. Reading
+// the key at two different nesting levels in two files was the exact bug
+// this replaced: a custom registry would silently offer from one file and
+// apply against another.
+const modelRegistryPath = resolveModelRegistryPath(config, ROOT);
+const modelSelectionPath = resolveModelSelectionPath(config);
+registerKindHandler('model', async ({ id, decision, offeredModels }) => {
   const callerHost = await resolveCallerHost();
+  const offeredModel = offeredModels?.[decision] ?? null;
   const result = await applyChoice({
     registryPath: modelRegistryPath,
     selectionPath: modelSelectionPath,
     entryId: decision,
     callerHost,
     intentId: id,
+    offeredModel,
   });
   if (result.outcome === 'applied' || result.outcome === 'applied-sole-up') {
-    console.log(`[iak-mcp-daemon] model choice ${id}: applied ${result.selection.selectedId} -> ${result.selection.baseUrl} (model=${result.selection.model})`);
+    const changedNote = result.modelChanged
+      ? ` [model changed since offer: ${result.modelChanged.offered} -> ${result.modelChanged.applied}]`
+      : '';
+    console.log(`[iak-mcp-daemon] model choice ${id}: applied ${result.selection.selectedId} -> ${result.selection.baseUrl} (model=${result.selection.model})${changedNote}`);
   } else {
     console.warn(`[iak-mcp-daemon] model choice ${id}: NOT applied (${result.outcome})${result.error ? ` — ${result.error}` : ''}`);
   }

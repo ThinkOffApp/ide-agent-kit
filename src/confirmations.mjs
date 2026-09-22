@@ -455,7 +455,10 @@ export function decideIntent(id, rawDecision, { receiptsPath } = {}) {
   if (i.kind && kindHandlers.has(i.kind)) {
     const handler = kindHandlers.get(i.kind);
     i.kindHandlerPromise = Promise.resolve()
-      .then(() => handler({ id, decision, prompt: i.prompt, session: i.session, kind: i.kind }))
+      .then(() => handler({
+        id, decision, prompt: i.prompt, session: i.session, kind: i.kind,
+        offeredModels: i.offeredModels,
+      }))
       .catch((e) => {
         process.stderr.write(`[confirmations] kind '${i.kind}' handler for intent ${id} failed: ${e?.message || e}\n`);
       });
@@ -476,6 +479,11 @@ export async function createIntent({
                // a registered kind handler once this intent settles, without
                // the requester having to poll for the decision itself. See
                // registerKindHandler() below.
+  offeredModels, // optional {optionLabel: modelName} recorded at RAISE time,
+                 // next to kind. A kind handler applying long after the offer
+                 // (a different process than the one that raised it) has no
+                 // other way to know what was actually shown for the chosen
+                 // option, and "what changed" is unanswerable without it.
   channels = ['groupmind'],
   timeoutSec = 600,
   announce = async () => {},
@@ -509,6 +517,8 @@ export async function createIntent({
     session,
     options: cleanOptions,
     kind: typeof kind === 'string' && kind ? kind : null,
+    offeredModels: offeredModels && typeof offeredModels === 'object' && !Array.isArray(offeredModels)
+      ? { ...offeredModels } : null,
     channels,
     status: 'pending',
     createdAt: Date.now(),
@@ -1108,6 +1118,8 @@ export function startConfirmationsServer({
             prompt: payload.prompt,
             options: payload.options,
             kind: typeof payload.kind === 'string' ? payload.kind : undefined,
+            offeredModels: payload.offeredModels && typeof payload.offeredModels === 'object' && !Array.isArray(payload.offeredModels)
+              ? payload.offeredModels : undefined,
             session: payload.session || 'external',
             channels: Array.isArray(payload.channels) ? payload.channels : (announce ? ['groupmind'] : []),
             announce: announce || (async () => {}),

@@ -88,6 +88,21 @@ export const OUTCOMES = Object.freeze({
   WRITE_FAILED: 'write-failed',
 });
 
+// Both the daemon (applying a tap) and the MCP server (raising the choice
+// via request_model_choice) need the SAME registry/selection paths, or a
+// custom path configured for one silently means the other still reads the
+// default - the offer would list what one file says is UP while the apply
+// re-probes a different file entirely. One resolver, called from both
+// bin/iak-mcp-daemon.mjs and src/mcp-server.mjs, is what makes "the same
+// config key" durable against either side drifting on its own later.
+export function resolveModelRegistryPath(config, rootDir) {
+  return config?.mcp?.confirmations?.model_registry || join(rootDir, 'config', 'models.json');
+}
+
+export function resolveModelSelectionPath(config) {
+  return config?.mcp?.confirmations?.model_selection_path || DEFAULT_SELECTION_PATH;
+}
+
 export const EXIT_CODES = Object.freeze({
   [OUTCOMES.APPLIED]: 0,
   [OUTCOMES.APPLIED_SOLE]: 0,
@@ -390,6 +405,14 @@ export async function applyChoice({
   sole = false,
   offeredState = null,
   offeredReason = null,
+  // The model name shown in the offer for this entry (from the same probe
+  // reading that put it on a button), if known. Unlike offeredState, an
+  // unexpected model at apply time does NOT refuse: the box answered, it is
+  // UP, and refusing would leave the previous (possibly worse) selection in
+  // place over a difference that is often benign (a server restart picked up
+  // a newer weights file under the same port). It is instead recorded as
+  // `modelChanged` on the outcome so nothing changes silently - see rule 5.
+  offeredModel = null,
   probeOptions = {},
   now = () => Date.now(),
   readRegistryImpl = readRegistryFile,
@@ -429,6 +452,15 @@ export async function applyChoice({
     };
   }
   const selection = buildSelection(entry, recheck, { callerHost, now });
+  // The box is UP and offerable - apply it regardless of which model it now
+  // names. A refusal here would be OUTCOMES.CHANGED_SINCE_OFFER in spirit but
+  // is not one: the entry did not go down, so the previous-selection-survives
+  // repair ("run again to pick from a fresh probe") is the wrong one - the
+  // fresh probe already ran, and the human's tap is still a real answer to
+  // "which box". The difference is recorded, never hidden.
+  const modelChanged = offeredModel && selection.model && offeredModel !== selection.model
+    ? { offered: offeredModel, applied: selection.model }
+    : null;
   try {
     await writeSelectionImpl(selectionPath, selection);
   } catch (err) {
@@ -438,6 +470,7 @@ export async function applyChoice({
       outcome: OUTCOMES.WRITE_FAILED,
       registryPath, selectionPath, previous, intentId, chosenId: entryId, selection,
       error: `could not write ${selectionPath}: ${err.message}`,
+      ...(modelChanged ? { modelChanged } : {}),
     };
   }
   return {
@@ -445,6 +478,7 @@ export async function applyChoice({
     registryPath, selectionPath, previous, selection,
     intentId, chosenId: entryId,
     recheckedAt: recheck.checkedAt,
+    ...(modelChanged ? { modelChanged } : {}),
   };
 }
 
@@ -536,6 +570,7 @@ export async function pickModel({
       registry, registryPath, selectionPath, entryId, callerHost, intentId, sole,
       offeredState: before?.state ?? null,
       offeredReason: before?.reason ?? null,
+      offeredModel: before?.models?.[0] ?? null,
       probeOptions, now, probeImpl, readSelectionImpl, writeSelectionImpl,
     });
   };

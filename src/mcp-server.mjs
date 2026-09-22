@@ -48,7 +48,7 @@ import { defaultCallbackBase,
   makeCodewatchAnnouncer,
   composeAnnouncers,
 } from './confirmations.mjs';
-import { probeAndOffer, describeExclusion } from './model-selection.mjs';
+import { probeAndOffer, describeExclusion, resolveModelRegistryPath } from './model-selection.mjs';
 import { resolveCallerHost } from '../packages/user-intent-kit/src/model-capacity.js';
 
 // Read package.json once at module load so the advertised server version
@@ -689,12 +689,17 @@ export async function runMcpServer({ configPath } = {}) {
           'actually UP right now, and ask the user to pick one — the daemon-side equivalent of ' +
           'running `bin/model-picker.mjs` by hand. Raises a CHOICE intent exactly like ' +
           'request_choice (one button per usable entry, BLOCKS until decided or the timeout ' +
-          'expires) but tagged so the running daemon applies the tap itself once decided: it ' +
-          're-probes the chosen entry and, if it is still usable, writes ~/.iak/model-selection.json. ' +
-          'This tool only returns the decision ({decision: "<entry id>"}) — it does NOT write the ' +
-          'selection file itself and does not confirm the apply succeeded; check the daemon log or ' +
-          'poll list_intents / the selection file for that. Returns {outcome:"none-up", excluded} ' +
-          'without raising anything if nothing in the registry is usable.',
+          'expires). This tool ITSELF ONLY RETURNS THE DECISION ({decision: "<entry id>"}) — it ' +
+          'never writes ~/.iak/model-selection.json or confirms an apply succeeded. WHETHER THE ' +
+          'DECISION IS ACTUALLY APPLIED DEPENDS ENTIRELY ON WHETHER A DAEMON IS RUNNING: with a ' +
+          'live iak-mcp-daemon, the intent is tagged so the daemon re-probes the chosen entry and ' +
+          'applies it (writes the selection file, or refuses if the entry is no longer usable) the ' +
+          'instant it is decided — check the daemon log or poll list_intents / the selection file to ' +
+          'confirm that happened. WITHOUT a running daemon (the in-process fallback), the decision ' +
+          'is returned but is NOT APPLIED — no selection file is written, by this tool or anything ' +
+          'else; the caller is responsible for acting on the returned decision itself. ' +
+          'Returns {outcome:"none-up", excluded} without raising anything if nothing in the ' +
+          'registry is usable.',
         inputSchema: {
           type: 'object',
           properties: {
@@ -1038,9 +1043,14 @@ export async function runMcpServer({ configPath } = {}) {
         }
         case 'request_model_choice': {
           if (!confirmEnabled && !daemonAvailable) return err('request_model_choice: confirmations not configured. Set mcp.confirmations.room (+ poller.api_key) and/or codewatch_gate_url.');
+          // resolveModelRegistryPath() is the SAME resolver
+          // bin/iak-mcp-daemon.mjs uses to decide what applyChoice() re-probes
+          // (mcp.confirmations.model_registry, one shared key) - reading a
+          // different key here is what let a custom registry path make the
+          // offer and the apply disagree.
           const registryPath = typeof args.registryPath === 'string' && args.registryPath
             ? args.registryPath
-            : (config?.mcp?.model_registry || join(__pkgDir, 'config', 'models.json'));
+            : resolveModelRegistryPath(config, __pkgDir);
           const callerHost = typeof args.callerHost === 'string' && args.callerHost
             ? args.callerHost
             : await resolveCallerHost();
@@ -1054,6 +1064,11 @@ export async function runMcpServer({ configPath } = {}) {
             return ok(JSON.stringify({ outcome: 'none-up', excluded: offer.excluded.map(describeExclusion) }, null, 2));
           }
           const timeoutSec = Math.max(1, Math.min(86400, args.timeoutSec || 600));
+          // What was actually shown for each offered option, so a handler
+          // applying long after (a different process, possibly minutes
+          // later) can tell whether the box now names a different model -
+          // see applyChoice()'s modelChanged.
+          const offeredModels = Object.fromEntries(offer.offered.map((r) => [r.id, r.models[0]]));
 
           // Same daemon-forward / in-process split as request_choice, plus
           // kind: 'model' so decideIntent() fires the daemon's model-apply
@@ -1068,6 +1083,7 @@ export async function runMcpServer({ configPath } = {}) {
                 options: offer.options,
                 session: args.session,
                 kind: 'model',
+                offeredModels,
                 channels: Array.isArray(args.channels) ? args.channels : undefined,
                 from_handle: confirmationFromHandle(args, config),
               }),
@@ -1100,6 +1116,7 @@ export async function runMcpServer({ configPath } = {}) {
             prompt: offer.prompt,
             options: offer.options,
             kind: 'model',
+            offeredModels,
             session: args.session,
             channels,
             timeoutSec,
