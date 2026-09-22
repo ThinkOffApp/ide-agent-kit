@@ -24,41 +24,37 @@ test('the mute gate is exported for testing', () => {
   assert.ok(executeActionForTest, 'executeAction must be reachable from a test');
 });
 
-test('emergency-only withholds an agent-triggered post', () => {
-  const r = executeActionForTest(
+test('emergency-only withholds an agent-triggered post', async () => {
+  const r = await executeActionForTest(
     { type: 'post', body: 'chatter' },
     { from: '@somebot', body: 'hi' },
     'key', OFFLINE, true,
   );
-  assert.equal(r.status, 'suppressed', 'agent-triggered post withheld');
-});
+  assert.equal(r.status, 'suppressed', 'agent-triggered post withheld');});
 
 markSent(); // burn the rate-limit budget: keeps every case below offline
 
-test('emergency-only STILL answers petrus', () => {
-  const r = executeActionForTest(
+test('emergency-only STILL answers petrus', async () => {
+  const r = await executeActionForTest(
     { type: 'post', body: 'reply' },
     { from: 'petrus', body: '/lead status' },
     'key', OFFLINE, true,
   );
-  assert.notEqual(r.status, 'suppressed', 'his own command must always get an answer');
-});
+  assert.notEqual(r.status, 'suppressed', 'his own command must always get an answer');});
 
-test('normal mode posts for everyone (control)', () => {
-  const r = executeActionForTest(
+test('normal mode posts for everyone (control)', async () => {
+  const r = await executeActionForTest(
     { type: 'post', body: 'chatter' },
     { from: '@somebot', body: 'hi' },
     'key', OFFLINE, false,
   );
-  assert.notEqual(r.status, 'suppressed', 'nothing is withheld when not muted');
-});
+  assert.notEqual(r.status, 'suppressed', 'nothing is withheld when not muted');});
 
-test('the owner match ignores @ and case', () => {
+test('the owner match ignores @ and case', async () => {
   for (const who of ['@Petrus', 'PETRUS', '@petrus']) {
-    const r = executeActionForTest(
+    const r = await executeActionForTest(
       { type: 'post', body: 'reply' }, { from: who, body: 'x' },
       'key', { ...OFFLINE, poller: { owner_handle: '@Petrus' } }, true,
     );
     assert.notEqual(r.status, 'suppressed', `${who} must be recognised as the owner`);
-  }
-});
+  }});
