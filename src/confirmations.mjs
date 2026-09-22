@@ -112,11 +112,15 @@ export function loadPersistedState(path) {
     try { e = JSON.parse(line); } catch { summary.skipped += 1; continue; }
     if (e.kind === 'intent' && e.id && e.intent) {
       intents.set(e.id, { ...e.intent, resolvers: [] });
+    } else if (e.kind === 'lead') {
+      // The lead is state too: setLead appends one row per change, and the
+      // last row wins here (a null lead is a clear). Before this the comment
+      // above claimed the rows were written and skipped, while setLead wrote
+      // nothing at all, so every restart silently vacated the post
+      // (claudeMB, review of #131).
+      teamLead = e.lead && e.lead.handle ? { ...e.lead } : null;
+      summary.lead = teamLead ? teamLead.handle : null;
     }
-    // NOTE: `kind: 'lead'` entries are written by the team-lead branch and are
-    // ignored here on purpose. Main has no lead feature yet, so replaying one
-    // would have nowhere to put it. Forward-compatible: an older log written
-    // by that branch replays its intents cleanly and skips the lead rows.
   }
   summary.intents = intents.size;
   return summary;
@@ -447,6 +451,9 @@ export function setLead(handle, { actor, receiptsPath } = {}) {
 
   const previous = teamLead ? teamLead.handle : null;
   teamLead = target ? { handle: target, assignedBy: by, assignedAt: Date.now() } : null;
+  // Persisted like an intent: without this row the post is vacated by every
+  // restart, and a receipt is a record, not state.
+  appendState({ kind: 'lead', lead: teamLead, at: Date.now() });
   postReceipt(receiptsPath, {
     kind: 'lead.changed', lead: target, previous, actor: by, at: Date.now(),
   });
@@ -1143,7 +1150,18 @@ export function startConfirmationsServer({
   function resolvePrincipal(req) {
     const got = (req.headers.authorization || '').replace(/^Bearer\s+/i, '');
     if (!got) return null;
-    return principalByToken.get(got) ?? null;
+    // Compare against every configured token in constant time and never stop
+    // early: a Map lookup leaks which prefix matched through timing, and the
+    // shared-token check above already pays for timingSafeEqual (claudeMB,
+    // review of #131). Lengths are compared first because timingSafeEqual
+    // requires equal lengths; a length mismatch is public information anyway.
+    const g = Buffer.from(got);
+    let found = null;
+    for (const [token, handle] of principalByToken) {
+      const t = Buffer.from(token);
+      if (t.length === g.length && timingSafeEqual(t, g)) found = handle;
+    }
+    return found;
   }
 
   const server = createServer((req, res) => {
