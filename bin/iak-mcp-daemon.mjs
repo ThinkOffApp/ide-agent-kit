@@ -23,6 +23,7 @@ import { defaultCallbackBase,
   makeGroupmindAnnouncer,
   makeCodewatchAnnouncer,
   composeAnnouncers,
+  loadPersistedState,
 } from '../src/confirmations.mjs';
 
 const argv = process.argv.slice(2);
@@ -63,6 +64,23 @@ if (cc.codewatch_gate_url) {
   });
 }
 const serverAnnounce = composeAnnouncers(serverAnnouncerMap);
+
+// Replay persisted intents BEFORE the listener opens, so a card that was
+// pending when the old process died is decidable the moment the new one
+// answers. IAK #116 added loadPersistedState but never called it from here -
+// it was only ever invoked by tests - so persistence was merged and INACTIVE:
+// every restart still wiped the queue, which is the exact failure the PR was
+// for. Found by the Sep-16 Codex reviewer, confirmed by claudeMB, fixed here.
+//
+// Off unless `mcp.confirmations.state_file` is set: an operator opts in by
+// naming the file, and the log line below says what actually came back
+// rather than assuming the replay worked.
+if (cc.state_file) {
+  const replay = loadPersistedState(cc.state_file);
+  console.log(`[iak-mcp-daemon] persistence on: ${cc.state_file} - replayed ${replay.intents} intent(s), skipped ${replay.skipped} bad line(s)`);
+} else {
+  console.warn('[iak-mcp-daemon] mcp.confirmations.state_file not set - intents will NOT survive a restart');
+}
 
 // Start the HTTP listener first so any decisions can settle.
 // Wake script: defaults to scripts/claudemb-wake.sh in this repo.
