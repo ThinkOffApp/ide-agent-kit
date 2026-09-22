@@ -1494,6 +1494,123 @@ export function defaultCallbackBase(cc = {}, ifaces = networkInterfaces(), onPic
   return pick ? `http://${pick.address}:${port}` : `http://127.0.0.1:${port}`;
 }
 
+// --- room body shortening ----------------------------------------------------
+//
+// petrus, 22 Sep 2026: "Stop these huge confirmation messages pls". A Bash
+// confirmation's `prompt` is the question PLUS whatever the caller pasted
+// after it (often the full shell command, sometimes a multi-hundred-char
+// heredoc), and that whole thing used to go straight into the room body. The
+// room card only needs to be legible enough to tap or type a reply from a
+// phone - the full text is still available: in the stored intent (`prompt`,
+// untouched), in the CodeWatch push (untouched), and in `/intents`
+// (untouched). ONLY the text posted to the room is shortened.
+//
+// ROOM_BODY_MAX bounds the shortened prompt/options block this module
+// produces. COMMAND_SNIPPET_MAX further bounds the one command line quoted
+// inside it, so a single absurdly long line can't eat the whole budget.
+export const ROOM_BODY_MAX = 600;
+export const COMMAND_SNIPPET_MAX = 160;
+
+const ROOM_ELLIPSIS = '…';
+const FULL_COMMAND_NOTE = 'full command in CodeWatch';
+
+// A line that is ONLY a comment, a bare `cd`, a bare `echo ...`, or a bare
+// `VAR=value` assignment carries no information about what the command
+// actually DOES - skip past those to find the line worth showing. A line
+// that merely STARTS with one of these but goes on to do more (e.g.
+// `cd /x && rm -rf y`) is not bare, and is exactly the line we want.
+const SKIPPABLE_LINE_RE = [
+  /^#/,
+  /^cd(\s+\S+)?$/,
+  /^echo(\s.*)?$/,
+  /^[A-Za-z_][A-Za-z0-9_]*=\S*$/,
+];
+
+function isSkippableLine(line) {
+  return SKIPPABLE_LINE_RE.some((re) => re.test(line));
+}
+
+// The first line of the remaining text that isn't skippable per the rules
+// above, trimmed. Null if every remaining line is skippable or there are none.
+function firstMeaningfulLine(lines) {
+  for (const raw of lines) {
+    const line = raw.trim();
+    if (!line) continue;
+    if (isSkippableLine(line)) continue;
+    return line;
+  }
+  return null;
+}
+
+function truncate(text, max) {
+  if (text.length <= max) return text;
+  return text.slice(0, Math.max(0, max - ROOM_ELLIPSIS.length)) + ROOM_ELLIPSIS;
+}
+
+// The pure transform behind every room card. Takes the RAW prompt an MCP
+// caller supplied (line 1 is the question; anything after is free text,
+// typically a pasted command) plus the options array for a choice card, and
+// returns the shortened text that belongs inside the room body's `**...**`.
+//
+// - A single-line prompt passes through unchanged: the length problem is
+//   pasted commands, not questions, and a real question fits a watch face.
+// - A multi-line prompt keeps its first line VERBATIM (that's the question a
+//   human answers) and reduces everything after it to at most one line: the
+//   first line that isn't just plumbing (cd / echo / var assignment /
+//   comment), capped at COMMAND_SNIPPET_MAX chars, followed by a fixed note
+//   pointing at CodeWatch for the rest.
+// - For a choice card the options ARE the buttons / typed-reply targets
+//   (`/choose <id> <option>`) and are never touched or shortened by this
+//   function - a truncated option breaks the reply. If the options alone
+//   (joined the same way the room body joins them) would already meet or
+//   exceed ROOM_BODY_MAX, the description is dropped entirely rather than
+//   left to blow the budget further.
+export function shortRoomBody(prompt, { options } = {}) {
+  const text = prompt == null ? '' : String(prompt);
+  const lines = text.split('\n');
+  const firstLine = (lines[0] || '').trim();
+
+  const opts = Array.isArray(options) && options.length ? options : null;
+  let budget = ROOM_BODY_MAX;
+  if (opts) {
+    const optionsLine = opts.join(' · ');
+    if (optionsLine.length >= ROOM_BODY_MAX) return '';
+    budget = ROOM_BODY_MAX - optionsLine.length;
+  }
+
+  if (lines.length <= 1) return truncate(firstLine, budget);
+
+  const commandLine = firstMeaningfulLine(lines.slice(1));
+  let out = firstLine;
+  if (commandLine) {
+    const snippet = truncate(commandLine, COMMAND_SNIPPET_MAX);
+    out += `\n${snippet}\n${FULL_COMMAND_NOTE}`;
+  }
+  return truncate(out, budget);
+}
+
+// Assembles the full GroupMind room body (tag + shortened prompt + target
+// session + tap link + typed reply). Pulled out of makeGroupmindAnnouncer so
+// it can be exercised directly in tests without a network round trip.
+export function buildGroupmindBody({ id, prompt, session, uiLink, options }) {
+  const opts = Array.isArray(options) && options.length ? options : null;
+  // ALWAYS spell out the typed equivalent. The buttons need a client that
+  // renders them, and a phone that cannot (or an older build) must still be
+  // able to answer - otherwise a choice intent is unanswerable on exactly
+  // the surface it was built for.
+  const typed = opts
+    ? opts.map((o) => `\`/choose ${id} ${o}\``).join(' · ')
+    : `\`/approve ${id}\` · \`/deny ${id}\``;
+  const short = shortRoomBody(prompt, { options: opts });
+  const tag = `[${opts ? 'Choice needed' : 'Confirmation needed'}]`;
+  return (
+    `${tag}${short ? ` **${short}**` : ''}\n` +
+    `Target session: \`${session || '(none)'}\`\n` +
+    (uiLink ? `Tap to decide: ${uiLink}\n` : '') +
+    `Or reply: ${typed}`
+  );
+}
+
 export function makeGroupmindAnnouncer({ apiKey, room, callbackBase, apiKeys }) {
   // apiKeys: optional map of agent handle (e.g. "@claudemm") → API key.
   // When the intent payload includes `fromHandle`, the announcer uses
@@ -1508,18 +1625,7 @@ export function makeGroupmindAnnouncer({ apiKey, room, callbackBase, apiKeys }) 
     const effectiveKey = (fromHandle && apiKeys && apiKeys[fromHandle]) || apiKey;
     const uiLink = callbackBase ? `${callbackBase}/` : null;
     const opts = Array.isArray(options) && options.length ? options : null;
-    // ALWAYS spell out the typed equivalent. The buttons need a client that
-    // renders them, and a phone that cannot (or an older build) must still be
-    // able to answer - otherwise a choice intent is unanswerable on exactly
-    // the surface it was built for.
-    const typed = opts
-      ? opts.map((o) => `\`/choose ${id} ${o}\``).join(' · ')
-      : `\`/approve ${id}\` · \`/deny ${id}\``;
-    const body =
-      `[${opts ? 'Choice needed' : 'Confirmation needed'}] **${prompt}**\n` +
-      `Target session: \`${session || '(none)'}\`\n` +
-      (uiLink ? `Tap to decide: ${uiLink}\n` : '') +
-      `Or reply: ${typed}`;
+    const body = buildGroupmindBody({ id, prompt, session, uiLink, options: opts });
     // Attach metadata so the GroupMind chat UI can render inline Approve/Deny
     // buttons. Frontend reads `metadata.actions` + `metadata.intent_id` and
     // POSTs `/approve <id>` (or `/deny <id>`) chat replies on tap, which the
