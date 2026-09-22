@@ -48,6 +48,8 @@ import { defaultCallbackBase,
   makeCodewatchAnnouncer,
   composeAnnouncers,
 } from './confirmations.mjs';
+import { probeAndOffer, describeExclusion } from './model-selection.mjs';
+import { resolveCallerHost } from '../packages/user-intent-kit/src/model-capacity.js';
 
 // Read package.json once at module load so the advertised server version
 // tracks future package bumps without code edits.
@@ -681,6 +683,36 @@ export async function runMcpServer({ configPath } = {}) {
         },
       },
       {
+        name: 'request_model_choice',
+        description:
+          'Probe the model registry (config/models.json, or the path given) for entries that are ' +
+          'actually UP right now, and ask the user to pick one — the daemon-side equivalent of ' +
+          'running `bin/model-picker.mjs` by hand. Raises a CHOICE intent exactly like ' +
+          'request_choice (one button per usable entry, BLOCKS until decided or the timeout ' +
+          'expires) but tagged so the running daemon applies the tap itself once decided: it ' +
+          're-probes the chosen entry and, if it is still usable, writes ~/.iak/model-selection.json. ' +
+          'This tool only returns the decision ({decision: "<entry id>"}) — it does NOT write the ' +
+          'selection file itself and does not confirm the apply succeeded; check the daemon log or ' +
+          'poll list_intents / the selection file for that. Returns {outcome:"none-up", excluded} ' +
+          'without raising anything if nothing in the registry is usable.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            registryPath: { type: 'string', description: 'Path to the model registry JSON. Default: config/models.json next to this checkout.' },
+            callerHost: { type: 'string', description: 'Host whose network the probe describes. Default: this machine, auto-resolved.' },
+            allowLan: { type: 'boolean', description: 'Offer LAN-only registry entries too. Default false.' },
+            session: { type: 'string', description: 'tmux session that triggered the request, for context. Optional.' },
+            channels: {
+              type: 'array',
+              items: { type: 'string', enum: ['groupmind', 'codewatch'] },
+              description: 'Which channels to post to. Default: all configured channels.',
+            },
+            timeoutSec: { type: 'number', description: 'How long to wait for a decision before returning timeout. Default 600 (10 min).', default: 600 },
+            fromHandle: { type: 'string', description: 'Originating agent handle for attribution, e.g. @CodexMB.' },
+          },
+        },
+      },
+      {
         name: 'list_intents',
         description: 'List every confirmation intent the server knows about (pending, decided, recent). Each row carries `announceSummary` (the human-readable line), `announceState` and a per-channel `announcements` map, so a pending intent nobody was successfully asked about is distinguishable from one waiting on a human. `posted` means the channel ACCEPTED the message and is not evidence anyone saw it; `failed` and `skipped` mean it is known not to have gone out; `unreported` and `attempting` mean the outcome is UNKNOWN - do not report those as delivered or as failed; `unknown` means the intent predates this record. A mixed result is worded "posted to 1 channel, unknown for 1", never "posted to 1 of 2".',
         inputSchema: { type: 'object', properties: {} },
@@ -991,6 +1023,83 @@ export async function runMcpServer({ configPath } = {}) {
           const id = await createIntent({
             prompt: args.prompt,
             options,
+            session: args.session,
+            channels,
+            timeoutSec,
+            announce,
+            receiptsPath: config?.receipts?.path,
+            fromHandle: confirmationFromHandle(args, config),
+          });
+          const result = await waitForDecision(id, { timeoutMs: timeoutSec * 1000 });
+          if (result.status === 'decided') {
+            return ok(JSON.stringify({ id, decision: result.decision }, null, 2));
+          }
+          return ok(JSON.stringify({ id, status: 'timeout', timeoutSec }, null, 2));
+        }
+        case 'request_model_choice': {
+          if (!confirmEnabled && !daemonAvailable) return err('request_model_choice: confirmations not configured. Set mcp.confirmations.room (+ poller.api_key) and/or codewatch_gate_url.');
+          const registryPath = typeof args.registryPath === 'string' && args.registryPath
+            ? args.registryPath
+            : (config?.mcp?.model_registry || join(__pkgDir, 'config', 'models.json'));
+          const callerHost = typeof args.callerHost === 'string' && args.callerHost
+            ? args.callerHost
+            : await resolveCallerHost();
+          let offer;
+          try {
+            ({ offer } = await probeAndOffer({ registryPath, callerHost, allowLan: Boolean(args.allowLan) }));
+          } catch (e) {
+            return err(`request_model_choice: ${e.message}`);
+          }
+          if (!offer.options.length) {
+            return ok(JSON.stringify({ outcome: 'none-up', excluded: offer.excluded.map(describeExclusion) }, null, 2));
+          }
+          const timeoutSec = Math.max(1, Math.min(86400, args.timeoutSec || 600));
+
+          // Same daemon-forward / in-process split as request_choice, plus
+          // kind: 'model' so decideIntent() fires the daemon's model-apply
+          // hook (bin/iak-mcp-daemon.mjs) the instant this is decided,
+          // regardless of which channel the tap arrives on.
+          if (daemonAvailable) {
+            const createRes = await fetch(`${daemonBase}/intent`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json', ...daemonAuthHeaders() },
+              body: JSON.stringify({
+                prompt: offer.prompt,
+                options: offer.options,
+                session: args.session,
+                kind: 'model',
+                channels: Array.isArray(args.channels) ? args.channels : undefined,
+                from_handle: confirmationFromHandle(args, config),
+              }),
+            });
+            const created = await createRes.json();
+            if (!created.ok) return err(`daemon createIntent: ${created.error}`);
+            const id = created.id;
+            const deadline = Date.now() + timeoutSec * 1000;
+            while (Date.now() < deadline) {
+              await new Promise(r => setTimeout(r, 1000));
+              try {
+                const list = await (await fetch(`${daemonBase}/intents`, { headers: daemonAuthHeaders() })).json();
+                const found = list.find((i) => i.id === id);
+                if (found && found.status === 'decided') {
+                  return ok(JSON.stringify({ id, decision: found.decision }, null, 2));
+                }
+              } catch { /* retry */ }
+            }
+            return ok(JSON.stringify({ id, status: 'timeout', timeoutSec }, null, 2));
+          }
+
+          // In-process fallback (no daemon). Nothing applies the decision in
+          // this mode - there is no long-running process for a kind handler
+          // to be registered on - so the caller (or approve_intent/
+          // deny_intent) is responsible for acting on the returned decision.
+          const channels = Array.isArray(args.channels) && args.channels.length > 0
+            ? args.channels.filter((c) => announcerMap[c])
+            : Object.keys(announcerMap);
+          const id = await createIntent({
+            prompt: offer.prompt,
+            options: offer.options,
+            kind: 'model',
             session: args.session,
             channels,
             timeoutSec,

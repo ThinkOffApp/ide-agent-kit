@@ -29,6 +29,39 @@ import { deliverToSession, listSessionAgents, HOP_HEADER } from './session-send.
 // id -> {prompt, session, channels, status, createdAt, decidedAt, decision, resolvers}
 const intents = new Map();
 
+// kind -> async handler({id, decision, prompt, session, kind}). Lets a
+// non-approve/deny consumer (currently: the model picker) react the moment an
+// intent it tagged with `kind` is decided, from WHATEVER channel settled it
+// (HTTP /intent/:id/decision, the chat-reply poller, approve_intent/
+// deny_intent) — decideIntent() is the one chokepoint every path already
+// funnels through, so this is the one place a "decided" hook can live without
+// re-deriving decision-routing per channel.
+const kindHandlers = new Map();
+
+/** Register the async handler that fires when an intent of this `kind`
+ * settles. One handler per kind; a second registerKindHandler() call for the
+ * same kind replaces the first (matches how announcer maps are rebuilt on
+ * each daemon start, not accumulated). */
+export function registerKindHandler(kind, handler) {
+  if (typeof kind !== 'string' || !kind) throw new TypeError('registerKindHandler: kind must be a non-empty string');
+  if (typeof handler !== 'function') throw new TypeError('registerKindHandler: handler must be a function');
+  kindHandlers.set(kind, handler);
+}
+
+export function unregisterKindHandler(kind) {
+  kindHandlers.delete(kind);
+}
+
+/** The in-flight (or settled) promise of the kind handler decideIntent()
+ * fired for this intent id, or null if none was registered / none fired.
+ * decideIntent() itself stays synchronous and never awaits the handler — a
+ * model-apply probe can take seconds and must not hold up the HTTP response
+ * to a CodeWatch tap or the chat-reply poller's next cycle. Tests that need
+ * to observe the handler's effect await this directly. */
+export function pendingKindHandler(id) {
+  return intents.get(id)?.kindHandlerPromise ?? null;
+}
+
 // ---------------------------------------------------------------------------
 // DURABLE STATE
 //
@@ -280,6 +313,7 @@ export function listIntents() {
     prompt: i.prompt,
     session: i.session,
     channels: i.channels,
+    kind: i.kind ?? null,
     status: i.status,
     createdAt: i.createdAt,
     decidedAt: i.decidedAt,
@@ -305,6 +339,7 @@ export function getIntent(id) {
     session: i.session,
     options: i.options || null,
     channels: i.channels,
+    kind: i.kind ?? null,
     status: i.status,
     createdAt: i.createdAt,
     decidedAt: i.decidedAt,
@@ -412,6 +447,19 @@ export function decideIntent(id, rawDecision, { receiptsPath } = {}) {
       decided_at: new Date(i.decidedAt).toISOString(),
     });
   }
+  // A kind-tagged intent (currently only "model") gets its consumer notified
+  // here, once, regardless of which channel supplied the decision. Fire and
+  // forget with a logged failure, same shape as runApprovedAction() above: a
+  // slow or failing apply must not block the caller that settled the intent,
+  // and a silently-swallowed failure is worse than one printed to stderr.
+  if (i.kind && kindHandlers.has(i.kind)) {
+    const handler = kindHandlers.get(i.kind);
+    i.kindHandlerPromise = Promise.resolve()
+      .then(() => handler({ id, decision, prompt: i.prompt, session: i.session, kind: i.kind }))
+      .catch((e) => {
+        process.stderr.write(`[confirmations] kind '${i.kind}' handler for intent ${id} failed: ${e?.message || e}\n`);
+      });
+  }
   return { ok: true };
 }
 
@@ -424,6 +472,10 @@ export async function createIntent({
   options,     // optional string[]: turns this into a CHOICE intent whose legal
                // answers are exactly these labels, rendered as one button each
                // instead of Approve/Deny.
+  kind,        // optional string tag (e.g. "model"): lets decideIntent() fire
+               // a registered kind handler once this intent settles, without
+               // the requester having to poll for the decision itself. See
+               // registerKindHandler() below.
   channels = ['groupmind'],
   timeoutSec = 600,
   announce = async () => {},
@@ -456,6 +508,7 @@ export async function createIntent({
     prompt,
     session,
     options: cleanOptions,
+    kind: typeof kind === 'string' && kind ? kind : null,
     channels,
     status: 'pending',
     createdAt: Date.now(),
@@ -1054,6 +1107,7 @@ export function startConfirmationsServer({
           const id = await createIntent({
             prompt: payload.prompt,
             options: payload.options,
+            kind: typeof payload.kind === 'string' ? payload.kind : undefined,
             session: payload.session || 'external',
             channels: Array.isArray(payload.channels) ? payload.channels : (announce ? ['groupmind'] : []),
             announce: announce || (async () => {}),
