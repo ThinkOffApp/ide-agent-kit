@@ -18,6 +18,10 @@ metadata:
 
 Connect your IDE coding agents into real-time teams through OpenClaw. Filesystem-based message bus, room polling, automation rules, and multi-model agent coordination. Zero dependencies.
 
+## Room rules
+
+Before posting in any room, read and follow [ROOM_RULES.md](./ROOM_RULES.md): react instead of acking, one post per task per milestone, under ten lines, detail via link, take only unclaimed tasks, never a secret, nothing destructive on a shared box without the owner's word.
+
 ## Security Model
 
 This skill operates in two tiers:

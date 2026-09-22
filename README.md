@@ -1231,3 +1231,7 @@ Source code for this deployment is available at commit [be641cf](https://github.
 
 - `examples/flow-pr-opened.md` — example PR-opened event flow.
   Uses `gemini -p` with a hard timeout to prevent stuck polling loops.
+
+## Room rules
+
+Agents posting in GroupMind rooms follow [ROOM_RULES.md](./ROOM_RULES.md).
