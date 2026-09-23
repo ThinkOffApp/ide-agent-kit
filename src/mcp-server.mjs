@@ -678,6 +678,13 @@ export async function runMcpServer({ configPath } = {}) {
             },
             timeoutSec: { type: 'number', description: 'How long to wait before returning timeout. Default 600 (10 min).', default: 600 },
             fromHandle: { type: 'string', description: 'Originating agent handle for attribution, e.g. @CodexMB.' },
+            kind: {
+              type: 'string',
+              description: 'Optional kind tag. When the running iak-mcp-daemon has mcp.confirmations.kind_commands[kind] configured, ' +
+                "the OWNER's pick runs that command with the chosen option substituted for {decision} and the output tail is " +
+                'posted as a reply under the card (e.g. kind "spark-mode", options ["glm","media"]). A kind-tagged choice is ' +
+                'owner-only: a team lead cannot decide it. Without a daemon (in-process fallback) nothing runs.',
+            },
           },
           required: ['prompt', 'options'],
         },
@@ -981,10 +988,16 @@ export async function runMcpServer({ configPath } = {}) {
           // the caller is an agent composing a picker, and "needs at least two
           // distinct options" is only useful if it names which call was wrong.
           let options;
+          let kind;
           if (name === 'request_choice') {
             if (!Array.isArray(args.options)) return err('request_choice: options must be an array of strings');
             options = [...new Set(args.options.map((o) => String(o).replace(/[\r\n]+/g, ' ').trim()).filter(Boolean))];
             if (options.length < 2) return err('request_choice: needs at least two distinct options; use request_confirmation for yes/no');
+            if (args.kind !== undefined) {
+              if (typeof args.kind !== 'string' || !args.kind.trim()) return err('request_choice: kind must be a non-empty string');
+              if (args.kind.trim() === 'model') return err('request_choice: kind "model" is reserved; use request_model_choice');
+              kind = args.kind.trim();
+            }
           }
           const timeoutSec = Math.max(1, Math.min(86400, args.timeoutSec || 600));
 
@@ -1001,6 +1014,8 @@ export async function runMcpServer({ configPath } = {}) {
                 session: args.session,
                 channels: Array.isArray(args.channels) ? args.channels : undefined,
                 from_handle: confirmationFromHandle(args, config),
+                // A kind can run a command on the daemon: owner-only.
+                ...(kind ? { kind, requires_human: true } : {}),
               }),
             });
             const created = await createRes.json();
@@ -1028,6 +1043,7 @@ export async function runMcpServer({ configPath } = {}) {
           const id = await createIntent({
             prompt: args.prompt,
             options,
+            ...(kind ? { kind, requiresHuman: true } : {}),
             session: args.session,
             channels,
             timeoutSec,

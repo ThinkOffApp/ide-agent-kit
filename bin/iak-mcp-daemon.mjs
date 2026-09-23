@@ -28,7 +28,9 @@ import { defaultCallbackBase,
   composeAnnouncers,
   registerKindHandler,
   loadPersistedState,
+  getIntent,
 } from '../src/confirmations.mjs';
+import { registerKindCommands, postRoomReply } from '../src/kind-commands.mjs';
 import { applyChoice, resolveModelRegistryPath, resolveModelSelectionPath } from '../src/model-selection.mjs';
 import { resolveCallerHost } from '../packages/user-intent-kit/src/model-capacity.js';
 
@@ -114,6 +116,28 @@ registerKindHandler('model', async ({ id, decision, offeredModels }) => {
     console.warn(`[iak-mcp-daemon] model choice ${id}: NOT applied (${result.outcome})${result.error ? ` — ${result.error}` : ''}`);
   }
 });
+// Generic kind -> command: `mcp.confirmations.kind_commands` maps a choice
+// kind to an argv template (no shell; "{decision}" is substituted inside one
+// element). The owner's tap on a card raised with that kind runs the command
+// here, and its last lines come back as a reply under the card. See
+// src/kind-commands.mjs for the rules (owner only, option re-check, one run
+// per kind, timeout kills the process group).
+{
+  const kindCmdLog = (msg) => console.log(`[iak-mcp-daemon] ${msg}`);
+  const kinds = registerKindCommands({
+    cc,
+    registerKindHandler,
+    getIntent,
+    post: ({ body, replyTo }) => postRoomReply({
+      apiKey, room: cc.room, body, replyTo,
+      baseUrl: config?.groupmind?.base_url || config?.groupmind?.baseUrl || 'https://groupmind.one/api/v1',
+      log: kindCmdLog,
+    }),
+    log: kindCmdLog,
+    warn: (msg) => console.warn(`[iak-mcp-daemon] ${msg}`),
+  });
+  if (kinds.length) console.log(`[iak-mcp-daemon] kind commands: ${kinds.join(', ')}`);
+}
 // Replay persisted intents BEFORE the listener opens, so a card that was
 // pending when the old process died is decidable the moment the new one
 // answers. IAK #116 added loadPersistedState but never called it from here -
