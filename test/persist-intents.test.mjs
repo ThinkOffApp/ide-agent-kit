@@ -1,8 +1,7 @@
 // Durable intents across a restart.
 //
-// Scope note: the lead-appointment case from the original commit is NOT here.
-// Main has no team-lead feature, so setLead/getLead do not exist to test. That
-// case rides with the team-lead branch; this file covers the queue only.
+// The lead-appointment case is at the bottom: since #131 the lead is state on
+// main, and its row is written by setLead and replayed here.
 //
 // Written because on 2026-09-19 three daemon restarts silently wiped every
 // pending intent AND the lead petrus had just appointed. The store was a bare
@@ -67,4 +66,23 @@ test('with no state path nothing is written — persistence is opt-in', async ()
   await a.m.createIntent({ prompt: 'no persistence', session: 's', channels: [] });
   assert.equal(existsSync(unused), false, 'no file appeared');
   assert.equal(a.summary.intents, 0, 'and loading nothing reports nothing');
+});
+
+test('the lead survives a restart, and a clear survives too', async () => {
+  // claudeMB, review of #131: setLead wrote a receipt only, so every restart
+  // vacated the post while the replay comment claimed lead rows were handled.
+  const p5 = join(dir, 'state5.jsonl');
+  const a = await boot(p5);
+  const r = a.m.setLead('hermes', { actor: 'petrus' });
+  assert.equal(r.ok, true, 'owner appoints');
+
+  const b = await boot(p5);
+  assert.equal(b.summary.lead, '@hermes', 'the summary names the replayed lead');
+  assert.equal(b.m.getLead()?.handle, '@hermes', 'the lead came back after the restart');
+  assert.equal(b.m.getLead()?.assignedBy, '@petrus', 'with who appointed it');
+
+  b.m.setLead(null, { actor: 'petrus' });
+  const c = await boot(p5);
+  assert.equal(c.m.getLead(), null, 'a clear is the last row and wins on replay');
+  assert.equal(c.summary.lead, null);
 });

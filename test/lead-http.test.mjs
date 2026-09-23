@@ -130,6 +130,27 @@ test('a lead cannot approve its own request by changing the case of its handle',
   assert.equal(listIntents().find(i => i.id === id).status, 'pending');
 });
 
+test('a token that differs from the lead token in one byte proves nothing', async () => {
+  // resolvePrincipal compares every configured token in constant time; the
+  // observable contract is unchanged: the right token maps, a same-length
+  // near-miss is a stranger (403 on a lead-only path), never a partial match.
+  _resetForTests();
+  const { setLead } = await import('../src/confirmations.mjs');
+  setLead('hermes', { actor: 'petrus' });
+  const id = await createIntent({
+    prompt: 'ls', session: 's', channels: [], fromHandle: '@somebody', announce: async () => {},
+  });
+  const nearMiss = LEAD_TOKEN.slice(0, -1) + (LEAD_TOKEN.endsWith('a') ? 'b' : 'a');
+  const bad = await post(`/intent/${id}/decision`, { decision: 'approve' }, nearMiss);
+  // 401, not 403: the bearer gate runs before any route, and a bearer that is
+  // neither the shared token nor a registered principal never gets in at all.
+  assert.equal(bad.status, 401, 'a near-miss token is refused at the door, before the decision route');
+  assert.equal(listIntents().find(i => i.id === id).status, 'pending');
+  const good = await post(`/intent/${id}/decision`, { decision: 'approve' }, LEAD_TOKEN);
+  assert.equal(good.status, 200, 'the exact token still proves the lead');
+  assert.equal(listIntents().find(i => i.id === id).decidedBy, '@hermes');
+});
+
 test('a proven lead still cannot clear a requiresHuman intent', async () => {
   _resetForTests();
   const { setLead } = await import('../src/confirmations.mjs');
