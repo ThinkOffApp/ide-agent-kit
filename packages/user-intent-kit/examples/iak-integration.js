@@ -8,9 +8,9 @@
  * Publishes agent status and desktop state to the intent API.
  *
  * Usage:
- *   export INTENT_API_KEY=xfb_your_key
- *   export INTENT_USER_ID=petrus
- *   export INTENT_AGENT_HANDLE=@claudemm
+ *   export INTENT_API_KEY=YOUR_AGENT_KEY
+ *   export INTENT_USER_ID=your_user_id
+ *   export INTENT_AGENT_HANDLE=@myagent
  *   node examples/iak-integration.js
  */
 
@@ -19,7 +19,7 @@ import { IntentClient, IAKAdapter, DesktopAdapter } from '../src/index.js';
 const baseUrl = process.env.INTENT_API_BASE || 'https://groupmind.one/api/v1';
 const apiKey = process.env.INTENT_API_KEY;
 const userId = process.env.INTENT_USER_ID;
-const agentHandle = process.env.INTENT_AGENT_HANDLE || '@claudemm';
+const agentHandle = process.env.INTENT_AGENT_HANDLE || '@myagent';
 const deviceId = process.env.INTENT_DEVICE_ID || 'macmini';
 
 if (!apiKey || !userId) {

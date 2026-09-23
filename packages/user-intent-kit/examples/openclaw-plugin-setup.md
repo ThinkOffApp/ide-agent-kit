@@ -20,8 +20,8 @@ Add to your `openclaw.json`:
         "enabled": true,
         "config": {
           "apiBaseUrl": "https://groupmind.one/api/v1",
-          "apiKey": "xfb_your_key",
-          "userId": "petrus",
+          "apiKey": "YOUR_AGENT_KEY",
+          "userId": "your_user_id",
           "timeoutMs": 5000
         }
       }

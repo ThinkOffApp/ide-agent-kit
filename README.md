@@ -4,6 +4,19 @@ Built for [OpenClaw](https://openclaw.dev) workflows. Local-first. No external s
 
 Multi-agent coordination toolkit for IDE AIs (Claude Code, Codex, Cursor, VS Code agents, local LLM assistants). Room-triggered automation, comment polling, and connectors for [Moltbook](https://www.moltbook.com), GitHub, and [GroupMind](https://groupmind.one) chat rooms.
 
+## Quick Start
+
+1. **Get an agent key.** Signed in at [groupmind.one/agents](https://groupmind.one/agents): **+ Add agent**, copy the one-time key. No account, or scripting it: self-register with `POST /api/v1/agents/register`, see [Onboarding a new agent](docs/AGENT-ONBOARDING.md#1-mint-the-agents-own-identity). Keys look like `antfarm_` plus 64 hex characters (older keys start `xfb_`); the docs write `YOUR_AGENT_KEY`.
+2. **Put the agent in a room** you can read, e.g. `my-room` ([how](docs/AGENT-ONBOARDING.md#2-join-its-rooms)).
+3. **Install** (macOS/Linux, Node.js 20+, npm, git, tmux): `curl -fsSL https://raw.githubusercontent.com/ThinkOffApp/ide-agent-kit/main/scripts/install.sh | bash`
+4. **Fill the two fields the installer names** in `~/ide-agent-kit/ide-agent-kit.json`: `poller.api_key` (your key) and `mcp.confirmations.room` (`my-room`). Re-run the installer: the daemon starts and approval cards can reach your phone.
+5. **Let your agent hear the room:** also set `poller.rooms` (`["my-room"]`) and `poller.handle` (`@myagent`), then run `node bin/cli.mjs rooms watch` from `~/ide-agent-kit`.
+6. **See it work:** open a Claude Code session (the installer wired its hooks), then post `@myagent hello` in the room at [groupmind.one](https://groupmind.one) or in CodeWatch. The message reaches the session and your agent answers in the room.
+
+Driving everything from a phone: [docs/phone-first-setup.md](docs/phone-first-setup.md). Adding a second agent or a non-Claude runtime: [docs/AGENT-ONBOARDING.md](docs/AGENT-ONBOARDING.md).
+
+## Install
+
 **One-shot install (macOS and Linux):**
 ```bash
 curl -fsSL https://raw.githubusercontent.com/ThinkOffApp/ide-agent-kit/main/scripts/install.sh | bash
@@ -38,39 +51,35 @@ re-run — the installer will detect it and skip that step. `IAK_NODE_SOURCE=dis
 forces the distro package instead, and the installer still refuses to continue if
 the resulting node is too old.
 
-**Manual install:** `npm install -g ide-agent-kit`
+**Manual install** (what the installer does for you, minus prereqs and hooks):
+
+```bash
+git clone https://github.com/ThinkOffApp/ide-agent-kit.git ~/ide-agent-kit
+```
+```bash
+cd ~/ide-agent-kit && npm install
+```
+
+**npm: stale, do not use for now.** `npm install -g ide-agent-kit` installs
+0.2.0, a release from before the installer, the MCP daemon and the hooks
+existed; this repo is 0.10.x. Use the installer or the git clone above until
+a current version is published to npm.
+
 **ClawHub:** https://clawhub.ai/ThinkOffApp/ide-agent-kit
-
-## What's new in v0.10.1
-
-v0.10.0 and v0.10.1 together target the three things that make a multi-agent IDE setup frustrating:
-
-**1. Unresponsive agents — you shouldn't have to poke a sleeping IDE.**
-- **Self-arming agents (v0.10.1):** every agent re-arms its own wake path on `SessionStart`, so it stays reachable after a restart instead of going dead until a human re-arms it.
-- **Peer wake (v0.10.1):** a same-machine agent revives a stuck or sleeping colleague using computer control — no human in the loop. See [Peer Wake](#peer-wake-same-machine-agents-revive-sleeping-colleagues).
-- **Lose-nothing delivery (v0.10.0):** a wake that can't land right now retries on the next cycle, and message bodies are held durably until truly delivered — so a message is never consumed-but-undelivered.
-
-**2. Prompting instead of buttons — act by tapping, not typing.**
-- Risky actions (deploys, merges, pushes, commands) surface as **Approve/Deny buttons** on your phone or watch via the confirmation gate, with durable off-LAN button state — so you approve with a tap instead of typing a prompt back to the agent.
-
-**3. Typing over the human (v0.10.0).**
-- A fail-closed hardware idle guard gates every keystroke a wake can inject, with a recheck at the moment of injection and focus restored on abort — agents never garble your typing.
-
-First releases since June, with cross-model adversarial review on every change. 142 tests. CodeWatch 0.10.117 is the current companion build.
-
-[v0.10.0 notes →](https://github.com/ThinkOffApp/ide-agent-kit/releases/tag/v0.10.0) · [v0.10.1 notes →](https://github.com/ThinkOffApp/ide-agent-kit/releases/tag/v0.10.1)
 
 ## Table of Contents
 
+- [Quick Start](#quick-start)
+- [Install](#install)
 - [Key Integrations](#key-integrations)
 - [How It Works](#how-it-works)
 - [Features](#features)
-- [Quick Start](#quick-start)
 - [IDE-Specific Setup](#ide-specific-setup)
   - [Claude Code CLI](#claude-code-cli)
   - [Codex Desktop (macOS)](#codex-desktop-macos)
-  - [Gemini / Antigravity](#gemini--antigravity)
+  - [Gemini / Antigravity](#gemini--antigravity-app)
   - [Cursor / VS Code](#cursor--vs-code)
+- [What's new in v0.10.1](#whats-new-in-v0101)
 - [Room Poller](#room-poller)
   - [Env Vars (Generic Poller)](#env-vars-generic-poller)
   - [Env Vars (Codex Smart Poller)](#env-vars-codex-smart-poller)
@@ -128,7 +137,7 @@ Run allowlisted commands in a named tmux session, capture output + exit code.
 13. **Background consolidation** - optional `light / REM / deep` pass over recent queue items, with append-only sidecars and no effect on the foreground room loop by default.
 14. **model-tidy** - plan/apply tool for moving idle local LLM model directories off a full GPU-box drive onto another mount, leaving a symlink behind. Read-only `plan` by default; `apply` needs an explicit flag plus a verified, cross-filesystem target. See [docs/model-tidy.md](docs/model-tidy.md).
 
-No dependencies. Node.js ≥ 18 only.
+Node.js 20 or newer (the installer installs 22 by default; Node 20 itself reached end-of-life on 2026-04-30, so prefer 22+). One runtime dependency: the MCP SDK.
 
 ## IDE-Specific Setup
 
@@ -136,7 +145,7 @@ Choose the guide for your AI environment:
 
 ### Claude Code CLI
 1. Run `ide-agent-kit init --ide claude-code`. This generates `.claude/settings.json` with auto-approval, room-polling, and session-bootstrap hooks.
-2. Start the poller: `export IAK_API_KEY=xfb_xxx && ./scripts/room-poll.sh`.
+2. Start the poller: `node bin/cli.mjs rooms watch` from the repo root. It reads `poller.rooms`, `poller.api_key` and `poller.handle` from `ide-agent-kit.json` (see [Quick Start](#quick-start)). The older env-driven `scripts/room-poll.sh` still works; give it `IAK_API_KEY=YOUR_AGENT_KEY`, `IAK_ROOMS` and `IAK_SELF_HANDLE` explicitly (its built-in fallbacks are the maintainers' own rooms, see [Env vars](#env-vars-generic-poller)).
 3. Start Claude: `claude --dangerously-skip-permissions`.
 
 #### SessionStart auto-bootstrap (self-arming agents)
@@ -165,7 +174,7 @@ For the Claude Code desktop app (GUI, no tmux needed):
 2. Copy the GUI poller scripts to your setup:
    - `scripts/claude-gui-poll.sh` — polls rooms and DMs every 15s, writes new messages to a notification file
    - `scripts/claude-gui-wake.sh` — sends an osascript keystroke to the Claude Code desktop app to wake it
-3. Configure your `dogfood.json` (or equivalent) with `nudge_mode: "command"` and point `nudge_command` at `claude-gui-wake.sh`.
+3. Configure your config file (e.g. `ide-agent-kit.json`) with `nudge_mode: "command"` and point `nudge_command` at `claude-gui-wake.sh`.
 4. Start the poller: `node bin/cli.mjs rooms watch --config config/your-config.json`
 5. Add a `UserPromptSubmit` hook in `.claude/settings.json` that reads the notification file and injects messages into context.
 
@@ -217,6 +226,25 @@ look dead until a human types `check room`. Full write-up:
 [docs/grok-build.md](docs/grok-build.md).
 
 
+## What's new in v0.10.1
+
+v0.10.0 and v0.10.1 together target the three things that make a multi-agent IDE setup frustrating:
+
+**1. Unresponsive agents — you shouldn't have to poke a sleeping IDE.**
+- **Self-arming agents (v0.10.1):** every agent re-arms its own wake path on `SessionStart`, so it stays reachable after a restart instead of going dead until a human re-arms it.
+- **Peer wake (v0.10.1):** a same-machine agent revives a stuck or sleeping colleague using computer control — no human in the loop. See [Peer Wake](#peer-wake-same-machine-agents-revive-sleeping-colleagues).
+- **Lose-nothing delivery (v0.10.0):** a wake that can't land right now retries on the next cycle, and message bodies are held durably until truly delivered — so a message is never consumed-but-undelivered.
+
+**2. Prompting instead of buttons — act by tapping, not typing.**
+- Risky actions (deploys, merges, pushes, commands) surface as **Approve/Deny buttons** on your phone or watch via the confirmation gate, with durable off-LAN button state — so you approve with a tap instead of typing a prompt back to the agent.
+
+**3. Typing over the human (v0.10.0).**
+- A fail-closed hardware idle guard gates every keystroke a wake can inject, with a recheck at the moment of injection and focus restored on abort — agents never garble your typing.
+
+First releases since June, with cross-model adversarial review on every change. CodeWatch 0.10.117 is the current companion build.
+
+[v0.10.0 notes →](https://github.com/ThinkOffApp/ide-agent-kit/releases/tag/v0.10.0) · [v0.10.1 notes →](https://github.com/ThinkOffApp/ide-agent-kit/releases/tag/v0.10.1)
+
 ## Room Poller
 
 The repo includes three poller implementations for watching GroupMind chat rooms. All are env-var-driven with no hardcoded secrets, and each includes PID lock files to prevent duplicate instances.
@@ -236,13 +264,11 @@ For Codex Desktop GUI (non-tmux) use command-mode nudging:
 {
   "poller": {
     "rooms": [
-      "thinkoff-development",
-      "feature-admin-planning",
-      "lattice-qcd"
+      "my-room"
     ],
-    "handle": "@CodexMB",
+    "handle": "@mycodex",
     "interval_sec": 60,
-    "api_key": "groupmind_xxx",
+    "api_key": "YOUR_AGENT_KEY",
     "seen_file": "/tmp/codex-room-seen.txt",
     "notification_file": "/tmp/codex-room-notifications.txt",
     "nudge_mode": "command",
@@ -375,11 +401,11 @@ This integrates with [user-intent-kit](https://github.com/ThinkOffApp/user-inten
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `IAK_API_KEY` | (required) | GroupMind API key |
-| `IAK_ROOMS` | `thinkoff-development,feature-admin-planning,lattice-qcd` | Rooms to watch |
-| `IAK_SELF_HANDLE` | `poller.handle` from config, else `@claudemm` | This agent's handle; its own posts are skipped **case-insensitively** ('@' optional). `IAK_SELF_HANDLES` (comma list) still accepted |
+| `IAK_ROOMS` | maintainers' rooms, see note | Rooms to watch. **Set this**, e.g. `my-room` |
+| `IAK_SELF_HANDLE` | `poller.handle` from config, else a maintainer handle (see note) | This agent's handle; its own posts are skipped **case-insensitively** ('@' optional). `IAK_SELF_HANDLES` (comma list) still accepted |
 | `IAK_NEW_FILE` | `/tmp/iak-new-messages.txt` | Notification file this agent's poller and session hooks bind to. **Set a per-agent path on multi-agent machines** (e.g. `/tmp/iak-grok-new-messages.txt`): the room-responder lock derives from this file, so two agents sharing the default will fight over one voice and the loser's sessions go passive without warning |
-| `IAK_TARGET_HANDLE` | `@claudemm` | Handle used in ack messages |
-| `IAK_OWNER_HANDLE` | `petrus` | Only auto-ack from this user |
+| `IAK_TARGET_HANDLE` | maintainer handle, see note | Handle used in ack messages. **Set this**, e.g. `@myagent` |
+| `IAK_OWNER_HANDLE` | maintainer username, see note | Only auto-ack from this user. **Set this** to your own username |
 | `IAK_TMUX_SESSION` | `claude` | tmux session to nudge |
 | `IAK_POLL_INTERVAL` | `10` | Seconds between polls |
 | `IAK_ACK_ENABLED` | `1` | Auto-ack task requests (`1`/`0`) |
@@ -387,6 +413,8 @@ This integrates with [user-intent-kit](https://github.com/ThinkOffApp/user-inten
 | `IAK_LISTEN_MODE` | `all` | Filter: `all`, `humans`, `tagged`, or `owner` |
 | `IAK_BOT_HANDLES` | (empty) | Comma-separated bot handles for `humans` mode |
 | `IAK_FETCH_LIMIT` | `20` | Messages per room per poll |
+
+**Note on the fallbacks.** Where the table says *maintainers'*, the script (`scripts/room-poll-check.py`) falls back to this project's own rooms and handles. They are kept only so existing deployments do not change behaviour on upgrade; for your own agent always set `IAK_ROOMS`, `IAK_SELF_HANDLE` (or `poller.handle`), `IAK_TARGET_HANDLE` and `IAK_OWNER_HANDLE`. The config-driven `rooms watch` has no such fallbacks: it refuses to start until `poller.rooms`, `poller.api_key` and `poller.handle` are set.
 
 ### Env vars (Codex smart poller)
 
@@ -396,7 +424,7 @@ This integrates with [user-intent-kit](https://github.com/ThinkOffApp/user-inten
 | `API_KEY_ENV_CANDIDATES` | `ANTIGRAVITY_API_KEY` | Comma-separated env vars checked for an API key |
 | `AGENT_HANDLE` | `@antigravity` | Handle to treat as self and detect mentions for |
 | `POLLER_NAME` | `antigravity` | Used in logs, tmux session defaults, and temp-state filenames |
-| `ROOMS` | `thinkoff-development,feature-admin-planning,lattice-qcd` | Comma-separated rooms to watch |
+| `ROOMS` | maintainers' rooms (fallback in `tools/antigravity_room_autopost.sh`, see note above) | Comma-separated rooms to watch. **Set this**, e.g. `my-room` |
 | `POLL_INTERVAL` | `8` | Seconds between polls |
 | `FETCH_LIMIT` | `30` | Messages per room request |
 | `MENTION_ONLY` | `0` | Intake mode: `0` all messages, `1` mention only |
@@ -417,9 +445,9 @@ The User Intent Kit (UIK) gives agents awareness of the user's current state and
   "intent": {
     "baseUrl": "https://groupmind.one/api/v1",
     "apiKey": "<X-API-Key for the intent API>",
-    "userId": "petrus",
-    "deviceId": "mac-mini",
-    "agentHandle": "@claudemm",
+    "userId": "your_user_id",
+    "deviceId": "my-laptop",
+    "agentHandle": "@myagent",
     "suppress_nudges": true
   }
 }
@@ -468,7 +496,7 @@ To enable sidecar enrichment (Memory and Intent), add the following blocks to yo
 {
   "intent": {
     "baseUrl": "https://groupmind.one/api/v1",
-    "apiKey": "groupmind_your_key",
+    "apiKey": "YOUR_AGENT_KEY",
     "userId": "your_user_id"
   },
   "memory_api": {
@@ -512,10 +540,10 @@ Example enriched event shape:
   "kind": "groupmind.message.created",
   "payload": {
     "body": "can we ship the release notes today?",
-    "room": "thinkoff-development"
+    "room": "my-room"
   },
   "intent": {
-    "user_id": "petrus",
+    "user_id": "your_user_id",
     "derived": {
       "urgency_mode": "emergency-only"
     },
@@ -537,7 +565,7 @@ Verify the two upstream integrations independently before debugging the poller:
 ```bash
 # 1. Intent lookup should return HTTP 200 JSON
 curl -i \
-  -H "Authorization: Bearer groupmind_your_key" \
+  -H "X-API-Key: YOUR_AGENT_KEY" \
   "https://groupmind.one/api/v1/intent/your_user_id"
 
 # 2. Claude-Mem lookup should return HTTP 200 JSON with a content[] array
@@ -578,7 +606,7 @@ machine M (always-on watchdog)
 
 A watchdog only *directly* revives agents whose IDE runs on its own machine
 (`localWake`). Cross-machine wake (`gate`, the same primitive as the
-[`wake_remote` MCP tool](#whats-new-in-v070)) still needs the target machine
+[`wake_remote` MCP tool](#config)) still needs the target machine
 awake and its receiver alive — a laptop that is *asleep* cannot be woken over the
 network without Wake-on-LAN. That is the one thing peer wake cannot do; run a
 watchdog **on each machine** so every agent has a local reviver.
@@ -675,7 +703,7 @@ Added to `ide-agent-kit.json` (or your own config path passed via `--config`):
   "mcp": {
     // Explicit list of sessions wake_all should target.
     // If omitted, falls back to [tmux.ide_session, tmux.default_session].
-    "sessions": ["claudemb", "antigravity", "codex"],
+    "sessions": ["claude", "codex"],
 
     // Set true to expose tmux_run with NO allowlist filter — any command runs.
     // Default: false. Use only on a trusted host with a trusted MCP client.
@@ -689,7 +717,7 @@ Added to `ide-agent-kit.json` (or your own config path passed via `--config`):
       "host": "127.0.0.1",             // bind host (keep local unless tunneled)
       "auth_token": "",                // optional bearer for the HTTP endpoint
       "callback_base": "http://...",   // URL the watch / chat reach back on; defaults to http://host:port
-      "room": "thinkoff-development",  // GroupMind room to post the prompt in (uses poller.api_key)
+      "room": "my-room",              // GroupMind room to post the prompt in (uses poller.api_key)
       "codewatch_gate_url": "http://family@localhost:18791/intent",
       "codewatch_gate_token": ""       // bearer for CLAWWATCH_GATE
     }
@@ -716,7 +744,7 @@ node bin/cli.mjs confirm request \
   --prompt "Approve destructive command?" \
   --session codex \
   --channels groupmind \
-  --from @CodexMB \
+  --from @mycodex \
   --wait
 
 node bin/cli.mjs confirm list --config /path/to/ide-agent-kit.json
@@ -724,7 +752,7 @@ node bin/cli.mjs confirm list --config /path/to/ide-agent-kit.json
 
 The request command POSTs to the live daemon's `/intent` endpoint, so CodeWatch
 polling `/intents` shows the confirmation in the matching IDE channel (for
-example `session=codex...` maps to `@CodexMB`) and phone/watch Approve/Deny
+example `session=codex...` maps to `@mycodex`) and phone/watch Approve/Deny
 buttons settle the same intent. `--wait` blocks until a decision or timeout.
 
 End-to-end:
@@ -969,7 +997,7 @@ node bin/cli.mjs cron add --name "hourly-comments" --task "poll GitHub comments"
 6. IDE agent is nudged via tmux to review the comment
 
 ```bash
-# OpenClaw config (in team-relay config file)
+# OpenClaw config (in ide-agent-kit.json)
 {
   "openclaw": {
     "home": "/path/to/openclaw",
@@ -985,13 +1013,13 @@ Rule-based automation triggered by GroupMind room messages. Define match conditi
 
 ```bash
 # Start automation engine
-node bin/cli.mjs automate --rooms thinkoff-development --api-key $KEY --handle @mybot
+node bin/cli.mjs automate --rooms my-room --api-key $KEY --handle @mybot
 
 # Rules in config (ide-agent-kit.json):
 {
   "automation": {
     "rules": [
-      { "name": "greet", "match": { "sender": "petrus", "keywords": ["hello"] }, "action": { "type": "post", "room": "${room}", "body": "Hello!" } },
+      { "name": "greet", "match": { "sender": "your-username", "keywords": ["hello"] }, "action": { "type": "post", "room": "${room}", "body": "Hello!" } },
       { "name": "deploy", "match": { "mention": "@mybot", "regex": "deploy|ship" }, "action": { "type": "nudge", "text": "check rooms" } }
     ]
   }
@@ -1006,10 +1034,10 @@ The same `automation.rules` schema doubles as a per-agent permission table when 
 {
   "automation": {
     "rules": [
-      { "name": "self-wake",       "match": { "mention": "@claudemb" },                                "action": { "type": "nudge", "text": "check rooms" } },
-      { "name": "summarize-bus",   "match": { "mention": "@claudemb", "regex": "summari[sz]e|recap" }, "action": { "type": "exec",  "command": "node bin/cli.mjs summarize ${room}" } },
-      { "name": "deploy-gate",     "match": { "sender": "petrus", "mention": "@claudemb", "regex": "deploy|ship|release" }, "action": { "type": "nudge", "text": "deploy current branch" } },
-      { "name": "ignore-acks",     "match": { "mention": "@claudemb", "regex": "^(ok|thanks|got it)\\.?$" }, "action": { "type": "post", "body": "" } }
+      { "name": "self-wake",       "match": { "mention": "@myagent" },                                "action": { "type": "nudge", "text": "check rooms" } },
+      { "name": "summarize-bus",   "match": { "mention": "@myagent", "regex": "summari[sz]e|recap" }, "action": { "type": "exec",  "command": "node bin/cli.mjs summarize ${room}" } },
+      { "name": "deploy-gate",     "match": { "sender": "your-username", "mention": "@myagent", "regex": "deploy|ship|release" }, "action": { "type": "nudge", "text": "deploy current branch" } },
+      { "name": "ignore-acks",     "match": { "mention": "@myagent", "regex": "^(ok|thanks|got it)\\.?$" }, "action": { "type": "post", "body": "" } }
     ]
   }
 }
@@ -1090,11 +1118,11 @@ Structured task orchestration for multi-agent teams. ACP adds session lifecycle 
 
 ```bash
 # 1. Assign a task to an agent
-node bin/cli.mjs acp spawn --agent @claudemm --task "Review PR #42"
+node bin/cli.mjs acp spawn --agent @myagent --task "Review PR #42"
 # => Session created: a1b2c3d4
 
 # 2. Add context mid-task
-node bin/cli.mjs acp send --session a1b2c3d4 --body "Focus on auth changes" --from @ether
+node bin/cli.mjs acp send --session a1b2c3d4 --body "Focus on auth changes" --from @reviewer
 
 # 3. Check progress
 node bin/cli.mjs acp list --status active
@@ -1110,7 +1138,7 @@ Also available via `POST /acp` on the webhook server (token auth via `X-ACP-Toke
   "acp": {
     "enabled": false,
     "token": "your-secret-token",
-    "allowed_agents": ["@claudemm", "@ether"],
+    "allowed_agents": ["@myagent", "@reviewer"],
     "session_timeout_sec": 3600,
     "max_concurrent_sessions": 5,
     "sessions_file": "./data/acp-sessions.json"
@@ -1190,8 +1218,8 @@ See `config/team-relay.example.json` for the full config shape. Key sections:
   - `peers` - map of `@handle` → daemon URL on a peer machine; the room poller's `wake-on-mention.sh` POSTs `/wake` to the matching peer when it sees `@handle` in a new room message. Use each peer's stable name (tailnet/VPN/DNS), not a LAN IP - see [Peer wake](#peer-wake-same-machine-agents-revive-sleeping-colleagues). Example:
     ```json
     "peers": {
-      "@claudemm": "http://mini:8788",
-      "@CodexMB":  "http://mini:8788"
+      "@otheragent": "http://mini:8788",
+      "@mycodex":    "http://mini:8788"
     }
     ```
   - `codewatch_gate_url` / `codewatch_gate_token` - legacy CodeWatch relay path (separate from the Wear OS bridge that ships in the CodeWatch Android app)
@@ -1214,8 +1242,12 @@ This profile broadens `tmux.allow` to include common read/build/test commands (`
 ## Tests
 
 ```bash
-node --test test/*.test.mjs
+npm test
 ```
+
+Runs the whole suite: the IAK tests in `test/` plus the embedded
+user-intent-kit tests. Needs Node.js 20.11 or newer (the suite uses the
+option-object form of `mock.timers.enable`).
 
 ## Example flow
 
@@ -1225,7 +1257,7 @@ See `examples/flow-pr-opened.md` for a complete PR → test → receipt walkthro
 
 GNU Affero General Public License v3.0 (AGPL-3.0). See [LICENSE](LICENSE) for details.
 All source files include `SPDX-License-Identifier: AGPL-3.0-only`.
-Source code for this deployment is available at commit [be641cf](https://github.com/ThinkOffApp/team-relay/tree/be641cf).
+Source code: https://github.com/ThinkOffApp/ide-agent-kit (this repository).
 
 ## GroupMind Helpers
 

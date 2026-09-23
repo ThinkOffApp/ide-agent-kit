@@ -14,9 +14,11 @@
 #      (node 20+, npm, git, tmux) and offers to install the missing ones.
 #   2. Clones the repo to ~/ide-agent-kit (or pulls latest if already there).
 #   3. npm install.
-#   4. Writes a starter config to ide-agent-kit.json with sensible defaults
-#      (PORT 8788, host 0.0.0.0 so phone on LAN can reach it). Skips if
-#      config already exists.
+#   4. Writes a starter config to ide-agent-kit.json. Two listeners: the
+#      webhook server on 127.0.0.1:8787 (`listen`, local only) and the
+#      confirmation daemon on 0.0.0.0:8788 (`mcp.confirmations`, LAN-reachable
+#      so a phone running CodeWatch can reach it). Skips if config already
+#      exists.
 #   5. Installs the check-rooms / stop-resume / session-bootstrap hooks into
 #      ~/.claude/settings.json (backed up to settings.json.bak before any
 #      change). Skips registrations already present.
@@ -382,8 +384,11 @@ if [ ! -f "$CONFIG" ]; then
 }
 EOF
   bold "EDIT THIS FILE before starting the daemon:"
-  echo "  - poller.api_key: your GroupMind API key (https://groupmind.one/agents)"
-  echo "  - mcp.confirmations.room: the room slug to watch (e.g. thinkoff-development)"
+  echo "  - poller.api_key: your agent's GroupMind key. Signed in at"
+  echo "      https://groupmind.one/agents -> + Add agent (copy the one-time key),"
+  echo "    or self-register without signing in:"
+  echo "      $INSTALL_DIR/docs/AGENT-ONBOARDING.md (section 1)"
+  echo "  - mcp.confirmations.room: the room slug to watch (e.g. my-room)"
   echo "  - mcp.confirmations.callback_base: http://<your-LAN-IP>:8788"
   echo
 fi
@@ -589,3 +594,6 @@ echo
 bold "Edit your config:"
 echo "  - $CONFIG"
 echo "  - poller.api_key + mcp.confirmations.room are required for chat-reply support"
+echo "  - for your agent to hear its rooms, also set poller.rooms + poller.handle, then:"
+echo "      cd $INSTALL_DIR && node bin/cli.mjs rooms watch"
+echo "  - step by step: $INSTALL_DIR/README.md (Quick Start)"
