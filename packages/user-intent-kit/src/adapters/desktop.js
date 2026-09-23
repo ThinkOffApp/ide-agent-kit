@@ -24,6 +24,7 @@ export class DesktopAdapter {
   #kind;
   #model;
   #modelProbe;
+  #hostSources;
   #availabilityProbe;
   #pollIntervalMs;
   #publisher;
@@ -43,11 +44,18 @@ export class DesktopAdapter {
    */
   constructor(client, {
     pollIntervalMs = 30000, machine, kind, model, modelProbe, availabilityProbe,
+    hostSources,
   } = {}) {
     this.#client = client;
     this.#machine = machine ?? client?.deviceId ?? undefined;
     this.#kind = kind;
     this.#model = model;
+    // Telemetry sources are injectable for the same reason they are in
+    // host-telemetry.js: on Linux the default sources read /proc, and a test
+    // machine that happens to run a llama-server would publish its model into
+    // every heartbeat a test builds — passing suites that quietly depend on
+    // an empty machine are the same bug as skipped ones.
+    this.#hostSources = hostSources;
     // Order matters: the served-model probe's generation guard is wired to
     // the disk scan, so the scan has to exist first. Without the guard a probe
     // could ask a server to generate with a model that is half downloaded,
@@ -189,7 +197,7 @@ export class DesktopAdapter {
       screen_active: active,
       context: active ? 'active' : 'idle',
       ...(idleSec === undefined ? {} : { idle_sec: idleSec }),
-      ...collectHostTelemetry({ machine: this.#machine, kind: this.#kind, model: this.#servedModel() }),
+      ...collectHostTelemetry({ machine: this.#machine, kind: this.#kind, model: this.#servedModel(), sources: this.#hostSources ?? undefined }),
       // The weaker claim, in its OWN keys. `model` still means served and
       // nothing else, so a dashboard that has never heard of availability
       // cannot start rendering "this box could run it" as "this box is

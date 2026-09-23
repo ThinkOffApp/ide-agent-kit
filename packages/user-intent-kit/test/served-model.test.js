@@ -264,7 +264,7 @@ test('a heartbeat publishes before the probe has answered anything', async () =>
     patchDevice: async (state) => { patched.push(state); },
     startHeartbeat() {}, stopHeartbeat() {},
   };
-  const desktop = new DesktopAdapter(client, { machine: 'macbook', modelProbe: probe, pollIntervalMs: 1e9 });
+  const desktop = new DesktopAdapter(client, { machine: 'macbook', modelProbe: probe, pollIntervalMs: 1e9, hostSources: macSources() });
 
   // The whole point: this awaits nothing on the network.
   await desktop.publishState();
@@ -623,7 +623,10 @@ async function stateFrom(opts) {
     patchDevice: async (state) => { patched.push(state); },
     startHeartbeat() {}, stopHeartbeat() {},
   };
-  const desktop = new DesktopAdapter(client, { machine: 'testbox', pollIntervalMs: 1e9, ...opts });
+  // Faked sources by default: on Linux the real ones read /proc, and a box that
+  // happens to run a llama-server would leak its model name into every test
+  // payload — the suite must say the same thing on every machine.
+  const desktop = new DesktopAdapter(client, { machine: 'testbox', pollIntervalMs: 1e9, hostSources: macSources(), ...opts });
   await desktop.publishState();
   desktop.stop();
   return patched[0];
