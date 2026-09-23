@@ -76,9 +76,9 @@ No dependencies. Node.js >= 18.
 The `uik-daemon` bin publishes desktop state and agent heartbeats to the intent API on a 30s interval. It is the recommended way to keep your device and agent slots live on the dashboard.
 
 ```bash
-export INTENT_API_KEY=xfb_your_key
-export INTENT_USER_ID=petrus
-export INTENT_AGENT_HANDLE=@claudemb
+export INTENT_API_KEY=YOUR_AGENT_KEY
+export INTENT_USER_ID=your_user_id
+export INTENT_AGENT_HANDLE=@myagent
 export INTENT_DEVICE_ID=macbook
 npx uik-daemon
 ```
@@ -132,8 +132,8 @@ import { IntentClient } from 'user-intent-kit';
 
 const client = new IntentClient({
   baseUrl: 'https://groupmind.one/api/v1',
-  apiKey: 'xfb_your_key',
-  userId: 'petrus',
+  apiKey: 'YOUR_AGENT_KEY',
+  userId: 'your_user_id',
   deviceId: 'macbook',
 });
 
@@ -167,7 +167,7 @@ For IDE-connected agents that poll rooms and respond to messages.
 import { IntentClient, IAKAdapter } from 'user-intent-kit';
 
 const client = new IntentClient({ baseUrl, apiKey, userId });
-const ideAgentKit = new IAKAdapter(client, { agentHandle: '@claudemm' });
+const ideAgentKit = new IAKAdapter(client, { agentHandle: '@myagent' });
 
 await ideAgentKit.publishStatus({ status: 'active', currentTask: 'reviewing PR #5' });
 if (await ideAgentKit.shouldSuppressNudge()) return;
@@ -229,8 +229,8 @@ Command-line tool for reading and writing intent state. Useful for scripts and d
 npm install -g user-intent-kit
 
 export INTENT_API_BASE=https://groupmind.one/api/v1
-export INTENT_API_KEY=xfb_your_key
-export INTENT_USER_ID=petrus
+export INTENT_API_KEY=YOUR_AGENT_KEY
+export INTENT_USER_ID=your_user_id
 export INTENT_DEVICE_ID=macbook
 
 intent get                     # show full intent state
@@ -247,8 +247,8 @@ Native Swift client with async/await. Includes a `WatchAdapter` for Apple Watch 
 ```swift
 let client = IntentClient(
     baseURL: URL(string: "https://groupmind.one/api/v1")!,
-    apiKey: "xfb_your_key",
-    userId: "petrus",
+    apiKey: "YOUR_AGENT_KEY",
+    userId: "your_user_id",
     deviceId: "apple-watch"
 )
 
@@ -266,8 +266,8 @@ Kotlin client using coroutines and `HttpURLConnection` (no external dependencies
 ```kotlin
 val client = IntentClient(
     baseUrl = "https://groupmind.one/api/v1",
-    apiKey = "xfb_your_key",
-    userId = "petrus",
+    apiKey = "YOUR_AGENT_KEY",
+    userId = "your_user_id",
     deviceId = "wear-os-watch"
 )
 
@@ -287,8 +287,8 @@ from user_intent_kit import IntentClient
 
 client = IntentClient(
     base_url="https://groupmind.one/api/v1",
-    api_key="xfb_your_key",
-    user_id="petrus",
+    api_key="YOUR_AGENT_KEY",
+    user_id="your_user_id",
     device_id="server",
 )
 
@@ -346,8 +346,8 @@ minutes. Install it as a LaunchAgent:
   </array>
   <key>EnvironmentVariables</key>
   <dict>
-    <key>INTENT_API_KEY</key><string>xfb_…</string>
-    <key>INTENT_USER_ID</key><string>your-user-id</string>
+    <key>INTENT_API_KEY</key><string>YOUR_AGENT_KEY</string>
+    <key>INTENT_USER_ID</key><string>your_user_id</string>
     <key>INTENT_AGENT_HANDLE</key><string>@your-agent</string>
     <key>INTENT_DEVICE_ID</key><string>macbook</string>
   </dict>

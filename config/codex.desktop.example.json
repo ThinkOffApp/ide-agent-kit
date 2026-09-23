@@ -28,13 +28,11 @@
   },
   "poller": {
     "rooms": [
-      "thinkoff-development",
-      "feature-admin-planning",
-      "lattice-qcd"
+      "my-room"
     ],
-    "api_key_file": "/Users/you/.iak/codexmb_api_key.txt",
+    "api_key_file": "/Users/you/.iak/mycodex_api_key.txt",
     "heartbeat_file": "/tmp/iak-poller.heartbeat",
-    "handle": "@CodexMB",
+    "handle": "@mycodex",
     "interval_sec": 60,
     "wake_path": "webhook",
   "nudge_mode": "none",

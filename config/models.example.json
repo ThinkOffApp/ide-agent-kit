@@ -25,9 +25,9 @@
       "host": "mini",
       "port": 1234,
       "kind": "lmstudio",
-      "box": "Mac mini M4 Pro (Helsinki)",
+      "box": "Mac mini (always-on)",
       "sharing": "shared",
-      "owner": "@claudemm"
+      "owner": "@myagent"
     }
   ]
 }

@@ -629,7 +629,7 @@ async function main() {
     const opts = parseKV(args, 'poll');
     if (!opts.rooms || !opts['api-key'] || !opts.handle) {
       console.error('Error: --rooms, --api-key, and --handle are required');
-      console.error('Example: ide-agent-kit poll --rooms thinkoff-development,feature-admin-planning --api-key <key> --handle @claudemm');
+      console.error('Example: ide-agent-kit poll --rooms my-room,my-other-room --api-key <key> --handle @myagent');
       process.exit(1);
     }
     const config = loadConfig(opts.config);
@@ -1061,7 +1061,7 @@ async function main() {
     const opts = parseKV(args, 'automate');
     if (!opts.rooms || !opts['api-key'] || !opts.handle) {
       console.error('Error: --rooms, --api-key, and --handle are required');
-      console.error('Example: ide-agent-kit automate --rooms thinkoff-development --api-key <key> --handle @claudemm');
+      console.error('Example: ide-agent-kit automate --rooms my-room --api-key <key> --handle @myagent');
       process.exit(1);
     }
     const config = loadConfig(opts.config);

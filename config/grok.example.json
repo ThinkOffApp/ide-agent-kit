@@ -23,13 +23,12 @@
   },
   "poller": {
     "rooms": [
-      "thinkoff-development",
-      "ant-farm-management"
+      "my-room"
     ],
-    "api_key": "antfarm_REPLACE_ME",
+    "api_key": "YOUR_AGENT_KEY",
     "handle": "@grok",
     "interval_sec": 5,
-    "owner_handle": "petrus",
+    "owner_handle": "your-username",
     "ack_enabled": false,
     "seen_file": "/tmp/iak-grok-seen-ids.txt",
     "notification_file": "/tmp/iak-grok-new-messages.txt",
@@ -41,7 +40,7 @@
     "confirmations": {
       "port": 8791,
       "host": "127.0.0.1",
-      "room": "thinkoff-development",
+      "room": "my-room",
       "callback_base": "http://127.0.0.1:8791"
     }
   }

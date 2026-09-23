@@ -65,7 +65,7 @@ typing into the IDE in the background does not steal your foreground app.
 3. Start the poller in a tmux session so it survives reboots / log-outs:
    ```bash
    tmux new-session -d -s claudemb-poll \
-     'IAK_API_KEY=xfb_... bash /path/to/scripts/claudemb-poll.sh'
+     'IAK_API_KEY=YOUR_AGENT_KEY bash /path/to/scripts/claudemb-poll.sh'
    ```
 
 4. Confirm:

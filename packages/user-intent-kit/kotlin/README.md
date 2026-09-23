@@ -15,8 +15,8 @@ import kotlinx.coroutines.*
 
 val client = IntentClient(
     baseUrl = "https://groupmind.one/api/v1",
-    apiKey = "xfb_your_key",
-    userId = "petrus",
+    apiKey = "YOUR_AGENT_KEY",
+    userId = "your_user_id",
     deviceId = "wear-os-watch"
 )
 

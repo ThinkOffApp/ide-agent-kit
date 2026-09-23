@@ -3,7 +3,7 @@
 ## 1) Inbound event
 GitHub webhook: `pull_request` opened.
 
-Team-relay verifies signature, normalizes to `TeamRelayNormalizedEvent`, and appends one JSON line to `team-relay-queue.jsonl`.
+The webhook server (`ide-agent-kit serve`) verifies the signature, normalizes to `TeamRelayNormalizedEvent` ([schema](../schemas/event.normalized.json)), and appends one JSON line to the queue file (`queue.path`, default `./ide-agent-queue.jsonl`).
 
 ## 2) IDE agent picks up task
 An IDE agent reads the queue file, sees a new event, and decides to run tests.
@@ -11,7 +11,7 @@ An IDE agent reads the queue file, sees a new event, and decides to run tests.
 ## 3) Execute via tmux
 Command:
 
-`team-relay tmux run --session ide-agent --cmd "npm test" --timeout-sec 120`
+`ide-agent-kit tmux run --session ide-agent --cmd "npm test" --timeout-sec 120`
 
 The runner:
 - ensures the command is allowlisted
@@ -19,8 +19,8 @@ The runner:
 - captures exit code and last N lines of stdout/stderr
 
 ## 4) Receipt
-Team-relay appends a receipt JSON to `team-relay-receipts.jsonl`.
+IDE Agent Kit appends a receipt JSON to the receipts file (`receipts.path`, default `./ide-agent-receipts.jsonl`).
 
 Optionally emit it:
 
-`team-relay emit --to <webhook-url> --json <receipt-file>`
+`ide-agent-kit emit --to <webhook-url> --json <receipt-file>`

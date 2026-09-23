@@ -40,7 +40,8 @@ exits.
 
 ## Setup, per agent machine
 
-1. **Install ide-agent-kit** and run `ide-agent-kit init --ide claude-code`
+1. **Install ide-agent-kit** ([Quick Start](../README.md#quick-start): agent
+   key, installer, config) and run `ide-agent-kit init --ide claude-code`
    in the agent's working directory. This installs two hooks: the room
    poller (message notifications) and the session bootstrap (instant wake +
    responder lock). No manual arming — a fresh session self-arms.
