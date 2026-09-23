@@ -79,6 +79,7 @@ Usage:
   ide-agent-kit confirm <request|list> [--config <path>]
     Create or inspect app-visible confirmation intents on the live IAK daemon.
     request: --prompt <text> [--session <name>] [--channels groupmind,codewatch] [--wait] [--timeout-sec <sec>] [--daemon <url>] [--from <@handle>]
+             [--options a,b] makes it a choice card; [--kind <k>] runs mcp.confirmations.kind_commands[k] on the owner's pick
     list:    [--daemon <url>]
 
   ide-agent-kit background <run|status> [--config <path>]
@@ -302,6 +303,25 @@ async function main() {
         channels: parseChannels(opts.channels),
         from_handle: opts.from || config?.poller?.handle,
       };
+      // --options a,b,c makes it a CHOICE card (one button per option).
+      // --kind k tags it so a daemon with mcp.confirmations.kind_commands[k]
+      // runs that command on the owner's pick; kind-tagged cards are owner-only.
+      if (opts.options !== undefined) {
+        const options = parseChannels(opts.options) || [];
+        if (options.length < 2) {
+          console.error('Error: --options needs at least two comma-separated values');
+          process.exit(1);
+        }
+        payload.options = options;
+      }
+      if (opts.kind !== undefined) {
+        if (!payload.options) {
+          console.error('Error: --kind needs --options (a kind command runs on a CHOICE)');
+          process.exit(1);
+        }
+        payload.kind = String(opts.kind);
+        payload.requires_human = true;
+      }
       const created = await fetchJson(`${daemon}/intent`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
