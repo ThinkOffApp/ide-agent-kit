@@ -190,6 +190,62 @@ describe('room archive (petrus 1 Oct 2026: "index the room so you have a memory"
     assert.ok(c.byId.has('m150'));
   });
 
+  it('a crash between saving a fresh page and advancing the gap never loses that page (stage 1)', async () => {
+    const d = dir();
+    const room = fakeRoom(700);                          // codexmb's fourth reproduction
+    const a = new RoomArchive(R, { dir: d });
+    a.add(room.all.slice(0, 100));
+    const realAdd = a.add.bind(a);
+    let n = 0;
+    a.add = (list) => { if (++n === 2) throw new Error('crash before page 2 is saved'); return realAdd(list); };
+    await assert.rejects(a.sync(room.fetchPage, { maxPages: 5 }), /crash/);
+    const b = new RoomArchive(R, { dir: d });
+    let r;
+    for (let i = 0; i < 6; i++) { r = await b.sync(room.fetchPage, { maxPages: 5 }); if (!r.gapPending && r.total === 700) break; }
+    assert.equal(r.total, 700);
+    assert.ok(b.byId.has('m550'));
+  });
+
+  it('a crash after a healing page is saved but before the cursor moves never closes the gap early', async () => {
+    const d = dir();
+    const room = fakeRoom(1000);
+    const a = new RoomArchive(R, { dir: d });
+    a.add(room.all.slice(0, 100));
+    await a.sync(room.fetchPage, { maxPages: 3 });        // archive m700..m999 + m0..m99, gap m100..m699
+    const b = new RoomArchive(R, { dir: d });
+    const realSave = b.saveState.bind(b);
+    let saves = 0;
+    b.saveState = (st) => { if (++saves === 1) throw new Error('crash after the page was saved'); return realSave(st); };
+    await assert.rejects(b.sync(room.fetchPage, { maxPages: 5 }), /crash/);
+    const c = new RoomArchive(R, { dir: d });
+    let r;
+    for (let i = 0; i < 8; i++) { r = await c.sync(room.fetchPage, { maxPages: 5 }); if (!r.gapPending && r.total === 1000) break; }
+    assert.equal(r.total, 1000, 're-fetching an archived page did not close the gap');
+    assert.ok(c.byId.has('m150'));
+  });
+
+  it('recovers the full room after a crash at ANY page-save or state-save point', async () => {
+    // Exhaustive: crash at every add() and every saveState() call of a gap-producing workload,
+    // restart, and require the whole room. One test instead of one per review finding.
+    for (const what of ['add', 'saveState']) {
+      for (let k = 1; k <= 14; k++) {
+        const d = dir();
+        const room = fakeRoom(900);
+        const seed = new RoomArchive(R, { dir: d });
+        seed.add(room.all.slice(0, 100));
+        const a = new RoomArchive(R, { dir: d });
+        const real = a[what].bind(a);
+        let n = 0;
+        a[what] = (...args) => { if (++n === k) throw new Error(`crash at ${what} #${k}`); return real(...args); };
+        try { await a.sync(room.fetchPage, { maxPages: 3 }); await a.sync(room.fetchPage, { maxPages: 3 }); } catch { /* crashed */ }
+        const b = new RoomArchive(R, { dir: d });
+        let r;
+        for (let i = 0; i < 12; i++) { r = await b.sync(room.fetchPage, { maxPages: 3 }); if (!r.gapPending && r.total === 900) break; }
+        assert.equal(r.total, 900, `crash at ${what} #${k} lost messages`);
+      }
+    }
+  });
+
   it('keeps the next record after a crash left a torn last line', () => {
     const d = dir();
     const a = new RoomArchive(R, { dir: d });

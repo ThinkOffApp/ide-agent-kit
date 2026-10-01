@@ -136,57 +136,59 @@ export class RoomArchive {
    */
   async sync(fetchPage, { maxPages = 50, backfill = false } = {}) {
     const known = new Set(this.byId.keys());
+    let newestKnown = null;
+    for (const m of this.byId.values()) if (!newestKnown || String(m.created_at) > newestKnown) newestKnown = String(m.created_at);
     const state = this.loadState();
-    // Gaps are a LIST and are written to disk BEFORE the page that opens or extends them is
-    // appended, so a crash or network error mid-sync never leaves archived pages above an
-    // unrecorded hole (codexmb, re-reviews of #137). The old single-cursor format is migrated.
-    state.gaps = [...new Set([...(Array.isArray(state.gaps) ? state.gaps : []), ...(state.gapCursor ? [state.gapCursor] : [])])];
+    // A gap is { before, until }: messages older than `before` and newer than `until` are missing.
+    // `until` (the newest message of the archived block below the hole) is fixed when the gap is
+    // opened, so healing stops by TIME. Stopping on "met an id I already have" was wrong: a crash
+    // after a page was saved but before its cursor moved makes the next run re-fetch that page,
+    // see known ids, and close the gap with the hole below still open (codexmb, reviews of #137).
+    // Older state files stored bare cursors; those keep the id-based stop (until: null).
+    const legacy = [...(Array.isArray(state.gaps) ? state.gaps : []), ...(state.gapCursor ? [state.gapCursor] : [])];
+    state.gaps = legacy.map((g) => (typeof g === 'string' ? { before: g, until: null } : g)).filter((g) => g && g.before);
     delete state.gapCursor;
     let pages = 0, added = 0, before;
     let reachedStart = false;
     const oldestOf = (page) => page.reduce((a, m) => (!a || String(m.created_at) < String(a.created_at) ? m : a), null);
-    const setGap = (from, to) => {                     // replace gap `from` with `to` (null removes), persist
-      const i = from ? state.gaps.indexOf(from) : -1;
-      if (i >= 0) state.gaps.splice(i, 1);
-      if (to) state.gaps.push(to);
-      this.saveState(state);
-    };
+    const save = () => this.saveState(state);
+    const removeGap = (g) => { state.gaps = state.gaps.filter((x) => x !== g); save(); };
 
-    // 1) newest end
-    let p1gap = null;
+    // 1) newest end. The gap under fresh pages is OPENED before the first page is saved (the hole
+    //    lies below it); it is ADVANCED only after each further page is safely on disk.
+    let p1 = null;
     while (pages < maxPages) {
       const page = await fetchPage({ before });
       pages++;
-      if (!page.length) { reachedStart = true; setGap(p1gap, null); p1gap = null; break; }
+      if (!page.length) { reachedStart = true; if (p1) removeGap(p1); p1 = null; break; }
       const overlaps = page.some((m) => m && known.has(m.id));
       const o = oldestOf(page);
       if (before && o.created_at === before) break;     // the server ignored before=: stop, do not loop
-      if (!overlaps && known.size > 0 && page.length >= 100) { setGap(p1gap, o.created_at); p1gap = o.created_at; }
+      const opensGap = !overlaps && known.size > 0 && page.length >= 100;
+      if (opensGap && !p1) { p1 = { before: o.created_at, until: newestKnown }; state.gaps.push(p1); save(); }
       added += this.add(page);
+      if (opensGap && p1.before !== o.created_at) { p1.before = o.created_at; save(); }
       before = o.created_at;
-      if (page.length < 100) { reachedStart = true; setGap(p1gap, null); p1gap = null; break; }
-      if (overlaps) { setGap(p1gap, null); p1gap = null; break; }
+      if (page.length < 100) { reachedStart = true; if (p1) removeGap(p1); p1 = null; break; }
+      if (overlaps) { if (p1) removeGap(p1); p1 = null; break; }
     }
 
-    // 2) heal pending gaps, newest first, persisting progress after every page. Opening a gap
-    //    records it BEFORE the page is appended (the hole is below that page); healing appends
-    //    BEFORE the cursor moves (the hole shrinks only once the page is safely on disk).
-    for (const start of [...state.gaps].sort().reverse()) {
-      let g = start;
+    // 2) heal pending gaps, newest first. Each page is saved BEFORE the cursor moves; a crash in
+    //    between re-fetches the page (appends are idempotent) and the time-based stop is unaffected.
+    for (const g of [...state.gaps].sort((a, b) => String(b.before).localeCompare(String(a.before)))) {
+      if (g === p1) continue;                            // opened by this run at the budget's end
       while (pages < maxPages) {
-        const page = await fetchPage({ before: g });
+        const page = await fetchPage({ before: g.before });
         pages++;
-        if (!page.length) { setGap(g, null); reachedStart = true; break; }
-        const meets = page.some((m) => m && known.has(m.id));
+        if (!page.length) { removeGap(g); reachedStart = true; break; }
         const o = oldestOf(page);
-        if (o.created_at === g) break;                  // ignored before=: keep the gap recorded
-        const next = meets || page.length < 100 ? null : o.created_at;
-        // Append FIRST, then move the cursor: a crash in between re-fetches the same page (appends
-        // are idempotent by id), whereas moving the cursor first would skip this page for good.
+        if (o.created_at === g.before) break;            // ignored before=: keep the gap recorded
         added += this.add(page);
-        setGap(g, next);
-        if (!next) { if (page.length < 100 && !meets) reachedStart = true; break; }
-        g = next;
+        const closed = g.until ? String(o.created_at) <= g.until : page.some((m) => m && known.has(m.id));
+        if (closed) { removeGap(g); break; }
+        if (page.length < 100) { removeGap(g); reachedStart = true; break; }
+        g.before = o.created_at;
+        save();
       }
     }
 
