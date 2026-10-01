@@ -156,6 +156,40 @@ describe('room archive (petrus 1 Oct 2026: "index the room so you have a memory"
     assert.equal(r.gapPending, false);
   });
 
+  it('records the gap before appending, so a failure after page 1 cannot lose the hole', async () => {
+    const d = dir();
+    const room = fakeRoom(700);                          // codexmb's third reproduction
+    const a = new RoomArchive(R, { dir: d });
+    a.add(room.all.slice(0, 100));
+    let calls = 0;
+    const flaky = async (args) => { if (++calls === 2) throw new Error('ECONNRESET'); return room.fetchPage(args); };
+    await assert.rejects(a.sync(flaky, { maxPages: 5 }), /ECONNRESET/);
+    const b = new RoomArchive(R, { dir: d });            // reload, as after a restart
+    let r;
+    for (let i = 0; i < 4; i++) { r = await b.sync(room.fetchPage, { maxPages: 5 }); if (!r.gapPending) break; }
+    assert.equal(r.total, 700);
+    assert.ok(b.byId.has('m150'));
+    assert.equal(r.gapPending, false);
+  });
+
+  it('a crash while healing a gap never skips the page it was fetching', async () => {
+    const d = dir();
+    const room = fakeRoom(700);
+    const a = new RoomArchive(R, { dir: d });
+    a.add(room.all.slice(0, 100));
+    await a.sync(room.fetchPage, { maxPages: 5 });        // leaves the m100..m199 gap
+    const b = new RoomArchive(R, { dir: d });
+    const realAdd = b.add.bind(b);
+    let n = 0;
+    b.add = (list) => { if (++n === 2) throw new Error('crash mid-heal'); return realAdd(list); };
+    await assert.rejects(b.sync(room.fetchPage, { maxPages: 5 }), /crash mid-heal/);
+    const c = new RoomArchive(R, { dir: d });
+    let r;
+    for (let i = 0; i < 4; i++) { r = await c.sync(room.fetchPage, { maxPages: 5 }); if (!r.gapPending) break; }
+    assert.equal(r.total, 700);
+    assert.ok(c.byId.has('m150'));
+  });
+
   it('keeps the next record after a crash left a torn last line', () => {
     const d = dir();
     const a = new RoomArchive(R, { dir: d });

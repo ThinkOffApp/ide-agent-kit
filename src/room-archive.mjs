@@ -137,51 +137,58 @@ export class RoomArchive {
   async sync(fetchPage, { maxPages = 50, backfill = false } = {}) {
     const known = new Set(this.byId.keys());
     const state = this.loadState();
+    // Gaps are a LIST and are written to disk BEFORE the page that opens or extends them is
+    // appended, so a crash or network error mid-sync never leaves archived pages above an
+    // unrecorded hole (codexmb, re-reviews of #137). The old single-cursor format is migrated.
+    state.gaps = [...new Set([...(Array.isArray(state.gaps) ? state.gaps : []), ...(state.gapCursor ? [state.gapCursor] : [])])];
+    delete state.gapCursor;
     let pages = 0, added = 0, before;
     let reachedStart = false;
     const oldestOf = (page) => page.reduce((a, m) => (!a || String(m.created_at) < String(a.created_at) ? m : a), null);
+    const setGap = (from, to) => {                     // replace gap `from` with `to` (null removes), persist
+      const i = from ? state.gaps.indexOf(from) : -1;
+      if (i >= 0) state.gaps.splice(i, 1);
+      if (to) state.gaps.push(to);
+      this.saveState(state);
+    };
 
     // 1) newest end
-    let caughtUp = false;
+    let p1gap = null;
     while (pages < maxPages) {
       const page = await fetchPage({ before });
       pages++;
-      if (!page.length) { reachedStart = true; break; }
+      if (!page.length) { reachedStart = true; setGap(p1gap, null); p1gap = null; break; }
       const overlaps = page.some((m) => m && known.has(m.id));
-      added += this.add(page);
       const o = oldestOf(page);
-      if (before && o.created_at === before) break;   // the server ignored before=: stop, do not loop
+      if (before && o.created_at === before) break;     // the server ignored before=: stop, do not loop
+      if (!overlaps && known.size > 0 && page.length >= 100) { setGap(p1gap, o.created_at); p1gap = o.created_at; }
+      added += this.add(page);
       before = o.created_at;
-      if (page.length < 100) { reachedStart = true; break; }
-      if (overlaps) { caughtUp = true; break; }
+      if (page.length < 100) { reachedStart = true; setGap(p1gap, null); p1gap = null; break; }
+      if (overlaps) { setGap(p1gap, null); p1gap = null; break; }
     }
-    // Open gaps are a LIST: a second budget exhaustion before an older gap heals must add a gap,
-    // never replace the older one (codexmb, re-review of #137). Each heals on its own.
-    let gaps = Array.isArray(state.gaps) ? state.gaps.slice() : [];
-    if (state.gapCursor) gaps.push(state.gapCursor);          // migrate the single-cursor format
-    delete state.gapCursor;
-    if (!reachedStart && !caughtUp && known.size > 0 && before) gaps.push(before);
 
-    // 2) heal pending gaps, newest first, within the same page budget
-    gaps = [...new Set(gaps)].sort().reverse();
-    const still = [];
-    for (let g of gaps) {
-      let open = true;
-      while (open && pages < maxPages) {
+    // 2) heal pending gaps, newest first, persisting progress after every page. Opening a gap
+    //    records it BEFORE the page is appended (the hole is below that page); healing appends
+    //    BEFORE the cursor moves (the hole shrinks only once the page is safely on disk).
+    for (const start of [...state.gaps].sort().reverse()) {
+      let g = start;
+      while (pages < maxPages) {
         const page = await fetchPage({ before: g });
         pages++;
-        if (!page.length) { open = false; reachedStart = true; break; }
+        if (!page.length) { setGap(g, null); reachedStart = true; break; }
         const meets = page.some((m) => m && known.has(m.id));
-        added += this.add(page);
         const o = oldestOf(page);
-        if (o.created_at === g) break;                         // ignored before=: keep the gap recorded
-        if (meets) { open = false; break; }
-        if (page.length < 100) { open = false; reachedStart = true; break; }
-        g = o.created_at;
+        if (o.created_at === g) break;                  // ignored before=: keep the gap recorded
+        const next = meets || page.length < 100 ? null : o.created_at;
+        // Append FIRST, then move the cursor: a crash in between re-fetches the same page (appends
+        // are idempotent by id), whereas moving the cursor first would skip this page for good.
+        added += this.add(page);
+        setGap(g, next);
+        if (!next) { if (page.length < 100 && !meets) reachedStart = true; break; }
+        g = next;
       }
-      if (open) still.push(g);
     }
-    state.gaps = still;
 
     // 3) backfill toward the room's first message
     if (backfill && !reachedStart) {
