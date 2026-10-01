@@ -6,7 +6,7 @@ import { appendFileSync, chmodSync, mkdtempSync, readFileSync, statSync } from '
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { RoomArchive, groupmindPageFetcher, redactSecrets, redactMessage } from '../src/room-archive.mjs';
-import { archivableRooms } from '../src/mcp-server.mjs';
+import { archivableRooms, roomSearchTool } from '../src/mcp-server.mjs';
 
 const R = 'thinkoff-development';
 const dir = () => mkdtempSync(join(tmpdir(), 'iak-archive-'));
@@ -135,6 +135,27 @@ describe('room archive (petrus 1 Oct 2026: "index the room so you have a memory"
     assert.ok(a.byId.has('m150'));
   });
 
+  it('keeps every open gap when a second budget exhaustion happens before the first heals', async () => {
+    const all = fakeRoom(1300).all;                      // codexmb's re-review reproduction
+    let visible = 700;
+    const fetchPage = async ({ before } = {}) => {
+      const pool = all.slice(0, visible);
+      const older = before ? pool.filter((m) => m.created_at < before) : pool;
+      return older.slice(-100).reverse();
+    };
+    const a = new RoomArchive(R, { dir: dir() });
+    a.add(all.slice(0, 100));
+    assert.equal((await a.sync(fetchPage, { maxPages: 5 })).total, 600);
+    visible = 1300;
+    const second = await a.sync(fetchPage, { maxPages: 5 });
+    assert.equal(second.gapPending, true);
+    let r = second;
+    for (let i = 0; i < 5 && r.gapPending; i++) r = await a.sync(fetchPage, { maxPages: 5 });
+    assert.equal(r.total, 1300, 'both holes healed');
+    assert.ok(a.byId.has('m150') && a.byId.has('m750'));
+    assert.equal(r.gapPending, false);
+  });
+
   it('keeps the next record after a crash left a torn last line', () => {
     const d = dir();
     const a = new RoomArchive(R, { dir: d });
@@ -180,3 +201,42 @@ describe('room archive (petrus 1 Oct 2026: "index the room so you have a memory"
   });
 });
 
+describe('room_search access policy, end to end through roomSearchTool (codexmb re-review)', () => {
+  const cfg = (d) => ({ poller: { rooms: [R], api_key: 'k' }, groupmind: { base_url: 'https://example.test/api/v1' }, room_archive: { dir: d } });
+  async function withFetch(fake, fn) {
+    const real = globalThis.fetch;
+    globalThis.fetch = fake;
+    try { return await fn(); } finally { globalThis.fetch = real; }
+  }
+  const page = (msgs) => async () => ({ ok: true, status: 200, text: async () => JSON.stringify({ messages: msgs }) });
+  const refused = (status) => async () => ({ ok: false, status, text: async () => 'no' });
+  const seed = [{ id: 's1', created_at: '2026-09-01T00:00:01+00:00', from: 'petrus', body: 'the secret plan' }];
+
+  for (const status of [401, 403, 404]) {
+    it(`returns no archived text when the server answers ${status}, with sync on or off`, async () => {
+      const d = dir();
+      await withFetch(page(seed), () => roomSearchTool(cfg(d), { query: 'secret plan' }));
+      for (const sync of [true, false]) {
+        const r = await withFetch(refused(status), () => roomSearchTool(cfg(d), { query: 'secret plan', sync }));
+        assert.match(r.error, new RegExp(`HTTP ${status}`));
+        assert.equal(r.payload, undefined);
+        assert.doesNotMatch(JSON.stringify(r), /secret plan"/);
+      }
+    });
+  }
+
+  it('returns the archive, labelled stale, when the server cannot be reached', async () => {
+    const d = dir();
+    await withFetch(page(seed), () => roomSearchTool(cfg(d), { query: 'secret plan' }));
+    const r = await withFetch(async () => { throw new Error('ECONNRESET'); }, () => roomSearchTool(cfg(d), { query: 'secret plan' }));
+    assert.equal(r.payload.matched, 1);
+    assert.match(r.payload.synced.note, /last successful sync/);
+  });
+
+  it('refuses a room that is not in this config, before any request', async () => {
+    let calls = 0;
+    const r = await withFetch(async () => { calls++; return page([])(); }, () => roomSearchTool(cfg(dir()), { query: 'x', room: 'someone-elses-room' }));
+    assert.match(r.error, /not one of this agent's configured rooms/);
+    assert.equal(calls, 0);
+  });
+});

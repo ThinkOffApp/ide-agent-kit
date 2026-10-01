@@ -155,22 +155,33 @@ export class RoomArchive {
       if (page.length < 100) { reachedStart = true; break; }
       if (overlaps) { caughtUp = true; break; }
     }
-    if (reachedStart) state.gapCursor = null;
-    else if (!caughtUp && known.size > 0) state.gapCursor = before;   // budget ran out above the archive
+    // Open gaps are a LIST: a second budget exhaustion before an older gap heals must add a gap,
+    // never replace the older one (codexmb, re-review of #137). Each heals on its own.
+    let gaps = Array.isArray(state.gaps) ? state.gaps.slice() : [];
+    if (state.gapCursor) gaps.push(state.gapCursor);          // migrate the single-cursor format
+    delete state.gapCursor;
+    if (!reachedStart && !caughtUp && known.size > 0 && before) gaps.push(before);
 
-    // 2) a pending gap from this or an earlier run
-    while (state.gapCursor && pages < maxPages) {
-      const page = await fetchPage({ before: state.gapCursor });
-      pages++;
-      if (!page.length) { state.gapCursor = null; reachedStart = true; break; }
-      const meets = page.some((m) => m && known.has(m.id));
-      added += this.add(page);
-      const o = oldestOf(page);
-      if (o.created_at === state.gapCursor) break;      // ignored before=: leave the gap recorded
-      if (meets) { state.gapCursor = null; break; }
-      if (page.length < 100) { state.gapCursor = null; reachedStart = true; break; }
-      state.gapCursor = o.created_at;
+    // 2) heal pending gaps, newest first, within the same page budget
+    gaps = [...new Set(gaps)].sort().reverse();
+    const still = [];
+    for (let g of gaps) {
+      let open = true;
+      while (open && pages < maxPages) {
+        const page = await fetchPage({ before: g });
+        pages++;
+        if (!page.length) { open = false; reachedStart = true; break; }
+        const meets = page.some((m) => m && known.has(m.id));
+        added += this.add(page);
+        const o = oldestOf(page);
+        if (o.created_at === g) break;                         // ignored before=: keep the gap recorded
+        if (meets) { open = false; break; }
+        if (page.length < 100) { open = false; reachedStart = true; break; }
+        g = o.created_at;
+      }
+      if (open) still.push(g);
     }
+    state.gaps = still;
 
     // 3) backfill toward the room's first message
     if (backfill && !reachedStart) {
@@ -188,7 +199,7 @@ export class RoomArchive {
     }
     this.saveState(state);
     const oldest = this.oldest();
-    return { room: this.room, added, total: this.size, pages, reachedStart, gapPending: !!state.gapCursor,
+    return { room: this.room, added, total: this.size, pages, reachedStart, gapPending: state.gaps.length > 0, gaps: state.gaps.length,
              oldest: oldest?.created_at || null };
   }
 
