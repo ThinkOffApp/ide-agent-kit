@@ -583,7 +583,7 @@ async function main() {
     if (subcommand === 'search' || subcommand === 'archive') {
       // Room memory (petrus, 1 Oct 2026): a local, searchable archive of this agent's rooms.
       const { configuredRoomApi, archivableRooms } = await import('../src/mcp-server.mjs');
-      const { RoomArchive, archiveDir, groupmindPageFetcher, redactSecrets } = await import('../src/room-archive.mjs');
+      const { RoomArchive, archiveDir, groupmindPageFetcher, redactMessage, ACCESS_REFUSED } = await import('../src/room-archive.mjs');
       const roomCfg = configuredRoomApi(config, { room: opts.room });
       const allowed = archivableRooms(config);
       if (!roomCfg.apiKey || !roomCfg.room) {
@@ -599,7 +599,7 @@ async function main() {
       if (subcommand === 'archive') {
         const maxPages = Math.max(1, Math.min(2000, parseInt(opts['max-pages'], 10) || 50));
         const r = await archive.sync(fetchPage, { maxPages, backfill: !!opts.backfill });
-        console.log(`${r.room}: +${r.added} new, ${r.total} archived, oldest ${r.oldest}${r.reachedStart ? ' (room start reached)' : ''}`);
+        console.log(`${r.room}: +${r.added} new, ${r.total} archived, oldest ${r.oldest}${r.reachedStart ? ' (room start reached)' : ''}${r.gapPending ? ' - a gap is still open; run again to fill it' : ''}`);
         console.log(`file: ${archive.path}`);
         return;
       }
@@ -609,11 +609,21 @@ async function main() {
         console.error('Usage: ide-agent-kit rooms search "words" [--room R] [--from handle] [--since 2026-09-20] [--regex] [--limit 20]');
         process.exit(1);
       }
-      if (!opts['no-sync']) await archive.sync(fetchPage, { maxPages: 5 }).catch((e) => console.error(`sync failed (searching the archive as is): ${e.message}`));
+      try {
+        if (!opts['no-sync']) await archive.sync(fetchPage, { maxPages: 5 });
+        else await fetchPage({ limit: 1 });
+      } catch (e) {
+        if (ACCESS_REFUSED.has(e.status)) {
+          console.error(`Error: the room server refused access (HTTP ${e.status}); not showing archived text.`);
+          process.exit(1);
+        }
+        console.error(`sync failed (showing the archive as of its last successful sync): ${e.message}`);
+      }
       const res = archive.search(query, { regex: !!opts.regex, from: opts.from, since: opts.since, until: opts.until, limit: parseInt(opts.limit, 10) || 20 });
       console.log(`${res.matched} match(es) in ${res.scope.messages} archived messages of ${res.room} (${res.scope.oldest?.slice(0, 10)} .. ${res.scope.newest?.slice(0, 10)}); showing ${res.shown}`);
-      for (const m of res.hits) {
-        const body = redactSecrets(m.body).text.replace(/\s+/g, ' ');
+      for (const raw of res.hits) {
+        const m = redactMessage(raw).message;
+        const body = String(m.body || '').replace(/\s+/g, ' ');
         console.log(`${String(m.created_at).slice(0, 16)}  ${m.from}  [${m.id}]\n    ${body.slice(0, 300)}`);
       }
       return;

@@ -2,10 +2,10 @@
 
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { appendFileSync, mkdtempSync, readFileSync } from 'node:fs';
+import { appendFileSync, chmodSync, mkdtempSync, readFileSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { RoomArchive, groupmindPageFetcher, redactSecrets } from '../src/room-archive.mjs';
+import { RoomArchive, groupmindPageFetcher, redactSecrets, redactMessage } from '../src/room-archive.mjs';
 import { archivableRooms } from '../src/mcp-server.mjs';
 
 const R = 'thinkoff-development';
@@ -120,4 +120,63 @@ describe('room archive (petrus 1 Oct 2026: "index the room so you have a memory"
     assert.match(seen[0], /before=2026-09-30T23%3A59%3A01\.918981%2B00%3A00/);
     assert.match(seen[0], /limit=100/);
   });
+
+  // codexmb's review of #137 (1 Oct 2026): each reproduction below failed on f318eb0.
+  it('heals a gap left when the page budget ran out before reaching the archive', async () => {
+    const room = fakeRoom(700);
+    const a = new RoomArchive(R, { dir: dir() });
+    a.add(room.all.slice(0, 100));                       // archive holds m0..m99
+    const first = await a.sync(room.fetchPage, { maxPages: 5 });
+    assert.equal(first.total, 600);                      // m200..m699 + m0..m99: m100..m199 missing
+    assert.equal(first.gapPending, true, 'the hole is reported, not hidden');
+    const second = await a.sync(room.fetchPage, { maxPages: 5 });
+    assert.equal(second.total, 700, 'the next sync fills m100..m199');
+    assert.equal(second.gapPending, false);
+    assert.ok(a.byId.has('m150'));
+  });
+
+  it('keeps the next record after a crash left a torn last line', () => {
+    const d = dir();
+    const a = new RoomArchive(R, { dir: d });
+    a.add([{ id: 'id1', created_at: '2026-09-01T00:00:01+00:00', body: 'one' }]);
+    appendFileSync(a.path, '{"id":"torn","bo');           // crash mid-write, no newline
+    const b = new RoomArchive(R, { dir: d });
+    b.add([{ id: 'id2', created_at: '2026-09-01T00:00:02+00:00', body: 'two' }]);
+    const c = new RoomArchive(R, { dir: d });
+    assert.ok(c.byId.has('id1') && c.byId.has('id2'), 'id2 was not glued onto the fragment');
+    assert.equal(c.size, 2);
+  });
+
+  it('redacts every string field it returns, not only the body', () => {
+    const tok = `ghp_${'c'.repeat(36)}`;
+    const r = redactMessage({ id: 'x', body: 'fine', from_name: tok, file_url: `https://f.test/${tok}`, image_url: tok, file_name: tok });
+    assert.doesNotMatch(JSON.stringify(r.message), /ghp_c/);
+    assert.equal(r.kinds.length, 4);
+    assert.equal(r.message.body, 'fine');
+  });
+
+  it('keeps the archive owner-only, and tightens an existing world-readable file', () => {
+    const d = dir();
+    const a = new RoomArchive(R, { dir: d });
+    a.add([{ id: 'p1', created_at: '2026-09-01T00:00:01+00:00', body: 'private' }]);
+    assert.equal(statSync(a.path).mode & 0o777, 0o600);
+    assert.equal(statSync(d).mode & 0o777, 0o700);
+    chmodSync(a.path, 0o644);                             // as an older version left it
+    chmodSync(d, 0o755);
+    new RoomArchive(R, { dir: d });                       // loading an old 0644 archive tightens it
+    assert.equal(statSync(a.path).mode & 0o777, 0o600);
+    assert.equal(statSync(d).mode & 0o777, 0o700);
+  });
+
+  it('marks access refusals so callers stop returning archived text (401/403/404)', async () => {
+    const real = globalThis.fetch;
+    globalThis.fetch = async () => ({ ok: false, status: 403, text: async () => 'forbidden' });
+    try {
+      const f = groupmindPageFetcher({ baseUrl: 'https://example.test/api/v1', apiKey: 'k', room: R });
+      await assert.rejects(f({ limit: 1 }), (e) => e.status === 403);
+    } finally {
+      globalThis.fetch = real;
+    }
+  });
 });
+

@@ -10,7 +10,12 @@
  * display?" is a search, not a guess.
  *
  * Storage: one JSONL file per room (one message per line, append-only, deduped by id on load),
- * under `room_archive.dir` (default ~/.ide-agent-kit/room-archive). Nothing is ever deleted.
+ * under `room_archive.dir` (default ~/.ide-agent-kit/room-archive), directory 0700 and files 0600
+ * (the room can hold private material). Nothing is ever deleted. A small <room>.state.json keeps
+ * an unfinished sync's resume point, so a page budget that runs out never leaves a permanent gap.
+ *
+ * It is a SNAPSHOT: a message edited after it was archived (and older than the next sync's
+ * overlap) and a deleted message are not reconciled. Search results say so.
  *
  * Sync pages BACKWARDS with `before=<created_at>`: the room API returns newest-first pages of at
  * most 100 and ignores offset/page/until (they answer 200 with the same newest page, which looks
@@ -19,7 +24,7 @@
  * backfill keeps going until the room's beginning or the page budget.
  */
 
-import { appendFileSync, existsSync, mkdirSync, readFileSync } from 'node:fs';
+import { appendFileSync, chmodSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, readSync, renameSync, statSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { SECRET_PATTERNS } from './secret-patterns.mjs';
@@ -44,13 +49,33 @@ export class RoomArchive {
     this.room = room;
     this.dir = dir || archiveDir();
     this.path = join(this.dir, `${room}.jsonl`);
+    this.statePath = join(this.dir, `${room}.state.json`);
     this.byId = new Map();
     this.load();
+  }
+
+  /** Owner-only directory and files, including ones an older version created 0755/0644. */
+  ensurePrivate() {
+    mkdirSync(this.dir, { recursive: true, mode: 0o700 });
+    chmodSync(this.dir, 0o700);
+    for (const f of [this.path, this.statePath]) if (existsSync(f)) chmodSync(f, 0o600);
+  }
+
+  loadState() {
+    try { return JSON.parse(readFileSync(this.statePath, 'utf8')) || {}; } catch { return {}; }
+  }
+
+  saveState(state) {
+    this.ensurePrivate();
+    const tmp = this.statePath + '.tmp';
+    writeFileSync(tmp, JSON.stringify(state), { mode: 0o600 });
+    renameSync(tmp, this.statePath);
   }
 
   load() {
     this.byId.clear();
     if (!existsSync(this.path)) return;
+    this.ensurePrivate();
     for (const line of readFileSync(this.path, 'utf8').split('\n')) {
       if (!line.trim()) continue;
       try {
@@ -79,10 +104,19 @@ export class RoomArchive {
       fresh.push(m);
     }
     if (fresh.length) {
-      mkdirSync(this.dir, { recursive: true });
-      appendFileSync(this.path, fresh.map((m) => JSON.stringify(m)).join('\n') + '\n');
+      this.ensurePrivate();
+      // A crash can leave a torn last line with no newline; appending straight after it would glue
+      // the next record onto the fragment and lose it on reload. Close the fragment's line first.
+      if (existsSync(this.path) && statSync(this.path).size > 0) {
+        const fd = openSync(this.path, 'r');
+        const last = Buffer.alloc(1);
+        readSync(fd, last, 0, 1, statSync(this.path).size - 1);
+        closeSync(fd);
+        if (last[0] !== 0x0a) appendFileSync(this.path, '\n');
+      }
+      appendFileSync(this.path, fresh.map((m) => JSON.stringify(m)).join('\n') + '\n', { mode: 0o600 });
     }
-    return fresh.filter((m) => m).length;
+    return fresh.length;
   }
 
   oldest() {
@@ -92,27 +126,53 @@ export class RoomArchive {
   }
 
   /**
-   * Pull pages from the room. `fetchPage({before})` returns an array of messages (newest-first or
-   * not; order is not trusted). Incremental by default: stops at the first page that adds nothing.
-   * With `backfill`, continues from the archive's oldest message toward the room's beginning.
+   * Pull pages from the room. `fetchPage({before})` returns an array of messages (order not
+   * trusted). Three walks, all within one page budget:
+   *  1. newest end, back until a page overlaps what was archived BEFORE this run;
+   *  2. a pending gap: if an earlier run spent its budget before reaching the archive, it saved
+   *     where it stopped (state.gapCursor); continue from there until the older block is met;
+   *  3. with `backfill`, from the archive's oldest message toward the room's first.
+   * Returns gapPending when a gap is still open, so a caller knows the archive has a hole.
    */
   async sync(fetchPage, { maxPages = 50, backfill = false } = {}) {
+    const known = new Set(this.byId.keys());
+    const state = this.loadState();
     let pages = 0, added = 0, before;
     let reachedStart = false;
-    // 1) newest end: walk back until a page brings nothing new
+    const oldestOf = (page) => page.reduce((a, m) => (!a || String(m.created_at) < String(a.created_at) ? m : a), null);
+
+    // 1) newest end
+    let caughtUp = false;
     while (pages < maxPages) {
       const page = await fetchPage({ before });
       pages++;
       if (!page.length) { reachedStart = true; break; }
-      // A page that overlaps the archive means we have caught up with what is already stored.
-      const overlaps = this.size > 0 && page.some((m) => m && this.byId.has(m.id));
+      const overlaps = page.some((m) => m && known.has(m.id));
       added += this.add(page);
-      const oldestOnPage = page.reduce((a, m) => (!a || String(m.created_at) < String(a.created_at) ? m : a), null);
-      before = oldestOnPage.created_at;
+      const o = oldestOf(page);
+      if (before && o.created_at === before) break;   // the server ignored before=: stop, do not loop
+      before = o.created_at;
       if (page.length < 100) { reachedStart = true; break; }
-      if (overlaps) break;
+      if (overlaps) { caughtUp = true; break; }
     }
-    // 2) backfill: continue from the oldest archived message
+    if (reachedStart) state.gapCursor = null;
+    else if (!caughtUp && known.size > 0) state.gapCursor = before;   // budget ran out above the archive
+
+    // 2) a pending gap from this or an earlier run
+    while (state.gapCursor && pages < maxPages) {
+      const page = await fetchPage({ before: state.gapCursor });
+      pages++;
+      if (!page.length) { state.gapCursor = null; reachedStart = true; break; }
+      const meets = page.some((m) => m && known.has(m.id));
+      added += this.add(page);
+      const o = oldestOf(page);
+      if (o.created_at === state.gapCursor) break;      // ignored before=: leave the gap recorded
+      if (meets) { state.gapCursor = null; break; }
+      if (page.length < 100) { state.gapCursor = null; reachedStart = true; break; }
+      state.gapCursor = o.created_at;
+    }
+
+    // 3) backfill toward the room's first message
     if (backfill && !reachedStart) {
       before = this.oldest()?.created_at;
       while (before && pages < maxPages) {
@@ -120,14 +180,16 @@ export class RoomArchive {
         pages++;
         if (!page.length) { reachedStart = true; break; }
         added += this.add(page);
-        const o = page.reduce((a, m) => (!a || String(m.created_at) < String(a.created_at) ? m : a), null);
-        if (o.created_at === before) break;           // the server ignored before=: stop, do not loop
+        const o = oldestOf(page);
+        if (o.created_at === before) break;
         before = o.created_at;
         if (page.length < 100) { reachedStart = true; break; }
       }
     }
+    this.saveState(state);
     const oldest = this.oldest();
-    return { room: this.room, added, total: this.size, pages, reachedStart, oldest: oldest?.created_at || null };
+    return { room: this.room, added, total: this.size, pages, reachedStart, gapPending: !!state.gapCursor,
+             oldest: oldest?.created_at || null };
   }
 
   /**
@@ -169,15 +231,19 @@ export class RoomArchive {
 
 /** fetchPage for the GroupMind API: newest-first pages of up to 100, `before` URL-encoded. */
 export function groupmindPageFetcher({ baseUrl, apiKey, room, timeoutMs = 15000 }) {
-  return async ({ before } = {}) => {
-    const q = new URLSearchParams({ limit: '100' });
+  return async ({ before, limit = 100 } = {}) => {
+    const q = new URLSearchParams({ limit: String(limit) });
     if (before) q.set('before', before);          // URLSearchParams encodes "+" as %2B
     const res = await fetch(`${baseUrl}/rooms/${encodeURIComponent(room)}/messages?${q}`, {
       headers: { 'Authorization': `Bearer ${apiKey}`, 'X-API-Key': apiKey },
       signal: AbortSignal.timeout(timeoutMs),
     });
     const text = await res.text();
-    if (!res.ok) throw new Error(`room archive: HTTP ${res.status} ${text.slice(0, 200)}`);
+    if (!res.ok) {
+      const e = new Error(`room archive: HTTP ${res.status} ${text.slice(0, 200)}`);
+      e.status = res.status;                         // 401/403/404 = access refused, not a network blip
+      throw e;
+    }
     const data = JSON.parse(text);
     return Array.isArray(data) ? data : (data.messages || []);
   };
@@ -198,3 +264,22 @@ export function redactSecrets(text) {
   }
   return { text: out, kinds };
 }
+
+/** Redact every string field of a message (body, from_name, file names and URLs), for output. */
+export function redactMessage(m) {
+  const kinds = [];
+  const out = {};
+  for (const [k, v] of Object.entries(m || {})) {
+    if (typeof v === 'string') {
+      const r = redactSecrets(v);
+      kinds.push(...r.kinds);
+      out[k] = r.text;
+    } else {
+      out[k] = v;
+    }
+  }
+  return { message: out, kinds };
+}
+
+/** HTTP statuses that mean "this agent may no longer read the room", as opposed to a network blip. */
+export const ACCESS_REFUSED = new Set([401, 403, 404]);
