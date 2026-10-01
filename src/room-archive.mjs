@@ -17,6 +17,12 @@
  * It is a SNAPSHOT: a message edited after it was archived (and older than the next sync's
  * overlap) and a deleted message are not reconciled. Search results say so.
  *
+ * Crash safety, precisely: tests inject an exception at every page save and every state save
+ * and require a full recovery. That covers a process dying between those steps; it is NOT a
+ * power-loss / fsync guarantee (writes are not fsynced). Offline, search serves the archive
+ * labelled stale; a server refusal (401/403/404) serves nothing. State files written before
+ * gaps carried `until` keep the older id-based stop for those gaps.
+ *
  * Sync pages BACKWARDS with `before=<created_at>`: the room API returns newest-first pages of at
  * most 100 and ignores offset/page/until (they answer 200 with the same newest page, which looks
  * like success). The timestamp carries a "+00:00" offset, so it MUST be URL-encoded or the server
@@ -154,10 +160,18 @@ export class RoomArchive {
     const save = () => this.saveState(state);
     const removeGap = (g) => { state.gaps = state.gaps.filter((x) => x !== g); save(); };
 
+    // Budget: with gaps pending, keep one page per call for healing (budget >= 2), or alternate
+    // newest and healing calls (budget 1), so a tiny budget can never starve a hole forever.
+    let p1Budget = maxPages;
+    if (state.gaps.length) {
+      if (maxPages >= 2) p1Budget = maxPages - 1;
+      else { p1Budget = state.healTurn ? 0 : 1; state.healTurn = !state.healTurn; }
+    }
+
     // 1) newest end. The gap under fresh pages is OPENED before the first page is saved (the hole
     //    lies below it); it is ADVANCED only after each further page is safely on disk.
     let p1 = null;
-    while (pages < maxPages) {
+    while (pages < p1Budget) {
       const page = await fetchPage({ before });
       pages++;
       if (!page.length) { reachedStart = true; if (p1) removeGap(p1); p1 = null; break; }

@@ -246,6 +246,22 @@ describe('room archive (petrus 1 Oct 2026: "index the room so you have a memory"
     }
   });
 
+  it('a budget of one page still heals a gap, alternating with the newest end (after a reload)', async () => {
+    const d = dir();
+    const room = fakeRoom(700);                          // codexmb: maxPages 1 never reached healing
+    const a = new RoomArchive(R, { dir: d });
+    a.add(room.all.slice(0, 100));
+    assert.equal((await a.sync(room.fetchPage, { maxPages: 5 })).gapPending, true);
+    const b = new RoomArchive(R, { dir: d });
+    let r;
+    for (let i = 0; i < 30; i++) { r = await b.sync(room.fetchPage, { maxPages: 1 }); if (!r.gapPending) break; }
+    assert.equal(r.gapPending, false);
+    assert.equal(r.total, 700);
+    room.push({ id: 'late', created_at: '2026-09-03T00:00:00+00:00', from: 'petrus', body: 'after healing' });
+    await b.sync(room.fetchPage, { maxPages: 1 });
+    assert.ok(b.byId.has('late'), 'and the newest end is still served');
+  });
+
   it('keeps the next record after a crash left a torn last line', () => {
     const d = dir();
     const a = new RoomArchive(R, { dir: d });
