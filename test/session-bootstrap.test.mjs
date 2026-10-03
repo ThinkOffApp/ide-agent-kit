@@ -243,6 +243,28 @@ describe('single-responder lock', () => {
     assert.match(readFileSync(env.IAK_RESPONDER_LOCK, 'utf8'), /^sid=sess-f$/m);
   });
 
+  it('keeps PASSIVE when the live owner\'s pstart carries stray whitespace', () => {
+    // read_lock takes pstart verbatim from the file while proc_lstart trims the
+    // ps output, so a lock written by any other tool with trailing spaces made a
+    // LIVE owner compare unequal and get evicted. The JS half (responder-lock.mjs)
+    // trims both sides, so enforcement and claiming disagreed: room_post refused
+    // the post while the bootstrap handed the lock to the next session.
+    const dir = tempDir();
+    const env = lockEnv(dir);
+    const owner = startSleeper();
+    const realStart = execFileSync('ps', ['-p', String(owner), '-o', 'lstart='], { encoding: 'utf8' })
+      .replace(/^ +/, '').replace(/\n$/, '');   // leading trimmed, TRAILING KEPT
+    assert.match(realStart, / $/, 'this fixture needs ps to emit trailing padding');
+    writeFileSync(env.IAK_RESPONDER_LOCK, `pid=${owner}\nsid=sess-owner\npstart=${realStart}\n`);
+    const payload = runHook({
+      input: JSON.stringify({ source: 'startup', session_id: 'sess-newcomer' }),
+      env,
+    });
+    const ctx = payload.hookSpecificOutput.additionalContext;
+    assert.match(ctx, /PASSIVE/, 'a live owner must not be evicted over whitespace');
+    assert.match(readFileSync(env.IAK_RESPONDER_LOCK, 'utf8'), /^sid=sess-owner$/m);
+  });
+
   it('elects exactly one ACTIVE responder among concurrent fresh claims', async () => {
     const dir = tempDir();
     const env = lockEnv(dir);
