@@ -243,6 +243,32 @@ describe('single-responder lock', () => {
     assert.match(readFileSync(env.IAK_RESPONDER_LOCK, 'utf8'), /^sid=sess-f$/m);
   });
 
+  it('keeps PASSIVE when the live owner\'s pstart carries stray whitespace', () => {
+    // read_lock takes pstart verbatim from the file while proc_lstart trims the
+    // ps output, so a lock written by any other tool with trailing spaces made a
+    // LIVE owner compare unequal and get evicted. The JS half (responder-lock.mjs)
+    // trims both sides, so enforcement and claiming disagreed: room_post refused
+    // the post while the bootstrap handed the lock to the next session.
+    const dir = tempDir();
+    const env = lockEnv(dir);
+    const owner = startSleeper();
+    // Pad explicitly rather than relying on ps: macOS emits trailing spaces in
+    // lstart and Linux does not, so a fixture built from ps output tests the bug
+    // on one platform and nothing on the other. The defect is that read_lock
+    // takes pstart verbatim, so any padding in the FILE is what must be tolerated.
+    const realStart = execFileSync('ps', ['-p', String(owner), '-o', 'lstart='], { encoding: 'utf8' }).trim();
+    const padded = `  ${realStart}   `;
+    assert.notEqual(padded, realStart, 'the fixture must differ from the normalised form');
+    writeFileSync(env.IAK_RESPONDER_LOCK, `pid=${owner}\nsid=sess-owner\npstart=${padded}\n`);
+    const payload = runHook({
+      input: JSON.stringify({ source: 'startup', session_id: 'sess-newcomer' }),
+      env,
+    });
+    const ctx = payload.hookSpecificOutput.additionalContext;
+    assert.match(ctx, /PASSIVE/, 'a live owner must not be evicted over whitespace');
+    assert.match(readFileSync(env.IAK_RESPONDER_LOCK, 'utf8'), /^sid=sess-owner$/m);
+  });
+
   it('elects exactly one ACTIVE responder among concurrent fresh claims', async () => {
     const dir = tempDir();
     const env = lockEnv(dir);
