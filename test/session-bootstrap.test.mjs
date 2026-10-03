@@ -252,10 +252,14 @@ describe('single-responder lock', () => {
     const dir = tempDir();
     const env = lockEnv(dir);
     const owner = startSleeper();
-    const realStart = execFileSync('ps', ['-p', String(owner), '-o', 'lstart='], { encoding: 'utf8' })
-      .replace(/^ +/, '').replace(/\n$/, '');   // leading trimmed, TRAILING KEPT
-    assert.match(realStart, / $/, 'this fixture needs ps to emit trailing padding');
-    writeFileSync(env.IAK_RESPONDER_LOCK, `pid=${owner}\nsid=sess-owner\npstart=${realStart}\n`);
+    // Pad explicitly rather than relying on ps: macOS emits trailing spaces in
+    // lstart and Linux does not, so a fixture built from ps output tests the bug
+    // on one platform and nothing on the other. The defect is that read_lock
+    // takes pstart verbatim, so any padding in the FILE is what must be tolerated.
+    const realStart = execFileSync('ps', ['-p', String(owner), '-o', 'lstart='], { encoding: 'utf8' }).trim();
+    const padded = `  ${realStart}   `;
+    assert.notEqual(padded, realStart, 'the fixture must differ from the normalised form');
+    writeFileSync(env.IAK_RESPONDER_LOCK, `pid=${owner}\nsid=sess-owner\npstart=${padded}\n`);
     const payload = runHook({
       input: JSON.stringify({ source: 'startup', session_id: 'sess-newcomer' }),
       env,
