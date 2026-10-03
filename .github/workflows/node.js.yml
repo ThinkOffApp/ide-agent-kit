@@ -11,7 +11,13 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        node-version: [18.x, 20.x, 22.x]
+        # Matches the engines floor in package.json (">=20"). 18.x was tested
+        # here while unsupported, and had been failing since at least 22 Sep on
+        # packages/user-intent-kit/test/state-publisher.test.js: mock.timers
+        # .enable() took a bare array in Node 18 and an options object from 20,
+        # so {apis:[...]} is ERR_INVALID_ARG_TYPE there. A permanently red check
+        # on an unsupported runtime trains everyone to ignore CI.
+        node-version: [20.x, 22.x]
     steps:
     - uses: actions/checkout@v4
     - name: Use Node.js ${{ matrix.node-version }}
