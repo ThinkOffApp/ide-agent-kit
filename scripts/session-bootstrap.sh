@@ -134,7 +134,12 @@ proc_lstart() {
 read_lock() {
     LOCK_PID=$(sed -n 's/^pid=//p' "$LOCK_FILE" 2>/dev/null | head -1)
     LOCK_SID=$(sed -n 's/^sid=//p' "$LOCK_FILE" 2>/dev/null | head -1)
-    LOCK_PSTART=$(sed -n 's/^pstart=//p' "$LOCK_FILE" 2>/dev/null | head -1)
+    # Trim exactly as proc_lstart does: a lock written by any other tool with
+    # stray padding must still compare equal, or owner_alive() reads a LIVE
+    # owner as dead and the next session evicts it. responder-lock.mjs already
+    # trims both sides, so without this the enforcing half and the claiming
+    # half disagree about the same lock file.
+    LOCK_PSTART=$(sed -n 's/^pstart=//p' "$LOCK_FILE" 2>/dev/null | head -1 | sed 's/^ *//;s/ *$//')
 }
 
 owner_alive() {
