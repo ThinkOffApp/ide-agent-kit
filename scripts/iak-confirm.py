@@ -33,7 +33,7 @@ def main():
     if len(sys.argv) < 2:
         print(__doc__, file=sys.stderr)
         return 2
-    prompt = sys.argv[1][:2000]
+    prompt = sys.argv[1]
     try:
         ttl = int(sys.argv[2]) if len(sys.argv) > 2 else 240
     except ValueError:
