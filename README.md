@@ -693,6 +693,8 @@ Tools exposed (stdio transport):
 | `wake_all`      | `text?` (default `"check rooms"`) | Sends the same nudge to every session IAK knows about (per-session pass/fail). Configure via `mcp.sessions: ["...", ...]`. Falls back to `tmux.ide_session` + `tmux.default_session`. |
 | `read_session`  | `session`, `lines?` (default 50)  | `tmux capture-pane` of the named session — see what the agent printed in response to a `wake_ide`. |
 | `tmux_run`      | `cmd`, `session?`, `cwd?`, `timeoutSec?` | Runs an allowlisted command in a tmux session. **Only registered when `tmux.allow` is non-empty or `mcp.allow_unrestricted: true` is set.** Otherwise omitted entirely from the tool list (fail-closed). Same allowlist as the CLI's `tmux run` subcommand. |
+| `room_search`   | `query`, `room?`, `regex?`, `from?`, `since?`, `until?`, `limit?` | Searches the local archive of a configured room's whole history (syncs new messages first). Hits carry id, time and author; room text is returned as untrusted evidence, credential-looking values are redacted and counted. 0 hits means "not in the archive", not "never said". |
+| `room_archive_sync` | `room?`, `backfill?`, `maxPages?` | Builds or extends that archive (`~/.ide-agent-kit/room-archive/<room>.jsonl`, or `room_archive.dir`). `backfill: true` walks back toward the room's first message; an unfinished sync records where it stopped and the next one fills the gap. Only rooms in this config (`poller.rooms`, `mcp.confirmations.room`) are archived, never DMs; files are owner-only (0600/0700). It is a snapshot: later edits and deletions are not reconciled. A search re-checks access with the server and returns nothing when it answers 401/403/404. |
 
 ### MCP-specific config keys
 
@@ -1181,6 +1183,8 @@ ide-agent-kit emit --to <url> --json <file>
 ide-agent-kit receipt tail [--n <count>]
 ide-agent-kit gateway <health|agents|trigger|wake> [options]
 ide-agent-kit memory <list|get|set|append|delete|search> [options]
+ide-agent-kit rooms archive [--backfill] [--max-pages N] [--room R]
+ide-agent-kit rooms search "words" [--from handle] [--since 2026-09-20] [--regex] [--limit N]
 ide-agent-kit init [--ide <claude-code|codex|cursor|vscode|gemini>] [--profile <balanced|low-friction>]
 ide-agent-kit acp <spawn|list|status|send|close> [options]
 ide-agent-kit keepalive <start|stop|status> [--pid-file <path>] [--heartbeat-sec <sec>]
