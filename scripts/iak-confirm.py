@@ -34,7 +34,14 @@ def main():
         print(__doc__, file=sys.stderr)
         return 2
     prompt = sys.argv[1]
-    ttl = int(sys.argv[2]) if len(sys.argv) > 2 else 240
+    try:
+        ttl = int(sys.argv[2]) if len(sys.argv) > 2 else 240
+    except ValueError:
+        print("ERROR: ttl must be an integer", file=sys.stderr)
+        return 2
+    if ttl < 1 or ttl > 86400:
+        print("ERROR: ttl out of allowed range (1-86400 sec)", file=sys.stderr)
+        return 2
 
     try:
         created = _req("POST", "/intent", {"prompt": prompt, "session": SESSION, "timeoutSec": ttl})
