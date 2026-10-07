@@ -1052,3 +1052,37 @@ test('the HTML queue renders the server wording, and never calls an unknown outc
     server.close();
   }
 });
+
+test('chat-reply poller: a non-owner /approve for an intent held elsewhere stays silent', async () => {
+  // 7 Oct 2026: a second poller with no owners and no such intent posted
+  // "NOT recorded" over an approval the owning poller had already settled.
+  _resetForTests();
+  const batches = [
+    { messages: [] },
+    { messages: [
+      { id: 'x1', from: 'petrus', body: '/approve 2806f59b', isHuman: true },
+    ] },
+  ];
+  let call = 0;
+  const posts = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (url, opts) => {
+    if (opts && opts.method === 'POST') { posts.push(JSON.parse(opts.body)); return { ok: true, json: async () => ({}) }; }
+    const batch = batches[Math.min(call++, batches.length - 1)];
+    return { ok: true, json: async () => batch };
+  };
+  const lines = [];
+  const handle = startChatReplyPoller({
+    apiKey: 'k', room: 'r', intervalMs: 10,
+    owners: [],
+    log: (m) => lines.push(m),
+  });
+  try {
+    await new Promise((r) => setTimeout(r, 120));
+  } finally {
+    clearInterval(handle);
+    globalThis.fetch = originalFetch;
+  }
+  assert.equal(posts.length, 0, 'no room reply for an intent this poller does not hold');
+  assert.match(lines.join('\n'), /not the owner/, 'the refusal is still logged');
+});

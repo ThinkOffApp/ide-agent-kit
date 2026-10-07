@@ -2210,6 +2210,15 @@ export function startChatReplyPoller({ apiKey, room, intervalMs = 5000, log, own
         // to owners is the fix, silence never is.
         if (!ownerSet.has(sender)) {
           emit(`${text} from ${m.from}: sender is not the owner — ignoring`);
+          // Same multi-poller rule as the unknown-intent branch below: only
+          // the poller that HOLDS the intent may tell anyone it failed. On
+          // 7 Oct 2026 petrus approved 2806f59b; the Mini's poller (which
+          // holds it, and lists him as owner) settled it, while this
+          // MacBook's poller (no owners configured, never held the id)
+          // answered "NOT recorded" in the room. Refusing is right; the
+          // public failure notice from a poller that does not own the
+          // intent is a false alarm.
+          if (!getIntent(match[2])) continue;
           // Answer only senders who plausibly ARE the owner (`petrus`,
           // `petrus-boox`, a future `petrus-watch`). claudeMB's review caught
           // that replying to everything amplifies the very misbehaviour this
