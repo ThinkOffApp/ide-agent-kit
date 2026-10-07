@@ -1,4 +1,7 @@
 // Real MCP-driven request_confirmation demo.
+// NOT a test: it posts a REAL confirmation card to the room and waits up to
+// 10 min. It lived in test/, where a bare `node --test` picked it up and sent
+// petrus two live "deploy to production?" cards on 7 Oct 2026. Run by hand.
 //
 // Acts as a Claude Code agent: spawns the IAK MCP server, calls
 // request_confirmation as it would in production, blocks until the user
