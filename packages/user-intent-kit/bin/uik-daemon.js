@@ -57,6 +57,15 @@
  *                        writers race and the row flickers, which is how
  *                        the MacBook "disappeared" (2026-08-29).
  *   POLL_INTERVAL_MS     default: 30000
+ *   INTENT_CHOOSER_URL   optional local chooser base URL. OFF when unset.
+ *                        Publishes its catalog/state each device beat and polls
+ *                        owner-filed switch requests every 15s. POST selection
+ *                        happens only after a fresh local catalog check.
+ *   INTENT_DEVICE_BRAIN_OF optional agent name for the reload warning.
+ *   INTENT_SWITCH_STATE_FILE optional persistent claim/report file path.
+ *                        Defaults under ~/.local/state/user-intent-kit per
+ *                        user/device. Preserve it across restarts. Run exactly
+ *                        ONE chooser-enabled device publisher per device.
  */
 
 import { hostname } from 'node:os';

@@ -58,6 +58,16 @@ export class IntentClient {
     return this.#request('PATCH', `/intent/${this.#userId}/${this.#deviceId}`, fields);
   }
 
+  async getModelSwitch() {
+    if (!this.#deviceId) throw new Error('No deviceId configured');
+    return this.#request('GET', `/intent/${encodeURIComponent(this.#userId)}/${encodeURIComponent(this.#deviceId)}/switch`);
+  }
+
+  async reportModelSwitch(report) {
+    if (!this.#deviceId) throw new Error('No deviceId configured');
+    return this.#request('PATCH', `/intent/${encodeURIComponent(this.#userId)}/${encodeURIComponent(this.#deviceId)}/switch`, report);
+  }
+
   async setDevice(fields) {
     if (!this.#deviceId) throw new Error('No deviceId configured');
     return this.#request('PUT', `/intent/${this.#userId}/${this.#deviceId}`, fields);
