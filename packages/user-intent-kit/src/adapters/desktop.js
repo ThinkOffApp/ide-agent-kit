@@ -9,6 +9,7 @@ import { collectHostTelemetry } from '../host-telemetry.js';
 import { ServedModelProbe } from '../served-model.js';
 import { ModelAvailabilityProbe } from '../model-availability.js';
 import { StatePublisher } from '../state-publisher.js';
+import { ModelSwitcher } from '../model-switcher.js';
 
 /**
  * Desktop Adapter - detects active window and context on macOS.
@@ -28,6 +29,7 @@ export class DesktopAdapter {
   #availabilityProbe;
   #pollIntervalMs;
   #publisher;
+  #switcher;
 
   /**
    * @param {import('../client.js').IntentClient} client
@@ -44,9 +46,10 @@ export class DesktopAdapter {
    */
   constructor(client, {
     pollIntervalMs = 30000, machine, kind, model, modelProbe, availabilityProbe,
-    hostSources,
+    hostSources, modelSwitcher, chooserUrl,
   } = {}) {
     this.#client = client;
+    this.#switcher = modelSwitcher ?? new ModelSwitcher(client, { chooserUrl });
     this.#machine = machine ?? client?.deviceId ?? undefined;
     this.#kind = kind;
     this.#model = model;
@@ -126,7 +129,8 @@ export class DesktopAdapter {
    */
   async publishState() {
     const state = this.#detectState();
-    await this.#publisher.publish({ ...state, ttl_sec: 90 });
+    const chooser = await this.#switcher.refresh();
+    await this.#publisher.publish({ ...state, ...chooser, ttl_sec: 90 });
   }
 
   /**
@@ -139,10 +143,13 @@ export class DesktopAdapter {
     // Started AFTER the first publish and never awaited, so the machine
     // appears on the dashboard at once with whatever vitals it has, label or
     // no label. The first probe fills the label in for the next beat.
-    this.#modelProbe?.start();
+    // Chooser mode has one model authority. Do not run the legacy generation
+    // probe alongside it: a load-on-demand probe can itself load a model.
+    if (!this.#switcher.enabled) this.#modelProbe?.start();
     // Same contract, slower timer: the scan is disk-bound, so it never runs on
     // the heartbeat's path and the first beat goes out without waiting for it.
-    this.#availabilityProbe?.start();
+    if (!this.#switcher.enabled) this.#availabilityProbe?.start();
+    this.#switcher.start();
     // this.#client.startHeartbeat() removed: the StatePublisher's own
     // refreshMs timer now re-sends the last state as the liveness beat, so a
     // second heartbeat mechanism only doubled the writes (c0ed66d, 18 Sep 2026).
@@ -159,6 +166,7 @@ export class DesktopAdapter {
     }
     this.#modelProbe?.stop();
     this.#availabilityProbe?.stop();
+    this.#switcher?.stop();
   }
 
   /**
