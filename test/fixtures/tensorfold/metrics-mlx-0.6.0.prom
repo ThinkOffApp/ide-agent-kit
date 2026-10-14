@@ -1,0 +1,57 @@
+# HELP tensorfold:requests_running Requests in prefill or decode.
+# TYPE tensorfold:requests_running gauge
+tensorfold:requests_running 0
+# HELP tensorfold:requests_waiting Requests queued or held until a lane is free.
+# TYPE tensorfold:requests_waiting gauge
+tensorfold:requests_waiting 0
+# HELP tensorfold:prompt_tokens_total Prompt tokens of finished requests.
+# TYPE tensorfold:prompt_tokens_total counter
+tensorfold:prompt_tokens_total 0
+# HELP tensorfold:generation_tokens_total Generated tokens of finished requests.
+# TYPE tensorfold:generation_tokens_total counter
+tensorfold:generation_tokens_total 0
+# HELP tensorfold:kv_cache_usage_ratio Tokens in a stream cache divided by that stream's context window.
+# TYPE tensorfold:kv_cache_usage_ratio gauge
+tensorfold:kv_cache_usage_ratio{pool="0"} 0
+# HELP tensorfold:mtp_drafted_total Draft tokens verified on finished requests.
+# TYPE tensorfold:mtp_drafted_total counter
+tensorfold:mtp_drafted_total 0
+# HELP tensorfold:mtp_accepted_total Draft tokens kept on finished requests.
+# TYPE tensorfold:mtp_accepted_total counter
+tensorfold:mtp_accepted_total 0
+# HELP tensorfold:request_latency_seconds Seconds from arrival to the reply leaving.
+# TYPE tensorfold:request_latency_seconds histogram
+tensorfold:request_latency_seconds_bucket{le="0.01"} 0
+tensorfold:request_latency_seconds_bucket{le="0.05"} 0
+tensorfold:request_latency_seconds_bucket{le="0.1"} 0
+tensorfold:request_latency_seconds_bucket{le="0.25"} 0
+tensorfold:request_latency_seconds_bucket{le="0.5"} 0
+tensorfold:request_latency_seconds_bucket{le="1"} 0
+tensorfold:request_latency_seconds_bucket{le="2.5"} 0
+tensorfold:request_latency_seconds_bucket{le="5"} 0
+tensorfold:request_latency_seconds_bucket{le="10"} 0
+tensorfold:request_latency_seconds_bucket{le="30"} 0
+tensorfold:request_latency_seconds_bucket{le="60"} 0
+tensorfold:request_latency_seconds_bucket{le="120"} 0
+tensorfold:request_latency_seconds_bucket{le="300"} 0
+tensorfold:request_latency_seconds_bucket{le="+Inf"} 0
+tensorfold:request_latency_seconds_sum 0
+tensorfold:request_latency_seconds_count 0
+# HELP tensorfold:time_to_first_token_seconds Seconds from arrival to the first generated token.
+# TYPE tensorfold:time_to_first_token_seconds histogram
+tensorfold:time_to_first_token_seconds_bucket{le="0.01"} 0
+tensorfold:time_to_first_token_seconds_bucket{le="0.05"} 0
+tensorfold:time_to_first_token_seconds_bucket{le="0.1"} 0
+tensorfold:time_to_first_token_seconds_bucket{le="0.25"} 0
+tensorfold:time_to_first_token_seconds_bucket{le="0.5"} 0
+tensorfold:time_to_first_token_seconds_bucket{le="1"} 0
+tensorfold:time_to_first_token_seconds_bucket{le="2.5"} 0
+tensorfold:time_to_first_token_seconds_bucket{le="5"} 0
+tensorfold:time_to_first_token_seconds_bucket{le="10"} 0
+tensorfold:time_to_first_token_seconds_bucket{le="30"} 0
+tensorfold:time_to_first_token_seconds_bucket{le="60"} 0
+tensorfold:time_to_first_token_seconds_bucket{le="120"} 0
+tensorfold:time_to_first_token_seconds_bucket{le="300"} 0
+tensorfold:time_to_first_token_seconds_bucket{le="+Inf"} 0
+tensorfold:time_to_first_token_seconds_sum 0
+tensorfold:time_to_first_token_seconds_count 0

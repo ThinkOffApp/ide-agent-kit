@@ -5,7 +5,7 @@ Copy the example to `config/models.json` and edit it; `config/models.json` is
 the file `bin/model-capacity.mjs` reads by default.
 
 ```json
-{ "models": [ { "id": ..., "host": ..., "port": ..., "kind": ..., "box": ..., "sharing": ..., "owner": ..., "auth": ..., "keyFile": ... } ] }
+{ "models": [ { "id": ..., "host": ..., "port": ..., "kind": ..., "engine": ..., "box": ..., "sharing": ..., "owner": ..., "auth": ..., "keyFile": ... } ] }
 ```
 
 A bare top-level array is also accepted.
@@ -18,6 +18,7 @@ A bare top-level array is also accepted.
 | `host`    | yes | **Tailnet MagicDNS name** (`asus1`, `mini`) or tailnet IP (`100.x.y.z`). See the rule below. |
 | `port`    | yes | Integer 1-65535. The OpenAI-style HTTP port, not the ssh port. |
 | `kind`    | yes | `openai` \| `vllm` \| `lmstudio`. Decides which list endpoint is called: `lmstudio` uses `/api/v1/models` and counts only loaded instances, the other two use `/v1/models`. |
+| `engine`  | no  | Which server software answers on this port. `tensorfold` turns on the TensorFold status read-out for this entry (see below). Any other short name (`vllm`, `llama.cpp`, `ollama`) says "not TensorFold" and skips auto-detection. Omit it to let the status reader auto-detect. |
 | `box`     | no  | Free text for humans: which machine, where it lives. Shown in `--json`, never probed. |
 | `sharing` | no  | `exclusive` \| `shared`, default `shared`. Advisory metadata for the switcher's ranking. The probe applies the same BUSY rules to both - it is documented in `docs/model-capacity.md` rather than silently inferred. |
 | `owner`   | no  | Handle of whoever to ask before taking the box. |
@@ -63,6 +64,42 @@ finds out at probe time, and path and latency in particular are per peer pair:
 two hosts behind the same router were in opposite path states to the same
 Berlin box at the same moment. A value written into this shared file is wrong
 for every caller except the one who wrote it.
+
+## TensorFold entries
+
+`ide-agent-kit tensorfold-status` and the device heartbeat (when
+`INTENT_TENSORFOLD_REGISTRY` points at this file) read the live status of
+every TensorFold server listed here: model, warming, memory, requests, token
+counters, tok/s, draft acceptance, time to first token, KV cache use and
+Living Weights. They send **GET /health, GET /metrics and GET /v1/slide/graph
+only**, never a completion.
+
+Which entries count as TensorFold:
+
+* `"engine": "tensorfold"`: always, reachable or not.
+* no `engine`: auto-detected when `/metrics` carries `tensorfold:` series or
+  `/health` has TensorFold's shape. A server started with an API key hides
+  both, so mark a keyed server `"engine": "tensorfold"` explicitly.
+* any other `engine`: never asked.
+
+**Keys.** A TensorFold server may gate `/metrics` and `/v1/slide/graph`
+behind a key (`/health` stays open, and says only `{"status": "ok"}` while
+keys are on). The status reader sends a key only to an entry marked
+`"engine": "tensorfold"` that names its own `keyFile`, and only on those two
+routes. It never uses `LLM_API_KEY` / `LLM_API_KEY_FILE`: those belong to some
+other server as far as a status read knows. Without a usable key it reports
+`metrics: "auth_required"` and the rest of the card reads unknown.
+
+```json
+{
+  "id": "gb10-tensorfold",
+  "host": "asus3",
+  "port": 8080,
+  "kind": "openai",
+  "engine": "tensorfold",
+  "keyFile": "~/.iak/tensorfold_gb10_api_key.txt"
+}
+```
 
 ## The rule: tailnet names, never LAN IPs
 

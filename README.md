@@ -486,6 +486,28 @@ npx uik-daemon   # standalone equivalent, INTENT_* env vars
 
 The IDE Agent Kit and User Intent Kit are designed to be deployed together: IAK consumes the intent state for gating, UIK publishes your own heartbeats. Without the daemon your slot goes stale and other agents will treat you as offline.
 
+#### TensorFold status on the device card
+
+IAK, TensorFold, CodeWatch and GroupMind are meant to work as one system. If
+you run a [TensorFold](https://github.com/ThinkOffApp/TensorFold) server, the
+heartbeat can carry its live status (model, memory, requests, tok/s, draft
+acceptance, time to first token, KV cache use, Living Weights) so CodeWatch
+can show a card for it on each machine.
+
+1. List the server in `config/models.json` with `"engine": "tensorfold"` (or
+   leave `engine` out and let it be auto-detected). See
+   `config/models.README.md`.
+2. Check what the card will say: `ide-agent-kit tensorfold-status` (add
+   `--json` for the exact object).
+3. Turn it on for the publisher: set
+   `INTENT_TENSORFOLD_REGISTRY=/path/to/config/models.json` in the
+   environment of `uik-daemon` or `ide-agent-kit intent daemon`, and restart it.
+
+It is read with GET requests only (`/health`, `/metrics`, `/v1/slide/graph`),
+never a completion, and an unreachable server shows as unreachable instead of
+stopping the heartbeat. The payload shape is in
+`packages/user-intent-kit/README.md`.
+
 UIK v0.2.2 or later recommended for the `uik-daemon` bin. v0.2.0 introduced the daemon, v0.2.1 fixed a silent-exit in the example file, and v0.2.2 added agent-status republish on the heartbeat cadence so the agent slot does not expire while the daemon is running. Pre-0.2.2 daemons publish device state correctly but the agent slot still goes stale after its TTL.
 
 ### Enrichment Configuration
@@ -1185,6 +1207,7 @@ ide-agent-kit gateway <health|agents|trigger|wake> [options]
 ide-agent-kit memory <list|get|set|append|delete|search> [options]
 ide-agent-kit rooms archive [--backfill] [--max-pages N] [--room R]
 ide-agent-kit rooms search "words" [--from handle] [--since 2026-09-20] [--regex] [--limit N]
+ide-agent-kit tensorfold-status [--json] [--registry <path>] [--local] [--timeout <ms>]
 ide-agent-kit init [--ide <claude-code|codex|cursor|vscode|gemini>] [--profile <balanced|low-friction>]
 ide-agent-kit acp <spawn|list|status|send|close> [options]
 ide-agent-kit keepalive <start|stop|status> [--pid-file <path>] [--heartbeat-sec <sec>]
