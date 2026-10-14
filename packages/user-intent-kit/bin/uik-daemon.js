@@ -78,10 +78,12 @@
  *                        waits on it.
  *   INTENT_TENSORFOLD_DISCOVER 1 | 0. Find TensorFold engines running on this
  *                        machine from the process table (this user's
- *                        `tensorfold-native serve` / `tensorfold serve`;
- *                        port from --port, else the listening socket) and
- *                        publish them as source "discovered", merged with
- *                        the registry by port. Default: on when
+ *                        `tensorfold-native serve` / `tensorfold serve`,
+ *                        checked against the real executable, read only at
+ *                        a loopback socket the process listens on, never
+ *                        with a key from its command line) and publish them
+ *                        as source "discovered", merged with the registry by
+ *                        port. Default: on when
  *                        INTENT_TENSORFOLD_REGISTRY is set; set 1 to run it
  *                        with no registry at all, 0 to turn it off.
  *   INTENT_TENSORFOLD_SCOPE local (default) | all. local = only entries on

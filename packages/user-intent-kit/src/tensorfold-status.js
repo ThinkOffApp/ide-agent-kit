@@ -17,28 +17,32 @@
 // false`. A value we could not read is null, never 0: an idle server and an
 // unreadable counter must not look the same on a dashboard.
 //
-// KEYS. A key is sent only on the two gated routes, and only from a FILE
-// named for that very server: the registry entry's own `keyFile` (entries
-// marked `"engine": "tensorfold"`), or the `--api-key-file` a discovered local
-// engine was started with. Both are read in the engine's own key-file format
-// and refused, as the engine refuses them, when other users can read them.
-// The fleet-wide LLM_API_KEY / LLM_API_KEY_FILE fallbacks are NOT used here:
-// those are some other server's credential as far as this reader knows.
-// Auto-detected entries are probed without any key at all. A key held only in
-// a process's memory or environment (TensorFold Studio's) is not taken: that
-// engine reports `metrics: "auth_required"`. Nothing here logs or returns a
-// token; Prometheus `key="..."` labels (the native server labels its request
-// counter by API key label) are never copied into the output either.
+// KEYS. A key is sent only to an entry the registry marks
+// `"engine": "tensorfold"`, only when that same entry names its own key
+// (`keyFile`, a path), and only on the two gated routes. The file is read in
+// the engine's own key-file format and refused, as the engine refuses it,
+// when other users can read it. The fleet-wide LLM_API_KEY / LLM_API_KEY_FILE
+// fallbacks are NOT used here: those are some other server's credential as
+// far as this reader knows. Auto-detected entries are probed without any key
+// at all. A discovered engine's command line is never a source of keys: a
+// `--api-key-file` on it is not read (any process of this user can name any
+// file there), a `--api-key` value is not kept, and a key held only in a
+// process's memory or environment (TensorFold Studio's) is not taken. Those
+// engines report `metrics: "auth_required"` with the reason. Nothing here
+// logs or returns a token; Prometheus `key="..."` labels (the native server
+// labels its request counter by API key label) are never copied into the
+// output either.
 //
 // DISCOVERY. Engines running on this machine are found from the process table
-// (tensorfold-discovery.js), merged with the registry by port, and published
-// with `source: "discovered"`. Same three GETs, same rules.
+// (tensorfold-discovery.js), each at a loopback socket its own pid listens
+// on, merged with the registry by port, and published with
+// `source: "discovered"`. Same three GETs, same rules.
 //
 // FACT TEXT STAYS ON THE BOX. The slide graph carries what the model was
 // taught, which can be private. Only counts leave this module.
 
 import { homedir } from 'node:os';
-import { join, isAbsolute } from 'node:path';
+import { join } from 'node:path';
 import { readFile as fsReadFile, stat as fsStat } from 'node:fs/promises';
 import { readRegistryFile } from './model-capacity.js';
 import { discoverTensorFoldEngines } from './tensorfold-discovery.js';
@@ -380,7 +384,7 @@ export function buildStatus(target, { health, metrics, slide }, {
     id: target.id ?? null,
     host: target.host,
     port: target.port,
-    local: typeof target.local === 'boolean' ? target.local : isLoopbackHost(target.host),
+    local: isLoopbackHost(target.host),
     source: target.source ?? 'registry',
     name: target.name ?? null,
     app: target.app ?? null,
@@ -456,11 +460,8 @@ const MAX_KEY_FILE_BYTES = 1 << 20;
  * Returns {token, note}. `note` says why no key came out, names the path and
  * never the contents.
  */
-export async function readEngineKeyFile(rawPath, { requireAbsolute = false, readFileImpl = fsReadFile, statImpl = fsStat } = {}) {
+export async function readEngineKeyFile(rawPath, { readFileImpl = fsReadFile, statImpl = fsStat } = {}) {
   const path = expandHome(rawPath);
-  if (requireAbsolute && !isAbsolute(path)) {
-    return { token: null, note: '--api-key-file is a relative path (relative to the engine\'s working directory); not read' };
-  }
   let info;
   try {
     info = await statImpl(path);
@@ -487,25 +488,31 @@ export async function readEngineKeyFile(rawPath, { requireAbsolute = false, read
 }
 
 /**
- * The key for one server, from a file named for it and nothing wider:
- * the registry entry's own keyFile (auth "bearer"), else the --api-key-file
- * its discovered engine was started with. Returns {token, note}.
+ * The key for one server, from the registry and nothing wider: the keyFile
+ * of an entry marked TensorFold (auth "bearer"). A discovered engine's
+ * command line only explains why there is none. Returns {token, note};
+ * `note` never contains a key.
  */
-async function serverToken(entry, engine) {
-  if (entry && entry.auth === 'bearer') {
-    if (entry.keyFile) return readEngineKeyFile(entry.keyFile);
-    if (!engine?.apiKeyFile) return { token: null, note: 'the entry names no keyFile' };
+async function serverToken(entry, engine, readKeyFile) {
+  if (entry?.engine === TENSORFOLD_ENGINE && entry.auth === 'bearer') {
+    if (entry.keyFile) return readKeyFile(entry.keyFile);
+    return { token: null, note: 'the entry names no keyFile' };
   }
-  if (engine?.apiKeyFile) return readEngineKeyFile(engine.apiKeyFile, { requireAbsolute: true });
   if (!engine) return { token: null, note: null };
   if (engine.app) return { token: null, note: `${engine.app} keeps this engine's key in memory only, so its metrics stay locked` };
+  if (engine.apiKeyFile) {
+    return {
+      token: null,
+      note: `the engine was started with --api-key-file, which is not read from a command line; add a models.json entry for port ${engine.port} with "engine": "tensorfold" and that keyFile`,
+    };
+  }
   if (engine.keyOnArgv) return { token: null, note: 'the key was given on the engine\'s command line; it is not read from there' };
-  return { token: null, note: 'the engine was started without --api-key-file' };
+  return { token: null, note: 'the engine was started without a key file' };
 }
 
 /** What a discovered engine adds to the target it is probed as. */
 function engineTarget(engine) {
-  return engine ? { name: engine.name ?? null, app: engine.app ?? null, argsModel: engine.model ?? null, local: true } : {};
+  return engine ? { name: engine.name ?? null, app: engine.app ?? null, argsModel: engine.model ?? null } : {};
 }
 
 /**
@@ -520,19 +527,24 @@ function engineTarget(engine) {
  *                         TensorFold earlier in this process and stops
  *                         answering stays on the list as unreachable.
  *   any other engine      skipped, no request sent.
- *   discovered            an engine from the process table. Merged with a
- *                         loopback registry entry on the same port (the
- *                         entry keeps its id and keyFile; an entry without
- *                         an engine needs no auto-detection then), otherwise
- *                         reported on its own as `source: "discovered"`. One
- *                         card per port.
+ *   discovered            an engine from the process table, at a loopback
+ *                         socket its pid was seen listening on. Merged with
+ *                         a loopback registry entry on the same port (the
+ *                         entry keeps its id, and its keyFile when it is
+ *                         marked TensorFold; an entry without an engine
+ *                         needs no auto-detection then), otherwise reported
+ *                         on its own as `source: "discovered"`, without a
+ *                         key. One card per port. A non-loopback address in
+ *                         `discovered` is ignored.
  *
  * `samples` and `detected` are Maps the caller keeps between calls (the
- * heartbeat does; a one-shot CLI passes fresh ones). Never throws.
+ * heartbeat does; a one-shot CLI passes fresh ones). `readKeyFile` is for
+ * tests. Never throws.
  */
 export async function collectTensorFoldStatus(entries, {
   scope = 'all',
   discovered = null,
+  readKeyFile = readEngineKeyFile,
   fetchImpl = (...a) => fetch(...a),
   timeoutMs = DEFAULT_STATUS_TIMEOUT_MS,
   now = () => Date.now(),
@@ -544,13 +556,15 @@ export async function collectTensorFoldStatus(entries, {
   const inScope = (entries || []).filter(e => scope === 'all' || isLoopbackHost(e.host));
   const engines = new Map();
   for (const engine of Array.isArray(discovered) ? discovered : []) {
-    if (Number.isInteger(engine?.port) && !engines.has(engine.port)) engines.set(engine.port, engine);
+    // Discovery returns loopback addresses only; anything else is not read.
+    if (!Number.isInteger(engine?.port) || !isLoopbackHost(engine.host) || engines.has(engine.port)) continue;
+    engines.set(engine.port, engine);
   }
   const claimed = new Set();
   const stamp = () => new Date(now()).toISOString();
 
   const probeKnown = async (target, key, entry, engine) => {
-    const { token, note } = await serverToken(entry, engine);
+    const { token, note } = await serverToken(entry, engine, readKeyFile);
     const { status, sample } = await probeTensorFold(target, {
       ...io, now, clock, token, keyNote: note, previous: samples.get(key) ?? null,
     });

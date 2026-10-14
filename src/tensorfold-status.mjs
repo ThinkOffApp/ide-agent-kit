@@ -141,9 +141,11 @@ export async function runTensorFoldStatus({
   }
   let discovered = null;
   let discoveryError = null;
+  let discoverySkipped = [];
   if (discover) {
     const found = await discoverImpl().catch(() => ({ ok: false, error: 'process scan failed', engines: [] }));
     discovered = found.engines ?? [];
+    discoverySkipped = (found.skipped ?? []).map(e => ({ id: `pid ${e.pid}${e.model ? ` (${e.model})` : ''}`, reason: e.reason }));
     if (!found.ok) discoveryError = found.error || 'process scan failed';
   }
   const { servers, skipped } = await collectTensorFoldStatus(entries, {
@@ -161,7 +163,7 @@ export async function runTensorFoldStatus({
     ...(registryError ? { registry_error: registryError } : {}),
     ...(discoveryError ? { discovery_error: discoveryError } : {}),
     servers,
-    skipped,
+    skipped: [...skipped, ...discoverySkipped],
   };
   return { exitCode: 0, report, text: json ? JSON.stringify(report, null, 2) : formatReport(report) };
 }

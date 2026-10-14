@@ -507,9 +507,9 @@ can show a card for it on each machine.
 
 It is read with GET requests only (`/health`, `/metrics`, `/v1/slide/graph`),
 never a completion, and an unreachable server shows as unreachable instead of
-stopping the heartbeat. Keys are read only from files (`keyFile`, or an
-engine's `--api-key-file`); TensorFold Studio keeps its engine key in memory,
-so its card says `metrics: auth required`. The payload shape is in
+stopping the heartbeat. Keys are read only from a registry entry's
+`keyFile`, never from a command line; TensorFold Studio keeps its engine key
+in memory, so its card says `metrics: auth required`. The payload shape is in
 `packages/user-intent-kit/README.md`.
 
 UIK v0.2.2 or later recommended for the `uik-daemon` bin. v0.2.0 introduced the daemon, v0.2.1 fixed a silent-exit in the example file, and v0.2.2 added agent-status republish on the heartbeat cadence so the agent slot does not expire while the daemon is running. Pre-0.2.2 daemons publish device state correctly but the agent slot still goes stale after its TTL.

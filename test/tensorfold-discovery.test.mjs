@@ -9,10 +9,17 @@
 //                            /Users/me): the 0.6.0 Python engine, a native
 //                            1.0.10 bench engine, and TensorFold Studio's
 //                            bundled engine on its random port.
-//   ps-macos-decoys.txt      synthetic: lines that must NOT be read as engines,
-//                            plus the shapes a launcher could produce (spaces
-//                            in paths, --port=, -m, a key on argv, no --port).
+//   ps-macos-decoys.txt      synthetic: lines that must NOT be read as engines
+//                            (501-504; 511 is @codexmb's repro, printf with an
+//                            engine-shaped argv; 512 an argv[0] that lies about
+//                            its executable; 513 an engine claiming a remote
+//                            --host), plus the shapes a launcher could produce
+//                            (spaces in paths, --port=, -m, a key on argv, no
+//                            --port, a --port it does not listen on).
 //   lsof-studio.txt          `lsof -Fn` for the Studio engine's listening socket.
+//
+// What each process really runs comes from the kernel (`lsof -d txt` here,
+// faked per pid in EXE): `ps` shows argv, which any process can set.
 //   health-studio-keyed.json, metrics-studio-401.json
 //                            the Studio engine's live GET answers: /health is
 //                            {"status": "ok"} and /metrics a 401, because the
@@ -28,13 +35,13 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
 import { readFileSync } from 'node:fs';
-import { mkdtemp, mkdir, writeFile, rm } from 'node:fs/promises';
+import { mkdtemp, mkdir, writeFile, rm, symlink } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import {
-  parsePsOutput, parseServeLine, parseServeArgv, parseLsofListen, connectHost, repoFromPath,
-  discoverTensorFoldEngines, STUDIO_APP_NAME, DEFAULT_ENGINE_PORT,
+  parsePsOutput, parseServeLine, parseServeArgv, parseLsofListen, parseLsofExecutable, parseProcNetTcp,
+  connectHost, chooseSocket, repoFromPath, discoverTensorFoldEngines, STUDIO_APP_NAME,
 } from '../packages/user-intent-kit/src/tensorfold-discovery.js';
 import {
   collectTensorFoldStatus, readEngineKeyFile, TensorFoldMonitor, METRICS_STATES,
@@ -95,8 +102,21 @@ const openNativeRoutes = () => ({
 /** A discovered engine as discoverTensorFoldEngines returns it. */
 const engine = (port, extra = {}) => ({
   pid: 4242, host: '127.0.0.1', port, portFrom: 'args', name: null, model: null,
-  app: null, apiKeyFile: null, keyOnArgv: false, slide: false, ...extra,
+  app: null, apiKeyFile: false, keyOnArgv: false, slide: false, ...extra,
 });
+
+/** The real executable of every pid in the fixtures, as `lsof -d txt` reports it. */
+const STUDIO_EXE = '/Applications/TensorFold Studio.app/Contents/Resources/engine/bin/tensorfold-native';
+const EXE = {
+  1361: '/Library/Frameworks/Python.framework/Versions/3.12/Resources/Python.app/Contents/MacOS/Python',
+  10169: '/Users/me/tmp/tf-rel/v1.0.10/zig-out/native/bin/tensorfold-native',
+  14779: '/Volumes/TensorFold/TensorFold.app/Contents/Resources/engine/bin/tensorfold-native',
+  501: '/usr/bin/grep', 502: '/usr/bin/vim', 503: '/usr/bin/python3', 504: '/usr/bin/python3',
+  505: STUDIO_EXE, 506: '/opt/tf/bin/tensorfold-native', 507: '/opt/tf/bin/tensorfold-native',
+  508: '/usr/bin/python3', 509: '/opt/tf/bin/tensorfold-native', 510: '/opt/tf/bin/tensorfold-native',
+  511: '/usr/bin/printf', 512: '/bin/sleep', 513: '/opt/tf/bin/tensorfold-native',
+};
+const parseLines = text => Object.fromEntries(parsePsOutput(text).map(p => [p.pid, parseServeLine(p.pid, p.args, EXE[p.pid])]));
 
 async function keyFile(t, text, mode = 0o600) {
   const dir = await mkdtemp(join(tmpdir(), 'iak-tf-engine-key-'));
@@ -109,25 +129,28 @@ async function keyFile(t, text, mode = 0o600) {
 // --- parsing the process table --------------------------------------------------
 
 test('live macOS ps lines: Python 0.6.0, native bench, and the Studio engine on its random port', () => {
-  const engines = parsePsOutput(PS_LIVE).map(p => parseServeLine(p.pid, p.args)).filter(Boolean);
-  const simple = engines.map(e => ({ pid: e.pid, port: e.port, host: e.listenHost, name: e.name, model: e.model, app: e.app, slide: e.slide, keyOnArgv: e.keyOnArgv }));
+  const engines = Object.values(parseLines(PS_LIVE)).filter(Boolean);
+  const simple = engines.map(e => ({ pid: e.pid, port: e.port, name: e.name, model: e.model, app: e.app, slide: e.slide, keyOnArgv: e.keyOnArgv }));
   assert.deepEqual(simple, [
-    { pid: 1361, port: 8091, host: '127.0.0.1', name: null, model: 'Vontra/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-MLX-4bit', app: null, slide: false, keyOnArgv: false },
-    { pid: 10169, port: 8101, host: '127.0.0.1', name: 'bench', model: 'bench', app: null, slide: false, keyOnArgv: false },
-    { pid: 14779, port: 54635, host: '127.0.0.1', name: STUDIO_MODEL, model: STUDIO_MODEL, app: STUDIO_APP_NAME, slide: false, keyOnArgv: false },
+    { pid: 1361, port: 8091, name: null, model: 'Vontra/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-MLX-4bit', app: null, slide: false, keyOnArgv: false },
+    { pid: 10169, port: 8101, name: 'bench', model: 'bench', app: null, slide: false, keyOnArgv: false },
+    { pid: 14779, port: 54635, name: STUDIO_MODEL, model: STUDIO_MODEL, app: STUDIO_APP_NAME, slide: false, keyOnArgv: false },
   ]);
 });
 
-test('decoys are not engines; launcher shapes parse; a key on argv is noted and never kept', () => {
-  const byPid = Object.fromEntries(parsePsOutput(PS_DECOYS).map(p => [p.pid, parseServeLine(p.pid, p.args)]));
+test('decoys are not engines; launcher shapes parse; a key or key file on argv is noted and never kept', () => {
+  const byPid = parseLines(PS_DECOYS);
   for (const pid of [501, 502, 503, 504]) assert.equal(byPid[pid], null, `pid ${pid} is not a TensorFold engine`);
+  assert.equal(byPid[511], null, 'printf with an engine-shaped argv is printf (@codexmb repro)');
+  assert.equal(byPid[512], null, 'an argv[0] naming tensorfold-native does not make /bin/sleep an engine');
   const studio = byPid[505];
   assert.equal(studio.app, STUDIO_APP_NAME, 'a bundle path with spaces is still the Studio engine');
   assert.equal(studio.port, 9123);
-  assert.equal(studio.listenHost, '0.0.0.0');
   assert.equal(studio.name, 'Owner/Model');
   assert.equal(studio.slide, true);
-  assert.equal(studio.apiKeyFile, '/Users/me/.tensorfold/keys');
+  assert.equal(studio.apiKeyFile, true, 'only THAT a key file was named');
+  assert.ok(!('host' in studio) && !('listenHost' in studio), '--host is never taken from argv');
+  assert.doesNotMatch(JSON.stringify(byPid), /\.tensorfold\/keys|dummy-key|example\.invalid|192\.0\.2\.7/, 'no key path or argv host leaves the parser');
   const keyed = byPid[506];
   assert.equal(keyed.keyOnArgv, true);
   assert.equal(keyed.name, 'small');
@@ -137,41 +160,74 @@ test('decoys are not engines; launcher shapes parse; a key on argv is noted and 
   assert.equal(byPid[508].model, 'Vontra/ViaModule', 'python -m tensorfold serve');
   assert.equal(byPid[508].port, 9300);
   assert.equal(byPid[510].port, 9400, '--port=N');
-  assert.equal(byPid[510].listenHost, '::');
+  // The line matches, but the executable does not: no engine either way.
+  assert.equal(parseServeLine(1, '/opt/tf/bin/tensorfold-native serve X', undefined), null, 'no executable known, no engine');
+  assert.equal(parseServeLine(1, '/usr/bin/python3 /tmp/x.py -m tensorfold serve X', '/usr/bin/python3'), null);
 });
 
-test('Linux argv (exact, from /proc/<pid>/cmdline) keeps a value with spaces whole', () => {
-  const e = parseServeArgv(7, ['/opt/tf/bin/tensorfold-native', 'serve', '/home/me/My Models/qwen', '--port', '9500', '--api-key-file', '/home/me/tf keys', '--slide']);
+test('Linux argv (exact, from /proc/<pid>/cmdline) keeps a value with spaces whole; identity is /proc/<pid>/exe', () => {
+  const native = '/opt/tf/bin/tensorfold-native';
+  const e = parseServeArgv(7, [native, 'serve', '/home/me/My Models/qwen', '--port', '9500', '--api-key-file', '/home/me/tf keys', '--slide'], native);
   assert.equal(e.model, 'qwen');
   assert.equal(e.port, 9500);
-  assert.equal(e.apiKeyFile, '/home/me/tf keys');
+  assert.equal(e.apiKeyFile, true);
   assert.equal(e.slide, true);
-  const py = parseServeArgv(8, ['/usr/bin/python3', '/home/me/.venv/bin/tensorfold', 'serve', 'Vontra/X', '--host', '0.0.0.0']);
+  const py = parseServeArgv(8, ['/usr/bin/python3', '/home/me/.venv/bin/tensorfold', 'serve', 'Vontra/X', '--host', '0.0.0.0'], '/usr/bin/python3.12');
   assert.equal(py.model, 'Vontra/X');
-  assert.equal(py.listenHost, '0.0.0.0');
-  const key = parseServeArgv(9, ['/opt/tf/bin/tensorfold-native', 'serve', 'Vontra/X', '--api-key', 'argv-key-x', '--port', '9600']);
+  const key = parseServeArgv(9, [native, 'serve', 'Vontra/X', '--api-key', 'argv-key-x', '--port', '9600'], native);
   assert.equal(key.keyOnArgv, true);
   assert.equal(key.port, 9600, 'the flag after a dropped key value still parses');
   assert.doesNotMatch(JSON.stringify(key), /argv-key-x/);
-  assert.equal(parseServeArgv(10, ['/usr/bin/less', 'tensorfold', 'serve']), null);
-  assert.equal(parseServeArgv(11, ['/opt/tf/bin/tensorfold-native', 'pull', 'Vontra/X']), null);
+  assert.equal(parseServeArgv(10, ['/usr/bin/less', 'tensorfold', 'serve'], '/usr/bin/less'), null);
+  assert.equal(parseServeArgv(11, [native, 'pull', 'Vontra/X'], native), null);
+  assert.equal(parseServeArgv(12, [native, 'serve', 'Vontra/X'], '/usr/bin/printf'), null, 'argv[0] is a claim; exe is the process');
+  assert.equal(parseServeArgv(13, ['/usr/bin/python3', 'tensorfold', 'serve'], '/usr/bin/python3'), null, 'a relative script is not an entry point we can name');
+  assert.equal(parseServeArgv(14, ['/usr/bin/python3', '/tmp/r.py', '-m', 'tensorfold', 'serve'], '/usr/bin/python3'), null);
 });
 
-test('lsof listen lines, wildcard and IPv6 hosts, and Hugging Face cache paths', () => {
+test('lsof and /proc socket tables, loopback-only connect hosts, and Hugging Face cache paths', () => {
   assert.deepEqual(parseLsofListen(LSOF_STUDIO), [{ host: '127.0.0.1', port: 54635 }]);
   assert.deepEqual(parseLsofListen('p1\nf3\nn*:8080\nf4\nn[::1]:8081\n'), [{ host: '*', port: 8080 }, { host: '::1', port: 8081 }]);
+  assert.equal(parseLsofExecutable(`p1\nftxt\nn${STUDIO_EXE}\nftxt\nn/usr/lib/dyld\n`), STUDIO_EXE);
+  assert.equal(parseLsofExecutable(''), null);
+  const header = '  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode\n';
+  const tcp = `${header}   0: 0100007F:2649 00000000:0000 0A 00000000:00000000 00:00000000 00000000  1000        0 5551 1 0\n`
+    + '   1: 0100007F:264A 0100007F:9C40 01 00000000:00000000 00:00000000 00000000  1000        0 5551 1 0\n'
+    + '   2: 00000000:264B 00000000:0000 0A 00000000:00000000 00:00000000 00000000  1000        0 7777 1 0\n';
+  assert.deepEqual(parseProcNetTcp(tcp, new Set(['5551'])), [{ host: '127.0.0.1', port: 9801 }], 'LISTEN rows of our inodes only');
+  const tcp6 = `${header}   0: 00000000000000000000000001000000:2649 00000000000000000000000000000000:0000 0A 00000000:00000000 00:00000000 00000000  1000 0 42 1 0\n`
+    + '   1: 0000000000000000FFFF00000100007F:264A 00000000000000000000000000000000:0000 0A 00000000:00000000 00:00000000 00000000  1000 0 43 1 0\n';
+  assert.deepEqual(parseProcNetTcp(tcp6, new Set(['42', '43']), true), [{ host: '::1', port: 9801 }, { host: '::ffff:127.0.0.1', port: 9802 }]);
   assert.equal(connectHost('*'), '127.0.0.1');
   assert.equal(connectHost('0.0.0.0'), '127.0.0.1');
   assert.equal(connectHost('::'), '::1');
-  assert.equal(connectHost('100.101.102.103'), '100.101.102.103');
+  assert.equal(connectHost('127.0.0.2'), '127.0.0.2');
+  assert.equal(connectHost('::ffff:127.0.0.1'), '127.0.0.1');
+  assert.equal(connectHost('100.101.102.103'), null, 'a LAN or tailnet address is not read');
+  assert.equal(connectHost('example.invalid'), null);
   assert.equal(repoFromPath('/Users/me/.cache/huggingface/hub/models--Vontra--Qwen3.8-27B-MLX-4bit/snapshots/70ae7f'), 'Vontra/Qwen3.8-27B-MLX-4bit');
   assert.equal(repoFromPath('/tmp/plain'), null);
 });
 
+test('chooseSocket: the pid must listen where it says, on loopback, and unambiguously', () => {
+  const e = port => ({ port });
+  assert.deepEqual(chooseSocket(e(9000), [{ host: '::1', port: 9000 }, { host: '*', port: 9000 }]), { host: '127.0.0.1', port: 9000, portFrom: 'args' });
+  assert.match(chooseSocket(e(9000), [{ host: '127.0.0.1', port: 9001 }]).reason, /does not listen on its --port 9000/);
+  assert.match(chooseSocket(e(9000), [{ host: '192.0.2.7', port: 9000 }]).reason, /on a loopback address/);
+  assert.equal(chooseSocket(e(9000), []).quiet, true, 'not listening yet is not worth a line');
+  assert.deepEqual(chooseSocket(e(null), [{ host: '127.0.0.1', port: 9100 }]), { host: '127.0.0.1', port: 9100, portFrom: 'socket' });
+  assert.match(chooseSocket(e(null), [{ host: '127.0.0.1', port: 9100 }, { host: '127.0.0.1', port: 9101 }]).reason, /2 ports and names none/);
+  assert.match(chooseSocket(e(null), [{ host: '10.0.0.5', port: 9100 }]).reason, /only on non-loopback/);
+});
+
 // --- discovery as a whole ---------------------------------------------------------
 
-/** A fake exec: `ps` answers with `ps`, `lsof` per pid from `lsof`. Records every call. */
-function fakeExec({ ps = PS_LIVE, lsof = {}, lsofMissing = false, psFails = false } = {}) {
+/**
+ * A fake exec: `ps` answers with `ps`; `lsof -d txt` with the pid's
+ * executable from `exe`; `lsof -iTCP` with its listen addresses from
+ * `listen`. Records every call.
+ */
+function fakeExec({ ps = PS_LIVE, exe = EXE, listen = {}, lsofMissing = false, psFails = false } = {}) {
   const calls = [];
   const exec = async (command, args) => {
     calls.push([command, ...args]);
@@ -179,33 +235,55 @@ function fakeExec({ ps = PS_LIVE, lsof = {}, lsofMissing = false, psFails = fals
     if (command === 'lsof') {
       if (lsofMissing) return { ok: false, stdout: '', error: { code: 'ENOENT' } };
       const pid = args[args.indexOf('-p') + 1];
-      return { ok: true, stdout: lsof[pid] ?? '', error: lsof[pid] ? null : { code: 1 } };
+      if (args.includes('txt')) {
+        return exe[pid] ? { ok: true, stdout: `p${pid}\nftxt\nn${exe[pid]}\nftxt\nn/usr/lib/dyld\n`, error: null } : { ok: false, stdout: '', error: { code: 1 } };
+      }
+      const addrs = listen[pid] ?? [];
+      return addrs.length ? { ok: true, stdout: `p${pid}\n${addrs.map((a, i) => `f${i + 3}\nn${a}`).join('\n')}\n`, error: null } : { ok: false, stdout: '', error: { code: 1 } };
     }
     throw new Error(`unexpected exec ${command}`);
   };
   return { exec, calls };
 }
 
-test('macOS discovery: one ps for this user, lsof only for an engine without --port, one engine per port', async () => {
-  const { exec, calls } = fakeExec({ ps: `${PS_LIVE}${PS_DECOYS}`, lsof: { 507: 'p507\nf5\nn127.0.0.1:9700\n' } });
+const LISTEN = {
+  1361: ['127.0.0.1:8091'], 10169: ['127.0.0.1:8101'], 14779: ['127.0.0.1:54635'],
+  505: ['*:9123'], 506: ['127.0.0.1:9200'], 507: ['127.0.0.1:9700'], 508: ['127.0.0.1:9300'],
+  509: ['127.0.0.1:9201'], 510: ['[::1]:9400'], 511: ['127.0.0.1:1234'], 512: ['127.0.0.1:1235'],
+  513: ['192.0.2.7:9500'],
+};
+
+test('macOS discovery: one ps for this user, lsof for candidates only, each engine at a loopback socket its pid holds', async () => {
+  const { exec, calls } = fakeExec({ ps: `${PS_LIVE}${PS_DECOYS}`, listen: LISTEN });
   const r = await discoverTensorFoldEngines({ platform: 'darwin', exec, uid: 501 });
   assert.equal(r.ok, true);
   assert.deepEqual(calls[0], ['ps', '-ww', '-U', '501', '-o', 'pid=,args=']);
   assert.ok(calls.every(c => !c.includes('-E') && !c.includes('e')), 'never asks ps for environments');
-  assert.deepEqual(calls.filter(c => c[0] === 'lsof').map(c => c[c.indexOf('-p') + 1]), ['507']);
-  assert.deepEqual(r.engines.map(e => [e.port, e.portFrom, e.host]), [
-    [8091, 'args', '127.0.0.1'], [8101, 'args', '127.0.0.1'], [54635, 'args', '127.0.0.1'],
-    [9123, 'args', '127.0.0.1'], [9200, 'args', '127.0.0.1'], [9700, 'socket', '127.0.0.1'],
-    [9300, 'args', '127.0.0.1'], [9400, 'args', '::1'],
-  ], 'pid 509 shares port 9200 with 506 and is dropped');
+  const asked = [...new Set(calls.filter(c => c[0] === 'lsof').map(c => c[c.indexOf('-p') + 1]))];
+  assert.ok(!asked.some(pid => ['501', '502', '503', '504'].includes(pid)), 'grep, vim and friends are never inspected');
+  assert.deepEqual(r.engines.map(e => [e.pid, e.port, e.portFrom, e.host]), [
+    [1361, 8091, 'args', '127.0.0.1'], [10169, 8101, 'args', '127.0.0.1'], [14779, 54635, 'args', '127.0.0.1'],
+    [505, 9123, 'args', '127.0.0.1'], [506, 9200, 'args', '127.0.0.1'], [507, 9700, 'socket', '127.0.0.1'],
+    [508, 9300, 'args', '127.0.0.1'], [510, 9400, 'args', '::1'],
+  ]);
+  assert.deepEqual(r.skipped.map(s => [s.pid, s.reason]), [
+    [509, 'does not listen on its --port 9200 on a loopback address; not read'],
+    [513, 'does not listen on its --port 9500 on a loopback address; not read'],
+  ]);
+  assert.doesNotMatch(JSON.stringify(r), /example\.invalid|192\.0\.2\.7|dummy-key/);
 });
 
-test('no --port: a process with no listening socket is left out; without lsof the default port stands in', async () => {
+test('no --port and no socket yet: left out quietly; without lsof nothing is trusted and the scan says why', async () => {
   const line = '  700 /opt/tf/bin/tensorfold-native serve Vontra/Loading --name loading\n';
-  const quiet = await discoverTensorFoldEngines({ platform: 'darwin', exec: fakeExec({ ps: line }).exec, uid: 501 });
+  const exe = { 700: '/opt/tf/bin/tensorfold-native' };
+  const quiet = await discoverTensorFoldEngines({ platform: 'darwin', exec: fakeExec({ ps: line, exe }).exec, uid: 501 });
+  assert.equal(quiet.ok, true);
   assert.deepEqual(quiet.engines, [], 'still loading (or not an engine): no card until it listens');
-  const blind = await discoverTensorFoldEngines({ platform: 'darwin', exec: fakeExec({ ps: line, lsofMissing: true }).exec, uid: 501 });
-  assert.deepEqual(blind.engines.map(e => [e.port, e.portFrom]), [[DEFAULT_ENGINE_PORT, 'default']]);
+  assert.deepEqual(quiet.skipped, []);
+  const blind = await discoverTensorFoldEngines({ platform: 'darwin', exec: fakeExec({ ps: line, exe, lsofMissing: true }).exec, uid: 501 });
+  assert.equal(blind.ok, false, 'fail closed: no default port, no engine on its word');
+  assert.match(blind.error, /cannot verify engines: lsof unavailable \(ENOENT\)/);
+  assert.deepEqual(blind.engines, []);
 });
 
 test('a failed process scan is ok:false with the reason, never a throw and never "no engines" silently', async () => {
@@ -215,31 +293,90 @@ test('a failed process scan is ok:false with the reason, never a throw and never
   assert.deepEqual(r.engines, []);
 });
 
-test('Linux discovery reads /proc: this user only, comm first, cmdline exactly, never environ', async t => {
+test('Linux discovery reads /proc: this user only, comm first, exe for identity, sockets from fd links, never environ', async t => {
   const root = await mkdtemp(join(tmpdir(), 'iak-tf-proc-'));
   t.after(() => rm(root, { recursive: true, force: true }));
-  const proc = async (pid, comm, argv) => {
-    await mkdir(join(root, String(pid)));
-    await writeFile(join(root, String(pid), 'comm'), `${comm}\n`);
-    await writeFile(join(root, String(pid), 'cmdline'), `${argv.join('\0')}\0`);
-    await writeFile(join(root, String(pid), 'environ'), `TENSORFOLD_API_KEY=${DUMMY_KEY}\0`);
+  const header = '  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode\n';
+  const row = (addr, port, inode) => `   0: ${addr}:${port.toString(16).toUpperCase()} 00000000:0000 0A 00000000:00000000 00:00000000 00000000  1000        0 ${inode} 1 0\n`;
+  const proc = async (pid, comm, exe, argv, { tcp = '', tcp6 = '', sockets = [] } = {}) => {
+    const dir = join(root, String(pid));
+    await mkdir(join(dir, 'fd'), { recursive: true });
+    await mkdir(join(dir, 'net'));
+    await writeFile(join(dir, 'comm'), `${comm}\n`);
+    await writeFile(join(dir, 'cmdline'), `${argv.join('\0')}\0`);
+    await writeFile(join(dir, 'environ'), `TENSORFOLD_API_KEY=${DUMMY_KEY}\0`);
+    await symlink(exe, join(dir, 'exe'));
+    await writeFile(join(dir, 'net', 'tcp'), `${header}${tcp}`);
+    await writeFile(join(dir, 'net', 'tcp6'), `${header}${tcp6}`);
+    for (const [i, inode] of sockets.entries()) await symlink(`socket:[${inode}]`, join(dir, 'fd', String(i + 3)));
   };
-  await proc(100, 'tensorfold-nati', ['/opt/tf/bin/tensorfold-native', 'serve', 'Vontra/A', '--port', '9801']);
-  await proc(101, 'tensorfold', ['/usr/bin/python3', '/home/me/.venv/bin/tensorfold', 'serve', 'Vontra/B', '--port', '9802']);
-  await proc(102, 'bash', ['/bin/bash', '-c', 'tensorfold-native serve Vontra/C --port 9803']);
+  await proc(100, 'tensorfold-nati', '/opt/tf/bin/tensorfold-native', ['/opt/tf/bin/tensorfold-native', 'serve', 'Vontra/A', '--port', '9801'],
+    { tcp: row('0100007F', 9801, 5551), sockets: [5551] });
+  await proc(101, 'tensorfold', '/usr/bin/python3.12', ['/usr/bin/python3', '/home/me/.venv/bin/tensorfold', 'serve', 'Vontra/B', '--port', '9802'],
+    { tcp6: row('00000000000000000000000000000000', 9802, 5552), sockets: [5552] });
+  await proc(102, 'bash', '/bin/bash', ['/bin/bash', '-c', 'tensorfold-native serve Vontra/C --port 9803']);
+  await proc(103, 'python3', '/usr/bin/python3', ['/usr/bin/python3', '/tmp/report.py', 'tensorfold', 'serve', '--port', '9805']);
+  await proc(104, 'tensorfold-nati', '/opt/tf/bin/tensorfold-native', ['/opt/tf/bin/tensorfold-native', 'serve', 'Fake/Remote', '--host', '192.0.2.7', '--port', '9804'],
+    { tcp: row('070200C0', 9804, 5554), sockets: [5554] });
+  await proc(105, 'tensorfold-nati', '/opt/tf/bin/tensorfold-native', ['/opt/tf/bin/tensorfold-native', 'serve', 'Fake/Other', '--port', '9806'],
+    { tcp: row('0100007F', 9806, 9999), sockets: [5556] });
   await mkdir(join(root, 'self'));
   const reads = [];
+  const real = await import('node:fs/promises');
   const fs = {
-    readdir: async p => (await import('node:fs/promises')).readdir(p),
-    stat: async p => (await import('node:fs/promises')).stat(p),
-    readFile: async (p, enc) => { reads.push(p); return (await import('node:fs/promises')).readFile(p, enc); },
+    readdir: p => real.readdir(p),
+    stat: p => real.stat(p),
+    readlink: p => real.readlink(p),
+    readFile: async (p, enc) => { reads.push(p); return real.readFile(p, enc); },
   };
   const r = await discoverTensorFoldEngines({ platform: 'linux', procRoot: root, uid: process.getuid(), fs, exec: fakeExec().exec });
-  assert.deepEqual(r.engines.map(e => [e.port, e.model]), [[9801, 'Vontra/A'], [9802, 'Vontra/B']]);
+  assert.deepEqual(r.engines.map(e => [e.port, e.host, e.model]), [[9801, '127.0.0.1', 'Vontra/A'], [9802, '::1', 'Vontra/B']]);
+  assert.deepEqual(r.skipped.map(s => s.pid), [104], 'a remote-only socket is not read, and says so');
+  assert.ok(!r.engines.some(e => e.pid === 105), 'a --port whose socket another process holds is not read (quietly: it may still be loading)');
   assert.ok(!reads.some(p => p.endsWith('/environ')), 'never reads a process environment');
   assert.ok(!reads.some(p => p.endsWith('/102/cmdline')), 'argv is read only for candidate processes');
   const other = await discoverTensorFoldEngines({ platform: 'linux', procRoot: root, uid: process.getuid() + 1, fs, exec: fakeExec().exec });
   assert.deepEqual(other.engines, [], "another user's processes are not scanned");
+});
+
+// --- @codexmb's attack, end to end: argv must not choose a host or a key file -------
+
+test('a process that only claims to be an engine gets no request; a real one is read on loopback with no key from argv', async t => {
+  const { port, seen } = await tfServer(t, keyedRoutes());
+  const decoyKey = await keyFile(t, `${DUMMY_KEY}\n`);
+  const ps = [
+    `  601 /usr/bin/printf /tmp/tensorfold-native serve Fake/Model --host example.invalid --port ${port} --api-key-file ${decoyKey}`,
+    `  602 /opt/tf/bin/tensorfold-native serve Fake/Claims --host example.invalid --port ${port} --api-key-file ${decoyKey}`,
+    `  603 /opt/tf/bin/tensorfold-native serve Fake/Remote --host 192.0.2.7 --port 9500 --api-key-file ${decoyKey}`,
+  ].join('\n');
+  const exe = { 601: '/usr/bin/printf', 602: '/opt/tf/bin/tensorfold-native', 603: '/opt/tf/bin/tensorfold-native' };
+  const listen = { 601: [`127.0.0.1:${port}`], 602: [`127.0.0.1:${port}`], 603: ['192.0.2.7:9500'] };
+  const found = await discoverTensorFoldEngines({ platform: 'darwin', exec: fakeExec({ ps, exe, listen }).exec, uid: 501 });
+  assert.deepEqual(found.engines.map(e => [e.pid, e.host, e.port]), [[602, '127.0.0.1', port]], 'printf is not an engine; the remote one is not read');
+
+  const urls = [];
+  const keyReads = [];
+  const { servers } = await collectTensorFoldStatus([], {
+    discovered: found.engines,
+    fetchImpl: (url, opts) => { urls.push(String(url)); return fetch(url, opts); },
+    readKeyFile: async path => { keyReads.push(path); return { token: DUMMY_KEY, note: null }; },
+  });
+  assert.ok(urls.length > 0 && urls.every(u => u.startsWith(`http://127.0.0.1:${port}/`)), `only loopback was asked: ${urls.join(', ')}`);
+  assert.deepEqual(keyReads, [], 'no key file named on a command line is read');
+  assert.ok(seen.every(r => r.auth === null), 'no Bearer header went anywhere');
+  assertGetOnly(seen);
+  assert.equal(servers[0].metrics, METRICS_STATES.AUTH_REQUIRED);
+  assert.match(servers[0].reason, /--api-key-file, which is not read from a command line; add a models\.json entry for port \d+/);
+});
+
+test('a non-loopback address handed in as discovered is ignored, whatever the caller passes', async () => {
+  const urls = [];
+  const { servers, skipped } = await collectTensorFoldStatus([], {
+    discovered: [engine(9, { host: 'example.invalid', apiKeyFile: true }), engine(10, { host: '192.0.2.7' })],
+    fetchImpl: async url => { urls.push(String(url)); throw new Error('no network in this test'); },
+    readKeyFile: async () => { throw new Error('no key file may be read'); },
+  });
+  assert.deepEqual([servers, skipped, urls], [[], [], []]);
 });
 
 // --- merging with the registry, and reading the engines -------------------------
@@ -298,32 +435,44 @@ test('the Studio engine: keyed /health, no key file, so metrics auth_required wi
   assert.equal(s.living_weights.available, null);
 });
 
-test('a keyed engine started with --api-key-file: the key goes to /metrics and the graph only, never /health, never out', async t => {
+test('a keyed engine is read with the key the user configured: a marked registry entry on its port, gated routes only', async t => {
   const { port, seen } = await tfServer(t, keyedRoutes());
   const path = await keyFile(t, `# engine keys\n\nops: ${DUMMY_KEY}\nother-key-not-used\n`);
-  const { servers } = await collectTensorFoldStatus([], { discovered: [engine(port, { name: 'keyed', apiKeyFile: path })] });
+  const [marked] = loadRegistry([{ id: 'mine', host: '127.0.0.1', port, kind: 'openai', engine: 'tensorfold', keyFile: path }]);
+  const { servers } = await collectTensorFoldStatus([marked], { discovered: [engine(port, { name: 'keyed', apiKeyFile: true })] });
   assertGetOnly(seen);
   const auth = Object.fromEntries(seen.map(r => [r.line, r.auth]));
   assert.equal(auth['GET /health'], null);
   assert.equal(auth['GET /metrics'], `Bearer ${DUMMY_KEY}`);
   assert.equal(auth['GET /v1/slide/graph'], `Bearer ${DUMMY_KEY}`);
+  assert.deepEqual([servers[0].id, servers[0].source, servers[0].name], ['mine', 'registry', 'keyed']);
   assert.equal(servers[0].metrics, METRICS_STATES.OK);
   assert.equal(servers[0].tokens.generation_total, 6134);
   assert.doesNotMatch(JSON.stringify(servers), new RegExp(DUMMY_KEY));
+
+  // An entry that does not say TensorFold keeps the old rule: probed without a key.
+  const before = seen.length;
+  const [unmarked] = loadRegistry([{ id: 'unmarked', host: '127.0.0.1', port, kind: 'openai', keyFile: path }]);
+  const keyReads = [];
+  await collectTensorFoldStatus([unmarked], {
+    discovered: [engine(port)], readKeyFile: async p => { keyReads.push(p); return { token: DUMMY_KEY, note: null }; },
+  });
+  assert.deepEqual(keyReads, []);
+  assert.ok(seen.slice(before).every(r => r.auth === null));
 });
 
-test('key files the engine itself would refuse are refused, and a relative path is never guessed at', async t => {
+test('key files the engine itself would refuse are refused; command-line keys are only explained', async t => {
   const { port, seen } = await tfServer(t, keyedRoutes());
   const shared = await keyFile(t, `${DUMMY_KEY}\n`, 0o644);
+  const marked = keyFilePath => loadRegistry([{ id: 'e', host: '127.0.0.1', port, kind: 'openai', engine: 'tensorfold', keyFile: keyFilePath }]);
   const cases = [
-    [engine(port, { apiKeyFile: shared }), /readable by other users; chmod 600/],
-    [engine(port, { apiKeyFile: 'keys/tf.txt' }), /relative path/],
-    [engine(port, { apiKeyFile: join(tmpdir(), 'iak-tf-no-such', 'keys') }), /cannot read key file .* \(ENOENT\)/],
-    [engine(port, { keyOnArgv: true }), /given on the engine's command line; it is not read from there/],
-    [engine(port), /started without --api-key-file/],
+    [marked(shared), [engine(port)], /readable by other users; chmod 600/],
+    [marked(join(tmpdir(), 'iak-tf-no-such', 'keys')), [engine(port)], /cannot read key file .* \(ENOENT\)/],
+    [[], [engine(port, { keyOnArgv: true })], /given on the engine's command line; it is not read from there/],
+    [[], [engine(port)], /started without a key file/],
   ];
-  for (const [e, why] of cases) {
-    const { servers } = await collectTensorFoldStatus([], { discovered: [e] });
+  for (const [entries, discovered, why] of cases) {
+    const { servers } = await collectTensorFoldStatus(entries, { discovered });
     assert.equal(servers[0].metrics, METRICS_STATES.AUTH_REQUIRED);
     assert.match(servers[0].reason, why);
   }

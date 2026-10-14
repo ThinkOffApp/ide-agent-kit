@@ -8,3 +8,6 @@
   508 /usr/bin/python3 -m tensorfold serve Vontra/ViaModule --port 9300
   509 /opt/tf/bin/tensorfold-native serve Vontra/Dup --port 9200
   510 /opt/tf/bin/tensorfold-native serve Vontra/Eq --port=9400 --host=::
+  511 /usr/bin/printf /tmp/tensorfold-native serve Fake/Model --host example.invalid --port 1234 --api-key-file /tmp/dummy-key
+  512 /tmp/tensorfold-native serve Fake/Argv0 --port 1235
+  513 /opt/tf/bin/tensorfold-native serve Fake/Remote --host 192.0.2.7 --port 9500 --api-key-file /tmp/dummy-key

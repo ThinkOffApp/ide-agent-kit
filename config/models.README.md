@@ -84,22 +84,26 @@ Which entries count as TensorFold:
 
 Engines running on this machine do not need an entry at all: the status
 reader also finds this user's `tensorfold-native serve` / `tensorfold serve`
-processes and reads them the same way (`source: "discovered"`). An entry on
-the same loopback port wins: its `id` and `keyFile` are used, and an entry
-with no `engine` needs no auto-detection. An entry with another `engine` on
-that port stays skipped. Turn discovery off with `INTENT_TENSORFOLD_DISCOVER=0`
-or `tensorfold-status --no-discover`.
+processes and reads them the same way (`source: "discovered"`). It checks the
+process's real executable, not just its command line, and reads it only at a
+loopback TCP socket that process is listening on; `--host` is ignored. An
+entry on the same loopback port wins: its `id` is used (and its `keyFile`
+when it is marked `"engine": "tensorfold"`), and an entry with no `engine`
+needs no auto-detection. An entry with another `engine` on that port stays
+skipped. Turn discovery off with `INTENT_TENSORFOLD_DISCOVER=0` or
+`tensorfold-status --no-discover`.
 
 **Keys.** A TensorFold server may gate `/metrics` and `/v1/slide/graph`
 behind a key (`/health` stays open, and says only `{"status": "ok"}` while
 keys are on). The status reader sends a key only on those two routes, and
-only from a file named for that server: the `keyFile` of an entry marked
-`"engine": "tensorfold"`, or the absolute `--api-key-file` a discovered
-engine was started with. The file is read the way the engine reads it (one
-key per line, `label: key` or a bare key, `#` comments) and refused, as the
-engine refuses it, when other users can read it (`chmod 600`). It never uses
-`LLM_API_KEY` / `LLM_API_KEY_FILE`, a key on a command line, or a process's
-environment. Without a usable key it reports `metrics: "auth_required"` and
+only from the `keyFile` of an entry marked `"engine": "tensorfold"`. The file
+is read the way the engine reads it (one key per line, `label: key` or a
+bare key, `#` comments) and refused, as the engine refuses it, when other
+users can read it (`chmod 600`). It never uses `LLM_API_KEY` /
+`LLM_API_KEY_FILE`, a key on a command line, a key file a command line names
+(`--api-key-file`: any process can name any file there), or a process's
+environment. For a keyed engine you started yourself, add an entry for its
+port with `"engine": "tensorfold"` and the same file as `keyFile`. Without a usable key it reports `metrics: "auth_required"` and
 the rest of the card reads unknown. TensorFold Studio's engine is always in
 that state: the app makes a fresh key on every launch, keeps it in memory and
 passes it to the engine in the environment, never in a file.

@@ -141,11 +141,15 @@ export INTENT_TENSORFOLD_DISCOVER=1    # default with a registry; 0 turns it off
   or `INTENT_TENSORFOLD_DISCOVER=1`.
 - **Running engines are found too.** Each read also scans this user's
   processes for `tensorfold-native serve` and `tensorfold serve` (one `ps` on
-  macOS, `/proc` on Linux, no sudo), takes the port from `--port` or, when
-  there is none, from the listening socket (`lsof`), and the model and name
-  from the command line. They are merged with the registry by port and
-  published as `source: "discovered"`. This is how TensorFold Studio's engine,
-  which gets a new random port every launch, gets a card. Process
+  macOS, `/proc` on Linux, no sudo). A command line is only a claim: the
+  process must really be running `tensorfold-native` (or Python running
+  TensorFold), checked against its executable (`lsof -d txt`,
+  `/proc/<pid>/exe`), and it is read only at a loopback TCP socket it is
+  listening on, matching its `--port` when it names one; `--host` is
+  ignored, and without `lsof` nothing is read. The model and name come from
+  the command line. Engines are merged with the registry by port and
+  published as `source: "discovered"`. This is how TensorFold Studio's
+  engine, which gets a new random port every launch, gets a card. Process
   environments are never read.
 - **Not on the heartbeat's path.** It reads on its own timer at the heartbeat
   interval; the beat publishes the last reading and never waits on a socket.
@@ -156,12 +160,13 @@ export INTENT_TENSORFOLD_DISCOVER=1    # default with a registry; 0 turns it off
 - **Which entries:** marked `"engine": "tensorfold"`, or auto-detected from
   their `/metrics`. See `config/models.README.md` in ide-agent-kit, including
   how a keyed server names its key.
-- **Keys come from files only.** A registry entry's `keyFile`, or the
-  `--api-key-file` a discovered engine was started with, read in the engine's
-  key-file format and refused when other users can read the file. TensorFold
-  Studio keeps its engine key in memory and hands it to the engine through
-  the environment, so its engine shows `metrics: "auth_required"`, the model
-  from its command line, and the reason.
+- **Keys come from the registry only.** The `keyFile` of an entry marked
+  `"engine": "tensorfold"`, read in the engine's key-file format and refused
+  when other users can read the file. Never a command line, a key file a
+  command line names, or an environment. TensorFold Studio keeps its engine
+  key in memory and hands it to the engine through the environment, so its
+  engine shows `metrics: "auth_required"`, the model from its command line,
+  and the reason.
 - **TensorFold's default port is 8080, and so is `INTENT_MODEL_ENDPOINT`'s.**
   The served-model probe above may send one short generation request to a
   loopback endpoint to prove what is loaded. On a machine where TensorFold
