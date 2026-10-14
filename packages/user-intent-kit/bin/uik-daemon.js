@@ -76,6 +76,14 @@
  *                        Never a generation request. An unreachable server
  *                        publishes reachable:false; the heartbeat never
  *                        waits on it.
+ *   INTENT_TENSORFOLD_DISCOVER 1 | 0. Find TensorFold engines running on this
+ *                        machine from the process table (this user's
+ *                        `tensorfold-native serve` / `tensorfold serve`;
+ *                        port from --port, else the listening socket) and
+ *                        publish them as source "discovered", merged with
+ *                        the registry by port. Default: on when
+ *                        INTENT_TENSORFOLD_REGISTRY is set; set 1 to run it
+ *                        with no registry at all, 0 to turn it off.
  *   INTENT_TENSORFOLD_SCOPE local (default) | all. local = only entries on
  *                        loopback, i.e. servers on THIS machine, so each
  *                        machine's card carries its own servers. all = every

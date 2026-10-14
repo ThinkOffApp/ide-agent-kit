@@ -1,0 +1,1 @@
+{"next":1,"facts":[],"model":{"layers":0,"kinds":"","pocket":{"neurons":0,"layers":[],"used":[]},"shards":[{"name":"model-00001-of-00003.safetensors","bytes":5343268662,"pocket":false,"layers":[]},{"name":"model-00002-of-00003.safetensors","bytes":5354185130,"pocket":false,"layers":[]},{"name":"model-00003-of-00003.safetensors","bytes":5357087557,"pocket":false,"layers":[]}]}}

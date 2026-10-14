@@ -1,0 +1,1 @@
+{"status": "ok", "model": "bench", "model_ids": ["bench"], "max_batch_size": 1, "warming": false, "memory": {}, "live": {"connections": 1, "waiting": 0, "decode_tokens_per_second": 0.0, "prefill_tokens_per_second": 0.0}}
