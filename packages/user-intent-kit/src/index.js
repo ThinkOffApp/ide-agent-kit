@@ -8,6 +8,16 @@ export { BrowserAdapter } from './adapters/browser.js';
 export { collectHostTelemetry } from './host-telemetry.js';
 export { ServedModelProbe, servedModelEntry, readVerdict, parseEndpoint, VERDICTS } from './served-model.js';
 export {
+  TensorFoldMonitor,
+  probeTensorFold,
+  collectTensorFoldStatus,
+  parsePrometheus,
+  histogramQuantile,
+  TENSORFOLD_ENGINE,
+  STATUS_SCHEMA as TENSORFOLD_STATUS_SCHEMA,
+  METRICS_STATES as TENSORFOLD_METRICS_STATES,
+} from './tensorfold-status.js';
+export {
   ModelAvailabilityProbe,
   describeLocalModels,
   scanLocalModels,

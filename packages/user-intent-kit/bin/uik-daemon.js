@@ -66,12 +66,27 @@
  *                        Defaults under ~/.local/state/user-intent-kit per
  *                        user/device. Preserve it across restarts. Run exactly
  *                        ONE chooser-enabled device publisher per device.
+ *   INTENT_TENSORFOLD_REGISTRY optional path to a model registry
+ *                        (config/models.json in ide-agent-kit). OFF when
+ *                        unset. Each TensorFold entry in it (marked
+ *                        "engine": "tensorfold", or auto-detected from its
+ *                        /metrics) is read with GET /health, GET /metrics
+ *                        and GET /v1/slide/graph on the heartbeat cadence
+ *                        and published under the device's `tensorfold` key.
+ *                        Never a generation request. An unreachable server
+ *                        publishes reachable:false; the heartbeat never
+ *                        waits on it.
+ *   INTENT_TENSORFOLD_SCOPE local (default) | all. local = only entries on
+ *                        loopback, i.e. servers on THIS machine, so each
+ *                        machine's card carries its own servers. all = every
+ *                        entry, for a box that cannot run this daemon.
  */
 
 import { hostname } from 'node:os';
 import { execSync } from 'node:child_process';
 import {
   IntentClient, IAKAdapter, DesktopAdapter, ServedModelProbe, ModelAvailabilityProbe, defaultSearchRoots,
+  TensorFoldMonitor,
 } from '../src/index.js';
 
 const baseUrl = process.env.INTENT_API_BASE || 'https://groupmind.one/api/v1';
@@ -115,10 +130,18 @@ if (userId.toLowerCase() === agentHandle.replace(/^@/, '').toLowerCase()) {
   );
 }
 
+let tensorfold;
+try {
+  tensorfold = new TensorFoldMonitor({ intervalMs: Math.min(pollIntervalMs, 60000) });
+} catch (err) {
+  console.error(`uik-daemon: ${err.message}`);
+  process.exit(1);
+}
+
 const client = new IntentClient({ baseUrl, apiKey, userId, deviceId });
 const iak = new IAKAdapter(client, { agentHandle, machine: deviceId });
 const desktop = new DesktopAdapter(client, {
-  pollIntervalMs, machine: deviceId, kind: deviceKind, model: deviceModel, modelProbe, availabilityProbe,
+  pollIntervalMs, machine: deviceId, kind: deviceKind, model: deviceModel, modelProbe, availabilityProbe, tensorfold,
 });
 
 if (publishDevice) desktop.start();
@@ -158,6 +181,10 @@ console.log(`uik-daemon: model scan  -> ${defaultSearchRoots().join(', ')}`);
 // loopback endpoint, off for anything else. Where it is off the honest
 // reading is `listed`, and the card says so rather than saying serving.
 console.log(`uik-daemon: generation  -> ${modelProbe.generates ? 'on; a token proves what is loaded' : 'off; models report as listed, never served'}`);
+// The TensorFold read-out, and only where it reads from. It is GET-only by
+// construction; the line exists so a card without servers can be traced to
+// "off" rather than guessed at.
+console.log(`uik-daemon: tensorfold  -> ${publishDevice ? tensorfold.describe() : 'off (INTENT_DEVICE_PUBLISH=0)'}`);
 
 const shutdown = async (sig) => {
   console.log(`uik-daemon: ${sig}, shutting down`);

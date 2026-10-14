@@ -170,6 +170,9 @@ const CREDENTIAL_VALUE_FIELDS = Object.freeze([
 // and reported as ENOENT.
 const LOOKS_LIKE_A_TOKEN = /^(sk-|sk_|xfb_|antfarm_|ghp_|github_pat_|Bearer\s)|^[A-Za-z0-9+/_-]{40,}={0,2}$/;
 
+// `engine` names server software, nothing else.
+const ENGINE_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]{0,31}$/;
+
 // Command names that mean "this box is taken". Matched against the process
 // NAME (basename of argv[0]), never against the whole command line, so that a
 // path component like /var/grid/logs cannot fake a running job.
@@ -291,6 +294,17 @@ export function loadRegistry(source, { allowLan = false } = {}) {
           'Set "auth": "bearer", or drop the keyFile.');
       }
     }
+    // engine: which server software answers on this port. Only "tensorfold"
+    // changes behaviour today (the status read-out); any other value says
+    // "not TensorFold, do not auto-detect"; absent means "auto-detect".
+    let engine = null;
+    if (raw.engine !== undefined) {
+      if (typeof raw.engine !== 'string' || !ENGINE_NAME.test(raw.engine.trim())) {
+        throw new RegistryError(
+          `registry entry "${id}": "engine" must be a short name such as "tensorfold", "vllm" or "llama.cpp"`);
+      }
+      engine = raw.engine.trim().toLowerCase();
+    }
     for (const field of MEASUREMENT_ONLY_FIELDS) {
       if (raw[field] !== undefined) {
         throw new RegistryError(
@@ -310,7 +324,7 @@ export function loadRegistry(source, { allowLan = false } = {}) {
         'Pass --allow-lan for a deliberate single-site run.');
     }
     return {
-      id, host, port, kind, sharing, auth, keyFile,
+      id, host, port, kind, sharing, auth, keyFile, engine,
       box: typeof raw.box === 'string' ? raw.box : null,
       owner: typeof raw.owner === 'string' ? raw.owner : null,
       lanOverride: Boolean(lan),
@@ -386,9 +400,13 @@ const NO_TOKEN = Object.freeze({ token: null, keySource: null, keyBlocked: false
  * A keyFile that is configured but unreadable does NOT fall through to the
  * environment. Quietly substituting a different credential for the one the
  * operator named would make "which key was refused?" unanswerable.
+ *
+ * `entryOnly` stops after the entry's own sources. The TensorFold status
+ * reader uses it: the fleet-wide LLM_API_KEY is some other server's key as
+ * far as a status read knows, and a key goes only where it was named.
  */
 export async function resolveEntryToken(entry, {
-  env = process.env, readFileImpl = readFile, statImpl = stat,
+  env = process.env, readFileImpl = readFile, statImpl = stat, entryOnly = false,
 } = {}) {
   const auth = entry?.auth ?? (entry?.keyFile ? 'bearer' : 'none');
   if (auth !== 'bearer') return { ...NO_TOKEN, auth };
@@ -396,6 +414,7 @@ export async function resolveEntryToken(entry, {
   if (entry?.keyFile) {
     return { ...(await readKeyFile(entry.keyFile, KEY_SOURCES.ENTRY_FILE, io)), auth };
   }
+  if (entryOnly) return { ...NO_TOKEN, auth };
   const envPath = typeof env?.LLM_API_KEY_FILE === 'string' ? env.LLM_API_KEY_FILE.trim() : '';
   if (envPath) {
     return { ...(await readKeyFile(envPath, KEY_SOURCES.ENV_FILE, io)), auth };

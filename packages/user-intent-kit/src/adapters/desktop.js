@@ -10,6 +10,7 @@ import { ServedModelProbe } from '../served-model.js';
 import { ModelAvailabilityProbe } from '../model-availability.js';
 import { StatePublisher } from '../state-publisher.js';
 import { ModelSwitcher } from '../model-switcher.js';
+import { TensorFoldMonitor } from '../tensorfold-status.js';
 
 /**
  * Desktop Adapter - detects active window and context on macOS.
@@ -30,6 +31,7 @@ export class DesktopAdapter {
   #pollIntervalMs;
   #publisher;
   #switcher;
+  #tensorfold;
 
   /**
    * @param {import('../client.js').IntentClient} client
@@ -43,10 +45,14 @@ export class DesktopAdapter {
    * @param {import('../model-availability.js').ModelAvailabilityProbe|null} [opts.availabilityProbe]
    *   - what this box has on disk and could fit. Publishes the WEAKER claim,
    *   in its own fields; pass null to turn the disk scan off entirely.
+   * @param {import('../tensorfold-status.js').TensorFoldMonitor|null} [opts.tensorfold]
+   *   - GET-only TensorFold status for the `tensorfold` key. Omit it for the
+   *   environment's configuration (OFF unless INTENT_TENSORFOLD_REGISTRY is
+   *   set); pass null to turn it off whatever the environment says.
    */
   constructor(client, {
     pollIntervalMs = 30000, machine, kind, model, modelProbe, availabilityProbe,
-    hostSources, modelSwitcher, chooserUrl,
+    hostSources, modelSwitcher, chooserUrl, tensorfold,
   } = {}) {
     this.#client = client;
     this.#switcher = modelSwitcher ?? new ModelSwitcher(client, { chooserUrl });
@@ -73,6 +79,11 @@ export class DesktopAdapter {
     if (!Number.isFinite(pollIntervalMs) || pollIntervalMs <= 0) throw new Error('Invalid pollIntervalMs');
     // One timer owns both telemetry and liveness. Default server device TTL is 90s.
     this.#pollIntervalMs = Math.min(pollIntervalMs, 60000);
+    // Same cadence as the heartbeat, on its own timer: the beat reads the
+    // last snapshot and never waits on a TensorFold socket.
+    this.#tensorfold = tensorfold === undefined
+      ? new TensorFoldMonitor({ intervalMs: this.#pollIntervalMs })
+      : tensorfold;
     this.#publisher = new StatePublisher(fields => this.#client.patchDevice(fields), {
       refreshMs: this.#pollIntervalMs,
     });
@@ -150,6 +161,12 @@ export class DesktopAdapter {
     // the heartbeat's path and the first beat goes out without waiting for it.
     if (!this.#switcher.enabled) this.#availabilityProbe?.start();
     this.#switcher.start();
+    // GET-only, so it is safe beside the chooser. The first read publishes
+    // as soon as it lands instead of waiting a whole interval for the card.
+    this.#tensorfold?.start()?.then(snapshot => {
+      if (snapshot && this.#pollTimer) return this.publishState();
+      return undefined;
+    }).catch(() => {});
     // this.#client.startHeartbeat() removed: the StatePublisher's own
     // refreshMs timer now re-sends the last state as the liveness beat, so a
     // second heartbeat mechanism only doubled the writes (c0ed66d, 18 Sep 2026).
@@ -167,6 +184,7 @@ export class DesktopAdapter {
     this.#modelProbe?.stop();
     this.#availabilityProbe?.stop();
     this.#switcher?.stop();
+    this.#tensorfold?.stop();
   }
 
   /**
@@ -212,6 +230,9 @@ export class DesktopAdapter {
       // running it". Empty when there is nothing measured to say.
       ...this.#listedModels(),
       ...(this.#availabilityProbe?.current() ?? {}),
+      // TensorFold servers' live status, one key replaced whole each beat.
+      // Empty until the first GET-only read lands; absent when off.
+      ...(this.#tensorfold?.fields() ?? {}),
     };
 
     try {

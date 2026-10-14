@@ -28,6 +28,28 @@
       "box": "Mac mini (always-on)",
       "sharing": "shared",
       "owner": "@myagent"
+    },
+    {
+      "id": "mb-tensorfold",
+      "host": "localhost",
+      "port": 8091,
+      "kind": "openai",
+      "engine": "tensorfold",
+      "box": "This Mac, TensorFold serving one model (loopback only)",
+      "sharing": "shared",
+      "owner": "@myagent"
+    },
+    {
+      "id": "gb10-tensorfold",
+      "host": "asus3",
+      "port": 8080,
+      "kind": "openai",
+      "engine": "tensorfold",
+      "box": "ASUS Ascent GX10 (GB10), native TensorFold started with an API key file",
+      "sharing": "exclusive",
+      "owner": "@myagent",
+      "auth": "bearer",
+      "keyFile": "~/.iak/example_tensorfold_api_key.txt"
     }
   ]
 }

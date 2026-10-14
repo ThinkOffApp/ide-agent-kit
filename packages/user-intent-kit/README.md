@@ -123,6 +123,89 @@ export INTENT_MODEL_ENDPOINT=127.0.0.1:8080
   as a last resort for a box with no endpoint to ask; a server that answers
   always outranks it.
 
+### TensorFold servers on the device card
+
+Point the daemon at a model registry (ide-agent-kit's `config/models.json`)
+and each TensorFold server in it gets its live status on this machine's
+device card:
+
+```bash
+export INTENT_TENSORFOLD_REGISTRY=~/ide-agent-kit/config/models.json
+export INTENT_TENSORFOLD_SCOPE=local   # default; `all` also reads remote entries
+```
+
+- **GET only.** `/health`, `/metrics` and `/v1/slide/graph`, never a
+  completion, so a status read cannot interfere with a Living Weights lesson.
+- **Off unless set.** Nothing is read or published without the registry path.
+- **Not on the heartbeat's path.** It reads on its own timer at the heartbeat
+  interval; the beat publishes the last reading and never waits on a socket.
+- **One key, replaced whole.** Everything goes under `tensorfold`, so a server
+  removed from the registry disappears from the card on the next beat.
+- **Unreachable is a reading.** A server that does not answer is published as
+  `reachable: false` with the reason; it never takes the heartbeat down.
+- **Which entries:** marked `"engine": "tensorfold"`, or auto-detected from
+  their `/metrics`. See `config/models.README.md` in ide-agent-kit, including
+  how a keyed server names its key.
+- **TensorFold's default port is 8080, and so is `INTENT_MODEL_ENDPOINT`'s.**
+  The served-model probe above may send one short generation request to a
+  loopback endpoint to prove what is loaded. On a machine where TensorFold
+  listens on 8080, set `INTENT_MODEL_GENERATE=0` so the heartbeat never asks it
+  for a token.
+
+The payload, per device:
+
+```json
+"tensorfold": {
+  "schema": 1,
+  "checked_at": "2026-10-14T09:00:00.000Z",
+  "scope": "local",
+  "error": null,
+  "servers": [{
+    "id": "mb-tensorfold", "host": "localhost", "port": 8091, "local": true,
+    "source": "registry", "reachable": true, "reason": null,
+    "model": "NVIDIA-Nemotron-3.5-Lightning-30B-A3B-MLX-4bit", "warming": false,
+    "version": null, "backend": null, "device": null,
+    "memory": { "used_gb": 18.7, "peak_gb": 40.7, "budget_gb": 96.2 },
+    "requests": { "running": 0, "waiting": 0 },
+    "tokens": { "prompt_total": 0, "generation_total": 0 },
+    "tok_s": null, "tok_s_window_s": null, "decode_tok_s": null,
+    "draft": { "drafted": 0, "accepted": 0, "acceptance": null },
+    "ttft_p50_s": null, "kv_cache_usage": 0,
+    "living_weights": { "available": false, "facts": null, "learning": null, "learned": null },
+    "metrics": "ok",
+    "checked_at": "2026-10-14T09:00:00.000Z"
+  }]
+}
+```
+
+A value that could not be read is `null`, never `0`. `error` is set (and
+`servers` empty) when the registry itself could not be read, so "no servers"
+and "could not tell" never look the same.
+
+What the numbers mean:
+
+- `local`: the server runs on this machine (loopback entry). `source` is
+  `registry` (marked `"engine": "tensorfold"`) or `detected`.
+- `memory`: GB, base 10, one decimal, like `mem_total_gb`. `used` is the
+  engine's active memory, `budget` its configured budget.
+- `tokens`: counters since the server started, for finished requests.
+- `tok_s`: generated tokens of requests that finished between two reads,
+  divided by the seconds between them (`tok_s_window_s`). `null` on the first
+  read and after a server restart. `decode_tok_s` is the server's own live
+  decode rate, where the server reports one (the native build does).
+- `draft.acceptance`: accepted over drafted MTP tokens since start, `null`
+  until something was drafted.
+- `ttft_p50_s`: median time to first token since start, estimated from the
+  histogram buckets.
+- `kv_cache_usage`: the fullest stream's cache use, 0 to 1.
+- `living_weights.available`: `/v1/slide/graph` answered (`false` on a 404,
+  `null` when it could not be read). Counts only: the fact text stays on the
+  machine. The native build answers the route even without `--slide`, so
+  there `facts` is the better signal.
+- `metrics`: `ok`, `auth_required`, `auth_rejected` or `unavailable`.
+- `version`, `backend`, `device`: read from `/health` when the server reports
+  them (newer builds), `null` otherwise.
+
 > Note: The older `examples/iak-integration.js` is a one-shot demo and will exit once its setInterval timer is unref'd. Use `uik-daemon` for long-running deployments.
 
 ## Quick start

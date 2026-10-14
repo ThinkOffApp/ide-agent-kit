@@ -1,0 +1,1 @@
+{"status": "ok", "model": "NVIDIA-Nemotron-3.5-Lightning-30B-A3B-MLX-4bit", "model_ids": ["NVIDIA-Nemotron-3.5-Lightning-30B-A3B-MLX-4bit"], "max_batch_size": 8, "warming": false, "memory": {"active": 18747144612, "cache": 0, "peak": 40682525650, "budget": 96207267430, "mlx_budget": 92986041958, "footprint": 19203554976}}
