@@ -102,9 +102,10 @@ Usage:
     daemon:    long-running publisher (desktop state + agent heartbeat) [--interval <sec>]
                Add INTENT_TENSORFOLD_REGISTRY=<models.json> to publish TensorFold status on each beat.
 
-  ide-agent-kit tensorfold-status [--json] [--registry <path>] [--local] [--timeout <ms>] [--config <path>]
-    Live status of every TensorFold server in the model registry, read with GET only
-    (/health, /metrics, /v1/slide/graph). Same object the device heartbeat publishes.
+  ide-agent-kit tensorfold-status [--json] [--registry <path>] [--local] [--no-discover] [--timeout <ms>] [--config <path>]
+    Live status of every TensorFold server in the model registry and every TensorFold engine
+    running on this machine, read with GET only (/health, /metrics, /v1/slide/graph).
+    Same object the device heartbeat publishes.
 
   ide-agent-kit poll --rooms <room1,room2> --api-key <key> --handle <@handle> [--interval <sec>] [--config <path>]
     (Legacy) Poll GroupMind rooms with explicit CLI args. Prefer "rooms watch".
@@ -578,7 +579,12 @@ async function main() {
       console.error('Error: --timeout must be a positive number of milliseconds');
       process.exit(2);
     }
-    const result = await runTensorFoldStatus({ registryPath, scope: opts.local ? 'local' : 'all', json: !!opts.json, timeoutMs });
+    const envRegistry = String(process.env.INTENT_TENSORFOLD_REGISTRY || '').trim();
+    const registryRequired = typeof opts.registry === 'string' || (envRegistry !== '' && !['0', 'off', 'false', 'no'].includes(envRegistry.toLowerCase()));
+    const result = await runTensorFoldStatus({
+      registryPath, registryRequired, discover: !opts['no-discover'],
+      scope: opts.local ? 'local' : 'all', json: !!opts.json, timeoutMs,
+    });
     (result.exitCode === 0 ? console.log : console.error)(result.text);
     process.exit(result.exitCode);
   }

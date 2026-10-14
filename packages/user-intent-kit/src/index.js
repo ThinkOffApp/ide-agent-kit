@@ -17,6 +17,7 @@ export {
   STATUS_SCHEMA as TENSORFOLD_STATUS_SCHEMA,
   METRICS_STATES as TENSORFOLD_METRICS_STATES,
 } from './tensorfold-status.js';
+export { discoverTensorFoldEngines } from './tensorfold-discovery.js';
 export {
   ModelAvailabilityProbe,
   describeLocalModels,

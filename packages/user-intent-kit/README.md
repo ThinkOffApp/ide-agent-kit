@@ -132,11 +132,25 @@ device card:
 ```bash
 export INTENT_TENSORFOLD_REGISTRY=~/ide-agent-kit/config/models.json
 export INTENT_TENSORFOLD_SCOPE=local   # default; `all` also reads remote entries
+export INTENT_TENSORFOLD_DISCOVER=1    # default with a registry; 0 turns it off; 1 alone runs without one
 ```
 
 - **GET only.** `/health`, `/metrics` and `/v1/slide/graph`, never a
   completion, so a status read cannot interfere with a Living Weights lesson.
-- **Off unless set.** Nothing is read or published without the registry path.
+- **Off unless set.** Nothing is read or published without the registry path
+  or `INTENT_TENSORFOLD_DISCOVER=1`.
+- **Running engines are found too.** Each read also scans this user's
+  processes for `tensorfold-native serve` and `tensorfold serve` (one `ps` on
+  macOS, `/proc` on Linux, no sudo). A command line is only a claim: the
+  process must really be running `tensorfold-native` (or Python running
+  TensorFold), checked against its executable (`lsof -d txt`,
+  `/proc/<pid>/exe`), and it is read only at a loopback TCP socket it is
+  listening on, matching its `--port` when it names one; `--host` is
+  ignored, and without `lsof` nothing is read. The model and name come from
+  the command line. Engines are merged with the registry by port and
+  published as `source: "discovered"`. This is how TensorFold Studio's
+  engine, which gets a new random port every launch, gets a card. Process
+  environments are never read.
 - **Not on the heartbeat's path.** It reads on its own timer at the heartbeat
   interval; the beat publishes the last reading and never waits on a socket.
 - **One key, replaced whole.** Everything goes under `tensorfold`, so a server
@@ -146,6 +160,13 @@ export INTENT_TENSORFOLD_SCOPE=local   # default; `all` also reads remote entrie
 - **Which entries:** marked `"engine": "tensorfold"`, or auto-detected from
   their `/metrics`. See `config/models.README.md` in ide-agent-kit, including
   how a keyed server names its key.
+- **Keys come from the registry only.** The `keyFile` of an entry marked
+  `"engine": "tensorfold"`, read in the engine's key-file format and refused
+  when other users can read the file. Never a command line, a key file a
+  command line names, or an environment. TensorFold Studio keeps its engine
+  key in memory and hands it to the engine through the environment, so its
+  engine shows `metrics: "auth_required"`, the model from its command line,
+  and the reason.
 - **TensorFold's default port is 8080, and so is `INTENT_MODEL_ENDPOINT`'s.**
   The served-model probe above may send one short generation request to a
   loopback endpoint to prove what is loaded. On a machine where TensorFold
@@ -160,12 +181,13 @@ The payload, per device:
   "checked_at": "2026-10-14T09:00:00.000Z",
   "scope": "local",
   "error": null,
+  "discovery": "ok",
   "servers": [{
     "id": "mb-tensorfold", "host": "localhost", "port": 8091, "local": true,
-    "source": "registry", "reachable": true, "reason": null,
-    "model": "NVIDIA-Nemotron-3.5-Lightning-30B-A3B-MLX-4bit", "warming": false,
+    "source": "registry", "name": null, "app": null, "reachable": true, "reason": null,
+    "model": "NVIDIA-Nemotron-3.5-Lightning-30B-A3B-MLX-4bit", "model_source": "health", "warming": false,
     "version": null, "backend": null, "device": null,
-    "memory": { "used_gb": 18.7, "peak_gb": 40.7, "budget_gb": 96.2 },
+    "memory": { "used_gb": 18.7, "peak_gb": 40.7, "budget_gb": 96.2, "footprint_gb": 19.2 },
     "requests": { "running": 0, "waiting": 0 },
     "tokens": { "prompt_total": 0, "generation_total": 0 },
     "tok_s": null, "tok_s_window_s": null, "decode_tok_s": null,
@@ -184,10 +206,19 @@ and "could not tell" never look the same.
 
 What the numbers mean:
 
-- `local`: the server runs on this machine (loopback entry). `source` is
-  `registry` (marked `"engine": "tensorfold"`) or `detected`.
+- `local`: the server runs on this machine (a loopback entry or a discovered
+  engine). `source` is `registry` (marked `"engine": "tensorfold"`),
+  `detected` (auto-detected from its `/metrics` or `/health`) or `discovered`
+  (found running in the process table). `name` is the engine's `--name`;
+  `app` is `"TensorFold Studio"` for the engine the app bundles, else null.
+- `model_source`: `health` when `/health` named the model, `args` when it came
+  from the engine's command line (a keyed `/health` says only "ok").
+- `discovery` (top level): `ok`, `off`, or `unavailable` when the process scan
+  failed. An `unavailable` scan is not the same as "no engines running".
 - `memory`: GB, base 10, one decimal, like `mem_total_gb`. `used` is the
-  engine's active memory, `budget` its configured budget.
+  engine's active memory, `budget` its configured budget, `footprint` the
+  process's physical footprint (macOS, including Metal buffers). The native
+  MLX build reports only the footprint.
 - `tokens`: counters since the server started, for finished requests.
 - `tok_s`: generated tokens of requests that finished between two reads,
   divided by the seconds between them (`tok_s_window_s`). `null` on the first

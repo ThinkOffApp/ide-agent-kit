@@ -19,19 +19,33 @@
 //
 // KEYS. A key is sent only to an entry the registry marks
 // `"engine": "tensorfold"`, only when that same entry names its own key
-// (`keyFile`, a path), and only on the two gated routes. The fleet-wide
-// LLM_API_KEY / LLM_API_KEY_FILE fallbacks are NOT used here: those are some
-// other server's credential as far as this reader knows. Auto-detected
-// entries are probed without any key at all. Nothing here logs or returns a
-// token; Prometheus `key="..."` labels (the native server labels its request
-// counter by API key label) are never copied into the output either.
+// (`keyFile`, a path), and only on the two gated routes. The file is read in
+// the engine's own key-file format and refused, as the engine refuses it,
+// when other users can read it. The fleet-wide LLM_API_KEY / LLM_API_KEY_FILE
+// fallbacks are NOT used here: those are some other server's credential as
+// far as this reader knows. Auto-detected entries are probed without any key
+// at all. A discovered engine's command line is never a source of keys: a
+// `--api-key-file` on it is not read (any process of this user can name any
+// file there), a `--api-key` value is not kept, and a key held only in a
+// process's memory or environment (TensorFold Studio's) is not taken. Those
+// engines report `metrics: "auth_required"` with the reason. Nothing here
+// logs or returns a token; Prometheus `key="..."` labels (the native server
+// labels its request counter by API key label) are never copied into the
+// output either.
+//
+// DISCOVERY. Engines running on this machine are found from the process table
+// (tensorfold-discovery.js), each at a loopback socket its own pid listens
+// on, merged with the registry by port, and published with
+// `source: "discovered"`. Same three GETs, same rules.
 //
 // FACT TEXT STAYS ON THE BOX. The slide graph carries what the model was
 // taught, which can be private. Only counts leave this module.
 
 import { homedir } from 'node:os';
 import { join } from 'node:path';
-import { readRegistryFile, resolveEntryToken } from './model-capacity.js';
+import { readFile as fsReadFile, stat as fsStat } from 'node:fs/promises';
+import { readRegistryFile } from './model-capacity.js';
+import { discoverTensorFoldEngines } from './tensorfold-discovery.js';
 
 export const TENSORFOLD_ENGINE = 'tensorfold';
 export const STATUS_SCHEMA = 1;
@@ -152,7 +166,7 @@ export function summarizeHealth(body) {
     version: healthLabel(h.version),
     backend: healthLabel(h.backend),
     device: healthLabel(h.device),
-    memory: { active: finite(mem.active), peak: finite(mem.peak), budget: finite(mem.budget) },
+    memory: { active: finite(mem.active), peak: finite(mem.peak), budget: finite(mem.budget), footprint: finite(mem.footprint) },
     // The native server's own live decode rate (`live` block in /health).
     decodeTokS: finite(isObject(h.live) ? h.live.decode_tokens_per_second : undefined),
   };
@@ -186,6 +200,9 @@ export function summarizeMetrics(series) {
     // its memory block when keys are on, so this is the fallback for `used`.
     deviceMemory: finite(one('device_memory_bytes')),
     deviceMemoryPeak: finite(one('device_memory_peak_bytes')),
+    // macOS: the process's physical footprint including Metal buffers. Its
+    // own field, never folded into `used`: it measures something else.
+    processFootprint: finite(one('process_footprint_bytes')),
   };
 }
 
@@ -359,15 +376,22 @@ export function buildStatus(target, { health, metrics, slide }, {
   // and the new value is the baseline for the next one.
   const sample = generation !== null ? { generation_total: generation, at: clockMs } : previous;
 
+  // /health names what the server serves; a keyed server's /health says only
+  // "ok", and then the command line the engine was started with is the next
+  // best evidence, labelled as such.
+  const argsModel = typeof target.argsModel === 'string' && target.argsModel ? target.argsModel : null;
   const status = {
     id: target.id ?? null,
     host: target.host,
     port: target.port,
     local: isLoopbackHost(target.host),
     source: target.source ?? 'registry',
+    name: target.name ?? null,
+    app: target.app ?? null,
     reachable,
     reason: reasons.length ? reasons.join('; ').slice(0, 300) : null,
-    model: h.model,
+    model: h.model ?? argsModel,
+    model_source: h.model ? 'health' : (argsModel ? 'args' : null),
     warming: h.warming,
     version: h.version,
     backend: h.backend,
@@ -376,6 +400,7 @@ export function buildStatus(target, { health, metrics, slide }, {
       used_gb: gb(h.memory.active ?? (metricsOk ? m.deviceMemory : null)),
       peak_gb: gb(h.memory.peak ?? (metricsOk ? m.deviceMemoryPeak : null)),
       budget_gb: gb(h.memory.budget),
+      footprint_gb: gb(h.memory.footprint ?? (metricsOk ? m.processFootprint : null)),
     },
     requests: metricsOk ? m.requests : { running: null, waiting: null },
     tokens: metricsOk ? m.tokens : { prompt_total: null, generation_total: null },
@@ -424,21 +449,75 @@ function expandHome(path) {
   return s;
 }
 
+const MAX_KEY_FILE_BYTES = 1 << 20;
+
 /**
- * The key for an entry the registry marks TensorFold, from that entry's own
- * keyFile and nothing wider. Returns {token, note}; `note` says why a key
- * could not be used, and never contains the key.
+ * The first key in a TensorFold key file, read the way the engine reads it
+ * (zig/src/server/auth.zig): one key per line, `label: key` or a bare key,
+ * blank lines and `#` comments skipped. Refused, as the engine refuses it,
+ * when it is not a regular file or other users can read it (mode & 044).
+ *
+ * Returns {token, note}. `note` says why no key came out, names the path and
+ * never the contents.
  */
-async function entryToken(entry, env) {
-  if (entry.auth !== 'bearer') return { token: null, note: null };
-  const credential = await resolveEntryToken(entry, { env, entryOnly: true });
-  if (credential.token) return { token: credential.token, note: null };
-  if (!entry.keyFile) return { token: null, note: 'the entry names no keyFile' };
-  return { token: null, note: credential.keyWarning || null };
+export async function readEngineKeyFile(rawPath, { readFileImpl = fsReadFile, statImpl = fsStat } = {}) {
+  const path = expandHome(rawPath);
+  let info;
+  try {
+    info = await statImpl(path);
+  } catch (err) {
+    return { token: null, note: `cannot read key file ${path} (${err.code || 'error'})` };
+  }
+  if (!info.isFile()) return { token: null, note: `key file ${path} is not a regular file` };
+  if (info.mode & 0o044) return { token: null, note: `key file ${path} is readable by other users; chmod 600 it (the engine refuses it too)` };
+  if (info.size > MAX_KEY_FILE_BYTES) return { token: null, note: `key file ${path} exceeds 1 MiB` };
+  let text;
+  try {
+    text = String(await readFileImpl(path, 'utf8'));
+  } catch (err) {
+    return { token: null, note: `cannot read key file ${path} (${err.code || 'error'})` };
+  }
+  for (const raw of text.split(/[\r\n]/)) {
+    const line = raw.trim();
+    if (!line || line.startsWith('#')) continue;
+    const colon = line.indexOf(':');
+    const key = (colon >= 0 ? line.slice(colon + 1) : line).trim();
+    if (key && !/\s/.test(key)) return { token: key, note: null };
+  }
+  return { token: null, note: `key file ${path} holds no key` };
 }
 
 /**
- * Status for every TensorFold server in a loaded registry.
+ * The key for one server, from the registry and nothing wider: the keyFile
+ * of an entry marked TensorFold (auth "bearer"). A discovered engine's
+ * command line only explains why there is none. Returns {token, note};
+ * `note` never contains a key.
+ */
+async function serverToken(entry, engine, readKeyFile) {
+  if (entry?.engine === TENSORFOLD_ENGINE && entry.auth === 'bearer') {
+    if (entry.keyFile) return readKeyFile(entry.keyFile);
+    return { token: null, note: 'the entry names no keyFile' };
+  }
+  if (!engine) return { token: null, note: null };
+  if (engine.app) return { token: null, note: `${engine.app} keeps this engine's key in memory only, so its metrics stay locked` };
+  if (engine.apiKeyFile) {
+    return {
+      token: null,
+      note: `the engine was started with --api-key-file, which is not read from a command line; add a models.json entry for port ${engine.port} with "engine": "tensorfold" and that keyFile`,
+    };
+  }
+  if (engine.keyOnArgv) return { token: null, note: 'the key was given on the engine\'s command line; it is not read from there' };
+  return { token: null, note: 'the engine was started without a key file' };
+}
+
+/** What a discovered engine adds to the target it is probed as. */
+function engineTarget(engine) {
+  return engine ? { name: engine.name ?? null, app: engine.app ?? null, argsModel: engine.model ?? null } : {};
+}
+
+/**
+ * Status for every TensorFold server in a loaded registry, plus every engine
+ * discovery found running on this machine.
  *
  *   engine "tensorfold"   always reported, reachable or not.
  *   engine absent         auto-detected: reported when /metrics carries
@@ -448,36 +527,68 @@ async function entryToken(entry, env) {
  *                         TensorFold earlier in this process and stops
  *                         answering stays on the list as unreachable.
  *   any other engine      skipped, no request sent.
+ *   discovered            an engine from the process table, at a loopback
+ *                         socket its pid was seen listening on. Merged with
+ *                         a loopback registry entry on the same port (the
+ *                         entry keeps its id, and its keyFile when it is
+ *                         marked TensorFold; an entry without an engine
+ *                         needs no auto-detection then), otherwise reported
+ *                         on its own as `source: "discovered"`, without a
+ *                         key. One card per port. A non-loopback address in
+ *                         `discovered` is ignored.
  *
  * `samples` and `detected` are Maps the caller keeps between calls (the
- * heartbeat does; a one-shot CLI passes fresh ones). Never throws.
+ * heartbeat does; a one-shot CLI passes fresh ones). `readKeyFile` is for
+ * tests. Never throws.
  */
 export async function collectTensorFoldStatus(entries, {
   scope = 'all',
+  discovered = null,
+  readKeyFile = readEngineKeyFile,
   fetchImpl = (...a) => fetch(...a),
   timeoutMs = DEFAULT_STATUS_TIMEOUT_MS,
   now = () => Date.now(),
   clock = () => performance.now(),
-  env = process.env,
   samples = new Map(),
   detected = new Map(),
 } = {}) {
   const io = { fetchImpl, timeoutMs };
   const inScope = (entries || []).filter(e => scope === 'all' || isLoopbackHost(e.host));
-  const results = await Promise.all(inScope.map(async entry => {
+  const engines = new Map();
+  for (const engine of Array.isArray(discovered) ? discovered : []) {
+    // Discovery returns loopback addresses only; anything else is not read.
+    if (!Number.isInteger(engine?.port) || !isLoopbackHost(engine.host) || engines.has(engine.port)) continue;
+    engines.set(engine.port, engine);
+  }
+  const claimed = new Set();
+  const stamp = () => new Date(now()).toISOString();
+
+  const probeKnown = async (target, key, entry, engine) => {
+    const { token, note } = await serverToken(entry, engine, readKeyFile);
+    const { status, sample } = await probeTensorFold(target, {
+      ...io, now, clock, token, keyNote: note, previous: samples.get(key) ?? null,
+    });
+    if (sample) samples.set(key, sample);
+    return { server: status };
+  };
+
+  const fromRegistry = inScope.map(async entry => {
     const key = `${String(entry.host).toLowerCase()}:${entry.port}`;
     const target = { id: entry.id, host: entry.host, port: entry.port };
+    const engine = isLoopbackHost(entry.host) ? engines.get(entry.port) : undefined;
+    if (engine) claimed.add(engine.port);
     try {
       if (entry.engine && entry.engine !== TENSORFOLD_ENGINE) {
-        return { skipped: { id: entry.id, reason: `registry says engine "${entry.engine}"` } };
+        const also = engine ? ' (a TensorFold process listens on this port)' : '';
+        return { skipped: { id: entry.id, reason: `registry says engine "${entry.engine}"${also}` } };
       }
       if (entry.engine === TENSORFOLD_ENGINE) {
-        const { token, note } = await entryToken(entry, env);
-        const { status, sample } = await probeTensorFold({ ...target, source: 'registry' }, {
-          ...io, now, clock, token, keyNote: note, previous: samples.get(key) ?? null,
-        });
-        if (sample) samples.set(key, sample);
-        return { server: status };
+        return await probeKnown({ ...target, ...engineTarget(engine), source: 'registry' }, key, entry, engine);
+      }
+      if (engine) {
+        // The process table already says TensorFold: no detection needed.
+        detected.set(key, { tensorfold: true, at: now() });
+        return await probeKnown({ ...target, ...engineTarget(engine), source: 'discovered' }, key, entry, engine);
       }
       const seen = detected.get(key);
       if (seen && seen.tensorfold === false && now() - seen.at < DETECT_RECHECK_MS) {
@@ -485,7 +596,7 @@ export async function collectTensorFoldStatus(entries, {
       }
       const base = baseUrlOf(target);
       const core = await readCore(base, io, null);
-      const first = buildStatus(target, core, { clockMs: clock(), checkedAt: new Date(now()).toISOString() });
+      const first = buildStatus(target, core, { clockMs: clock(), checkedAt: stamp() });
       if (!first.status.reachable) {
         if (seen?.tensorfold) return { server: { ...first.status, source: 'detected' } };
         return { skipped: { id: entry.id, reason: `unreachable, engine unknown (${first.status.reason})` } };
@@ -497,7 +608,7 @@ export async function collectTensorFoldStatus(entries, {
       detected.set(key, { tensorfold: true, at: now() });
       const slide = await readSlide(base, io, null);
       const { status, sample } = buildStatus({ ...target, source: 'detected' }, { ...core, slide }, {
-        previous: samples.get(key) ?? null, clockMs: clock(), checkedAt: new Date(now()).toISOString(),
+        previous: samples.get(key) ?? null, clockMs: clock(), checkedAt: stamp(),
       });
       if (sample) samples.set(key, sample);
       return { server: status };
@@ -506,7 +617,24 @@ export async function collectTensorFoldStatus(entries, {
       // heartbeat that dies on a status read is worse than a missing card.
       return { skipped: { id: entry.id, reason: `status read failed (${err?.name || 'error'})` } };
     }
-  }));
+  });
+
+  // Registry entries claim their ports synchronously above, before any await,
+  // so what is left here is the engines no entry names.
+  const fromDiscovery = [...engines.values()].filter(e => !claimed.has(e.port)).map(async engine => {
+    const key = `${String(engine.host).toLowerCase()}:${engine.port}`;
+    const target = {
+      id: engine.name || `tensorfold-${engine.port}`, host: engine.host, port: engine.port,
+      ...engineTarget(engine), source: 'discovered',
+    };
+    try {
+      return await probeKnown(target, key, null, engine);
+    } catch (err) {
+      return { skipped: { id: target.id, reason: `status read failed (${err?.name || 'error'})` } };
+    }
+  });
+
+  const results = await Promise.all([...fromRegistry, ...fromDiscovery]);
   return {
     servers: results.filter(r => r.server).map(r => r.server),
     skipped: results.filter(r => r.skipped).map(r => r.skipped),
@@ -518,19 +646,22 @@ export async function collectTensorFoldStatus(entries, {
 /**
  * Keeps a cached TensorFold snapshot for the device heartbeat.
  *
- * OFF unless a registry path is given (INTENT_TENSORFOLD_REGISTRY). It runs
- * on its own timer and the heartbeat reads `fields()` synchronously, so a
- * slow or dead server costs a stale card, never a late heartbeat. The
- * registry file is re-read every refresh, so an edit applies without a
- * restart.
+ * OFF unless a registry path is given (INTENT_TENSORFOLD_REGISTRY) or
+ * discovery is asked for (INTENT_TENSORFOLD_DISCOVER=1). With a registry,
+ * discovery of engines running on this machine is on unless
+ * INTENT_TENSORFOLD_DISCOVER=0. It runs on its own timer and the heartbeat
+ * reads `fields()` synchronously, so a slow or dead server costs a stale
+ * card, never a late heartbeat. The registry file is re-read and the process
+ * table re-scanned every refresh, so an edit or a new engine applies without
+ * a restart.
  *
  * Published as ONE key, `tensorfold`, replaced whole on every beat. The
  * intent server merges a PATCH key by key, so a field this monitor stopped
  * sending would otherwise linger on the card forever.
  */
 export class TensorFoldMonitor {
-  #registryPath; #entries; #scope; #intervalMs; #timeoutMs; #fetchImpl; #now; #clock; #env; #warn;
-  #readRegistry; #timer = null; #inFlight = null; #snapshot = null;
+  #registryPath; #entries; #scope; #intervalMs; #timeoutMs; #fetchImpl; #now; #clock; #warn;
+  #readRegistry; #discover; #discoverImpl; #timer = null; #inFlight = null; #snapshot = null;
   #samples = new Map(); #detected = new Map(); #lastWarning = -Infinity;
 
   constructor({
@@ -542,9 +673,10 @@ export class TensorFoldMonitor {
     fetchImpl = (...a) => fetch(...a),
     now = () => Date.now(),
     clock = () => performance.now(),
-    env = process.env,
     warn = message => console.warn(message),
     readRegistry = readRegistryFile,
+    discover = process.env.INTENT_TENSORFOLD_DISCOVER,
+    discoverImpl = discoverTensorFoldEngines,
   } = {}) {
     const path = typeof registryPath === 'string' ? registryPath.trim() : '';
     this.#registryPath = path && !['0', 'off', 'false', 'no'].includes(path.toLowerCase()) ? expandHome(path) : null;
@@ -558,19 +690,32 @@ export class TensorFoldMonitor {
     this.#fetchImpl = fetchImpl;
     this.#now = now;
     this.#clock = clock;
-    this.#env = env;
     this.#warn = warn;
     this.#readRegistry = readRegistry;
+    // true/false as given; a string from the environment; unset means "with
+    // a registry, yes". In-memory entries (tests, embedders) never scan
+    // unless asked: a test must not read the developer's process table.
+    let wantDiscover = null;
+    if (typeof discover === 'boolean') wantDiscover = discover;
+    else if (typeof discover === 'string' && discover.trim()) {
+      const v = discover.trim().toLowerCase();
+      if (['1', 'on', 'yes', 'true'].includes(v)) wantDiscover = true;
+      else if (['0', 'off', 'no', 'false'].includes(v)) wantDiscover = false;
+      else throw new Error('INTENT_TENSORFOLD_DISCOVER must be 1 or 0');
+    }
+    this.#discover = wantDiscover ?? Boolean(this.#registryPath);
+    this.#discoverImpl = discoverImpl;
   }
 
-  get enabled() { return Boolean(this.#registryPath || this.#entries); }
+  get enabled() { return Boolean(this.#registryPath || this.#entries || this.#discover); }
 
   get scope() { return this.#scope; }
 
   /** For a log line. A path and a scope, never a key. */
   describe() {
-    if (!this.enabled) return 'off (set INTENT_TENSORFOLD_REGISTRY to a models.json to turn it on)';
-    return `${this.#registryPath ?? 'in-memory registry'} (scope ${this.#scope}, every ${Math.round(this.#intervalMs / 1000)}s, GET only)`;
+    if (!this.enabled) return 'off (set INTENT_TENSORFOLD_REGISTRY to a models.json, or INTENT_TENSORFOLD_DISCOVER=1, to turn it on)';
+    const source = this.#registryPath ?? (this.#entries ? 'in-memory registry' : 'no registry');
+    return `${source} (scope ${this.#scope}, every ${Math.round(this.#intervalMs / 1000)}s, GET only, discovery ${this.#discover ? 'on' : 'off'})`;
   }
 
   /** What the heartbeat publishes: {} when off or before the first read. */
@@ -588,21 +733,37 @@ export class TensorFoldMonitor {
 
   async #read() {
     const checkedAt = new Date(this.#now()).toISOString();
-    let entries;
-    try {
-      entries = this.#entries ?? await this.#readRegistry(this.#registryPath);
-    } catch (err) {
-      const message = String(err?.message || 'unknown error').slice(0, 200);
-      this.#warning(`registry unreadable, publishing the error instead of servers: ${message}`);
-      // An error is not an empty list: `error` says the list is unknown.
-      this.#snapshot = { schema: STATUS_SCHEMA, checked_at: checkedAt, scope: this.#scope, error: `registry unreadable: ${message}`, servers: [] };
-      return this.#snapshot;
+    let entries = [];
+    let error = null;
+    if (this.#entries || this.#registryPath) {
+      try {
+        entries = this.#entries ?? await this.#readRegistry(this.#registryPath);
+      } catch (err) {
+        const message = String(err?.message || 'unknown error').slice(0, 200);
+        this.#warning(`registry unreadable, publishing the error with whatever discovery found: ${message}`);
+        // An error is not an empty list: `error` says the registry's part
+        // of the list is unknown.
+        error = `registry unreadable: ${message}`;
+      }
+    }
+    let discovered = null;
+    let discovery = 'off';
+    if (this.#discover) {
+      let found;
+      try { found = await this.#discoverImpl(); } catch { found = { ok: false, error: 'process scan failed', engines: [] }; }
+      discovery = found?.ok ? 'ok' : 'unavailable';
+      if (!found?.ok) this.#warning(`engine discovery unavailable: ${found?.error || 'unknown error'}`);
+      discovered = found?.engines ?? [];
     }
     const { servers } = await collectTensorFoldStatus(entries, {
-      scope: this.#scope, fetchImpl: this.#fetchImpl, timeoutMs: this.#timeoutMs,
-      now: this.#now, clock: this.#clock, env: this.#env, samples: this.#samples, detected: this.#detected,
+      scope: this.#scope, discovered, fetchImpl: this.#fetchImpl, timeoutMs: this.#timeoutMs,
+      now: this.#now, clock: this.#clock, samples: this.#samples, detected: this.#detected,
     });
-    this.#snapshot = { schema: STATUS_SCHEMA, checked_at: checkedAt, scope: this.#scope, error: null, servers };
+    // A discovered engine's port changes on every relaunch (TensorFold Studio
+    // picks a free one), so rate samples for ports no longer on the card go.
+    const live = new Set(servers.map(s => `${String(s.host).toLowerCase()}:${s.port}`));
+    for (const key of this.#samples.keys()) if (!live.has(key)) this.#samples.delete(key);
+    this.#snapshot = { schema: STATUS_SCHEMA, checked_at: checkedAt, scope: this.#scope, error, discovery, servers };
     return this.#snapshot;
   }
 

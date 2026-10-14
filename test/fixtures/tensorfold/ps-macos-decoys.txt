@@ -1,0 +1,13 @@
+  501 /usr/bin/grep -E tensorfold serve
+  502 vim /Users/me/notes/tensorfold serve.md
+  503 /usr/bin/python3 /Users/me/tools/report.py --about tensorfold serve
+  504 /Users/me/.venv/bin/tensorfold pull Vontra/Small
+  505 /Applications/TensorFold Studio.app/Contents/Resources/engine/bin/tensorfold-native serve /Users/me/Library/Application Support/models/My Model --name Owner/Model --host 0.0.0.0 --port 9123 --slide-graph /Users/me/Library/Application Support/graph.json --slide --api-key-file /Users/me/.tensorfold/keys
+  506 /opt/tf/bin/tensorfold-native serve Vontra/Small --port 9200 --api-key not-a-real-key-x --name small
+  507 /opt/tf/bin/tensorfold-native serve Vontra/NoPort --name noport
+  508 /usr/bin/python3 -m tensorfold serve Vontra/ViaModule --port 9300
+  509 /opt/tf/bin/tensorfold-native serve Vontra/Dup --port 9200
+  510 /opt/tf/bin/tensorfold-native serve Vontra/Eq --port=9400 --host=::
+  511 /usr/bin/printf /tmp/tensorfold-native serve Fake/Model --host example.invalid --port 1234 --api-key-file /tmp/dummy-key
+  512 /tmp/tensorfold-native serve Fake/Argv0 --port 1235
+  513 /opt/tf/bin/tensorfold-native serve Fake/Remote --host 192.0.2.7 --port 9500 --api-key-file /tmp/dummy-key

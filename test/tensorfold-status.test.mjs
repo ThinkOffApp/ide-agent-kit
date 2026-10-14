@@ -212,14 +212,17 @@ test('live recording end to end: the published object, GET only, no key sent', a
     port,
     local: true,
     source: 'registry',
+    name: null,
+    app: null,
     reachable: true,
     reason: null,
     model: LIVE_MODEL,
+    model_source: 'health',
     warming: false,
     version: null,
     backend: null,
     device: null,
-    memory: { used_gb: 18.7, peak_gb: 40.7, budget_gb: 96.2 },
+    memory: { used_gb: 18.7, peak_gb: 40.7, budget_gb: 96.2, footprint_gb: 19.2 },
     requests: { running: 0, waiting: 0 },
     tokens: { prompt_total: 0, generation_total: 0 },
     tok_s: null,
@@ -271,7 +274,7 @@ test('401 on /metrics: "auth required", minimal /health reads as unknown, no key
   assert.equal(status.metrics, METRICS_STATES.AUTH_REQUIRED);
   assert.match(status.reason, /metrics: auth required/);
   assert.equal(status.model, null);
-  assert.deepEqual(status.memory, { used_gb: null, peak_gb: null, budget_gb: null });
+  assert.deepEqual(status.memory, { used_gb: null, peak_gb: null, budget_gb: null, footprint_gb: null });
   assert.deepEqual(status.requests, { running: null, waiting: null }, 'unread is null, never 0');
   assert.equal(status.living_weights.available, null, 'a 401 graph is unknown, not absent');
   assert.match(formatServer(status), /metrics: auth required/);
@@ -437,7 +440,8 @@ const offSwitcher = { enabled: false, refresh: async () => ({}), start() {}, sto
 
 test('monitor: off by default, network-free, publishes nothing', async () => {
   for (const registryPath of ['', 'off', undefined]) {
-    const m = new TensorFoldMonitor({ registryPath, env: {}, fetchImpl: () => { throw new Error('network while off'); } });
+    if (process.env.INTENT_TENSORFOLD_DISCOVER) break;
+    const m = new TensorFoldMonitor({ registryPath, fetchImpl: () => { throw new Error('network while off'); }, discoverImpl: () => { throw new Error('scan while off'); } });
     if (registryPath === undefined && process.env.INTENT_TENSORFOLD_REGISTRY) continue;
     assert.equal(m.enabled, false);
     assert.deepEqual(m.fields(), {});
@@ -451,13 +455,17 @@ test('monitor: off by default, network-free, publishes nothing', async () => {
 
 test('monitor: an unreadable registry is an error on the card, not an empty list', async () => {
   const warnings = [];
-  const m = new TensorFoldMonitor({ registryPath: join(tmpdir(), 'no-such-dir-iak', 'models.json'), warn: w => warnings.push(w) });
+  const m = new TensorFoldMonitor({
+    registryPath: join(tmpdir(), 'no-such-dir-iak', 'models.json'), warn: w => warnings.push(w),
+    discoverImpl: async () => ({ ok: true, error: null, engines: [] }),
+  });
   await m.refresh();
   await m.refresh();
   const { tensorfold } = m.fields();
   assert.equal(tensorfold.schema, STATUS_SCHEMA);
   assert.match(tensorfold.error, /^registry unreadable: /);
   assert.deepEqual(tensorfold.servers, []);
+  assert.equal(tensorfold.discovery, 'ok', 'discovery still ran beside the broken registry');
   assert.equal(warnings.length, 1, 'warned once, not once per beat');
 });
 
@@ -471,8 +479,8 @@ test('monitor: reads the registry file each refresh and keeps the rate between r
   const path = join(dir, 'models.json');
   await writeFile(path, JSON.stringify({ models: [{ id: 'mb-tf', host: 'localhost', port, kind: 'openai', engine: 'tensorfold' }] }));
   let clock = 0;
-  const m = new TensorFoldMonitor({ registryPath: path, scope: 'local', clock: () => clock, intervalMs: 30000 });
-  assert.match(m.describe(), /scope local, every 30s, GET only/);
+  const m = new TensorFoldMonitor({ registryPath: path, scope: 'local', clock: () => clock, intervalMs: 30000, discover: false });
+  assert.match(m.describe(), /scope local, every 30s, GET only, discovery off/);
   await m.refresh();
   clock = 30_000;
   state.generation = 1600;
@@ -545,20 +553,20 @@ test('read-out: human text says "unknown" for absent fields; --json is the heart
   t.after(() => rm(dir, { recursive: true, force: true }));
   const path = join(dir, 'models.json');
   await writeFile(path, JSON.stringify({ models: [{ id: 'mb-tf', host: '127.0.0.1', port, kind: 'openai' }] }));
-  const human = await runTensorFoldStatus({ registryPath: path, callerHost: 'testhost', env: {} });
+  const human = await runTensorFoldStatus({ registryPath: path, callerHost: 'testhost', discover: false });
   assert.equal(human.exitCode, 0);
   assert.match(human.text, /mb-tf {2}127\.0\.0\.1:\d+ {2}reachable {2}\(auto-detected\)/);
   assert.match(human.text, /version: unknown {3}backend: unknown {3}device: unknown/);
   assert.match(human.text, /memory: 18\.7 GB used, 40\.7 GB peak, 96\.2 GB budget/);
   assert.match(human.text, /tok\/s: needs two samples/);
   assert.match(human.text, /living weights: not available/);
-  const json = await runTensorFoldStatus({ registryPath: path, callerHost: 'testhost', json: true, env: {} });
+  const json = await runTensorFoldStatus({ registryPath: path, callerHost: 'testhost', json: true, discover: false });
   const report = JSON.parse(json.text);
   assert.equal(report.schema, STATUS_SCHEMA);
   assert.equal(report.servers[0].model, LIVE_MODEL);
   assertGetOnly(seen);
 
-  const missing = await runTensorFoldStatus({ registryPath: join(dir, 'nope.json'), callerHost: 'testhost' });
+  const missing = await runTensorFoldStatus({ registryPath: join(dir, 'nope.json'), callerHost: 'testhost', discover: false });
   assert.equal(missing.exitCode, 2);
   assert.match(missing.text, /cannot read registry/);
 });
@@ -571,15 +579,16 @@ test('cli: ide-agent-kit tensorfold-status --json runs end to end', async t => {
   await writeFile(path, JSON.stringify({ models: [{ id: 'mb-tf', host: '127.0.0.1', port, kind: 'openai', engine: 'tensorfold' }] }));
   const env = { ...process.env };
   delete env.INTENT_TENSORFOLD_REGISTRY;
+  delete env.INTENT_TENSORFOLD_DISCOVER;
   const run = args => new Promise(resolve => {
     execFile(process.execPath, [join(ROOT, 'bin', 'cli.mjs'), 'tensorfold-status', ...args], { cwd: dir, env, timeout: 20000 },
       (err, stdout, stderr) => resolve({ code: err ? err.code : 0, stdout, stderr }));
   });
-  const ok = await run(['--registry', path, '--json']);
+  const ok = await run(['--registry', path, '--json', '--no-discover']);
   assert.equal(ok.code, 0, ok.stderr);
   const report = JSON.parse(ok.stdout);
   assert.equal(report.servers[0].id, 'mb-tf');
   assert.equal(report.servers[0].source, 'registry');
-  const bad = await run(['--registry', join(dir, 'missing.json')]);
+  const bad = await run(['--registry', join(dir, 'missing.json'), '--no-discover']);
   assert.equal(bad.code, 2);
 });

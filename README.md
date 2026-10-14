@@ -496,7 +496,9 @@ can show a card for it on each machine.
 
 1. List the server in `config/models.json` with `"engine": "tensorfold"` (or
    leave `engine` out and let it be auto-detected). See
-   `config/models.README.md`.
+   `config/models.README.md`. Engines running on this machine, including the
+   one TensorFold Studio starts on a random port, are found from the process
+   table without an entry.
 2. Check what the card will say: `ide-agent-kit tensorfold-status` (add
    `--json` for the exact object).
 3. Turn it on for the publisher: set
@@ -505,7 +507,9 @@ can show a card for it on each machine.
 
 It is read with GET requests only (`/health`, `/metrics`, `/v1/slide/graph`),
 never a completion, and an unreachable server shows as unreachable instead of
-stopping the heartbeat. The payload shape is in
+stopping the heartbeat. Keys are read only from a registry entry's
+`keyFile`, never from a command line; TensorFold Studio keeps its engine key
+in memory, so its card says `metrics: auth required`. The payload shape is in
 `packages/user-intent-kit/README.md`.
 
 UIK v0.2.2 or later recommended for the `uik-daemon` bin. v0.2.0 introduced the daemon, v0.2.1 fixed a silent-exit in the example file, and v0.2.2 added agent-status republish on the heartbeat cadence so the agent slot does not expire while the daemon is running. Pre-0.2.2 daemons publish device state correctly but the agent slot still goes stale after its TTL.
@@ -1207,7 +1211,7 @@ ide-agent-kit gateway <health|agents|trigger|wake> [options]
 ide-agent-kit memory <list|get|set|append|delete|search> [options]
 ide-agent-kit rooms archive [--backfill] [--max-pages N] [--room R]
 ide-agent-kit rooms search "words" [--from handle] [--since 2026-09-20] [--regex] [--limit N]
-ide-agent-kit tensorfold-status [--json] [--registry <path>] [--local] [--timeout <ms>]
+ide-agent-kit tensorfold-status [--json] [--registry <path>] [--local] [--no-discover] [--timeout <ms>]
 ide-agent-kit init [--ide <claude-code|codex|cursor|vscode|gemini>] [--profile <balanced|low-friction>]
 ide-agent-kit acp <spawn|list|status|send|close> [options]
 ide-agent-kit keepalive <start|stop|status> [--pid-file <path>] [--heartbeat-sec <sec>]
