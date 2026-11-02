@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0
 
 /**
- * Host vitals for the UIK agent record (CPU load, temperature, power).
+ * Host vitals for the UIK agent record (CPU load, temperature, power, GPU).
  *
  * Contract: every field is OPTIONAL and a value we cannot read is OMITTED,
  * never zeroed. A zero renders in the dashboard as a real reading — an idle
@@ -374,6 +374,37 @@ function readLinuxTempC(sources) {
 }
 
 /**
+ * The GPU's own vitals, from `nvidia-smi`, Linux only.
+ *
+ * Board thermal zones say nothing about how busy the GPU is: a GPU box at 95%
+ * and one at 5% can read the same zone temperature, so a card needs the GPU's
+ * own load to explain its heat (petrus, 2 Nov 2026). Each field is checked on
+ * its own, since nvidia-smi prints "[N/A]" for whatever a board does not
+ * expose (GB10 has no memory clock, for one). The first GPU is reported; every
+ * box in the fleet has one.
+ *
+ * @returns {{gpu_pct?: number, gpu_temp_c?: number, gpu_mhz?: number, gpu_w?: number}}
+ */
+function readNvidiaGpu(sources) {
+  const line = sources.run('/usr/bin/nvidia-smi', [
+    '--query-gpu=utilization.gpu,temperature.gpu,clocks.sm,power.draw',
+    '--format=csv,noheader,nounits',
+  ]).split('\n')[0];
+  if (!line) return {};
+
+  const [pct, tempC, mhz, watts] = line.split(',').map((field) => {
+    const text = field.trim();
+    return /^-?\d+(\.\d+)?$/.test(text) ? Number(text) : NaN;
+  });
+  const out = {};
+  if (pct >= 0 && pct <= 100) out.gpu_pct = Math.round(pct);
+  if (tempC >= TEMP_MIN_C && tempC <= TEMP_MAX_C) out.gpu_temp_c = Math.round(tempC * 10) / 10;
+  if (mhz > 0) out.gpu_mhz = Math.round(mhz);
+  if (watts > 0) out.gpu_w = Math.round(watts * 10) / 10;
+  return out;
+}
+
+/**
  * Collect what this host can actually report.
  *
  * Temperature and power on macOS live behind `powermetrics`, which requires
@@ -424,6 +455,12 @@ export function collectHostTelemetry({ machine, kind, model, sources = defaultSo
     }
   } catch {
     // No thermal zones exposed; publish without a temperature.
+  }
+
+  try {
+    if (sources.platform() === 'linux') Object.assign(host, readNvidiaGpu(sources));
+  } catch {
+    // No NVIDIA GPU, or no driver: publish without GPU fields.
   }
 
   try {
