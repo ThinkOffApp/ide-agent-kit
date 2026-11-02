@@ -394,3 +394,42 @@ test('a nonsense critical point is dropped rather than published', () => {
     assert.ok(!('temp_limit_c' in host), `published nonsense limit ${bad}`);
   }
 });
+
+// --- the GPU's own vitals, from nvidia-smi ---
+
+const NVSMI = '/usr/bin/nvidia-smi --query-gpu=utilization.gpu,temperature.gpu,clocks.sm,power.draw '
+  + '--format=csv,noheader,nounits';
+
+test('publishes GPU load, temperature, clock and power from nvidia-smi', () => {
+  const host = collectHostTelemetry({ sources: sources({ commands: { [NVSMI]: '95, 72, 2184, 27.64' } }) });
+  assert.equal(host.gpu_pct, 95);
+  assert.equal(host.gpu_temp_c, 72);
+  assert.equal(host.gpu_mhz, 2184);
+  assert.equal(host.gpu_w, 27.6);
+});
+
+test('a GPU field nvidia-smi cannot read is omitted, the rest still published', () => {
+  const host = collectHostTelemetry({ sources: sources({ commands: { [NVSMI]: '40, 61, 1500, [N/A]' } }) });
+  assert.equal(host.gpu_pct, 40);
+  assert.ok(!('gpu_w' in host), 'published an unreadable power draw');
+});
+
+test('an idle GPU publishes 0% load, a real reading', () => {
+  const host = collectHostTelemetry({ sources: sources({ commands: { [NVSMI]: '0, 45, 208, 4.1' } }) });
+  assert.equal(host.gpu_pct, 0);
+});
+
+test('a host without nvidia-smi publishes no GPU fields', () => {
+  const host = collectHostTelemetry({ sources: sources() });
+  for (const key of ['gpu_pct', 'gpu_temp_c', 'gpu_mhz', 'gpu_w']) assert.ok(!(key in host), `published ${key}`);
+});
+
+test('macOS never asks nvidia-smi', () => {
+  const host = collectHostTelemetry({ sources: sources({ platform: 'darwin', commands: { [NVSMI]: '95, 72, 2184, 27' } }) });
+  assert.ok(!('gpu_pct' in host));
+});
+
+test('implausible GPU readings are omitted', () => {
+  const host = collectHostTelemetry({ sources: sources({ commands: { [NVSMI]: '140, 999, -5, abc' } }) });
+  for (const key of ['gpu_pct', 'gpu_temp_c', 'gpu_mhz', 'gpu_w']) assert.ok(!(key in host), `published ${key}`);
+});
