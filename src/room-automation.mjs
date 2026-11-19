@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
-import { execSync } from 'node:child_process';
+import { execFileSync, execSync } from 'node:child_process';
 import { readFileSync, writeFileSync, appendFileSync, existsSync, renameSync, unlinkSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { randomUUID } from 'node:crypto';
@@ -23,6 +23,25 @@ function isAckOnly(body) {
   return ACK_ONLY_PATTERNS.some(pat =>
     cleaned === pat || cleaned.startsWith(pat + ' ') || cleaned.startsWith(pat + '.') || cleaned.startsWith(pat + ',')
   );
+}
+
+const EXEC_SAFE_TOKEN = /^[A-Za-z0-9._@/=+-]+$/;
+
+function argvForExec(template, room, sender) {
+  if ((template || '').includes('${body}')) {
+    return { error: 'exec command may not include ${body}' };
+  }
+  const roomTok = EXEC_SAFE_TOKEN.test(room || '') ? room : '';
+  const senderTok = EXEC_SAFE_TOKEN.test(String(sender || '').replace(/^@+/, '')) ? String(sender).replace(/^@+/, '') : '';
+  const cmd = (template || '')
+    .replace(/\$\{room\}/g, roomTok)
+    .replace(/\$\{sender\}/g, senderTok);
+  if (/[;&|<>`$(){}]/.test(cmd)) {
+    return { error: 'exec command has shell metacharacters' };
+  }
+  const argv = cmd.trim().split(/\s+/).filter(Boolean);
+  if (argv.length === 0) return { error: 'empty exec command' };
+  return { argv };
 }
 
 /**
@@ -395,13 +414,28 @@ async function executeAction(action, msg, apiKey, config, muted = false) {
   }
 
   if (action.type === 'exec') {
-    const cmd = sub(action.command);
     const timeout = action.timeout || 30000;
-    try {
-      const output = execSync(cmd, { encoding: 'utf8', timeout, cwd: action.cwd });
+    const parsed = argvForExec(action.command || '', room, msg.user?.handle || msg.from || '');
+    if (parsed.error) {
       return createReceipt({
         actor: { name: 'automation', kind: 'exec' },
-        action: `exec: ${cmd.slice(0, 80)}`,
+        action: 'exec refused',
+        status: 'error',
+        notes: parsed.error,
+        startedAt,
+      });
+    }
+    const [file, ...args] = parsed.argv;
+    try {
+      const output = execFileSync(file, args, {
+        encoding: 'utf8',
+        timeout,
+        cwd: action.cwd,
+        shell: false,
+      });
+      return createReceipt({
+        actor: { name: 'automation', kind: 'exec' },
+        action: `exec: ${parsed.argv.join(' ').slice(0, 80)}`,
         status: 'ok',
         exitCode: 0,
         stdoutTail: output.slice(-500),
@@ -410,7 +444,7 @@ async function executeAction(action, msg, apiKey, config, muted = false) {
     } catch (e) {
       return createReceipt({
         actor: { name: 'automation', kind: 'exec' },
-        action: `exec: ${cmd.slice(0, 80)}`,
+        action: `exec: ${parsed.argv.join(' ').slice(0, 80)}`,
         status: 'error',
         exitCode: e.status || 1,
         stderrTail: (e.stderr || e.message || '').slice(-500),
@@ -667,4 +701,4 @@ export async function startRoomAutomation({ rooms, apiKey, handle, interval, con
 
 // Exported for tests only: the mute carve-out is the kind of logic that must
 // be provable, not eyeballed, because both of its failure modes are silent.
-export { executeAction as executeActionForTest };
+export { executeAction as executeActionForTest, argvForExec as argvForExecForTest };
