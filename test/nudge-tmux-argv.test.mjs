@@ -119,10 +119,14 @@ test('named files no longer build a tmux shell string', () => {
   const automation = readFileSync(new URL('../src/room-automation.mjs', import.meta.url), 'utf8');
   const notify = readFileSync(new URL('../src/common/notify.mjs', import.meta.url), 'utf8');
   const comments = readFileSync(new URL('../src/comment-poller.mjs', import.meta.url), 'utf8');
-  for (const src of [automation, notify, comments]) {
+  const utils = readFileSync(new URL('../src/utils.mjs', import.meta.url), 'utf8');
+  const ideComments = readFileSync(new URL('../src/ide/comment-poller.mjs', import.meta.url), 'utf8');
+  for (const src of [automation, notify, comments, utils, ideComments]) {
     assert.equal(src.includes('execSync(`tmux'), false);
     assert.equal(src.includes("execSync('sleep"), false);
   }
   assert.equal(notify.includes("execFileSync('tmux'"), true);
   assert.equal(comments.includes("from './common/notify.mjs'"), true);
+  assert.equal(utils.includes("from './common/notify.mjs'"), true);
+  assert.equal(ideComments.includes("from '../comment-poller.mjs'"), true);
 });

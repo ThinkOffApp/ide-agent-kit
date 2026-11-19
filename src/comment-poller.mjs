@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
-import { execSync } from 'node:child_process';
-import { readFileSync, writeFileSync, appendFileSync, existsSync } from 'node:fs';
+import { readFileSync, writeFileSync, appendFileSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { nudgeTmux } from './common/notify.mjs';
+import { fetchJson } from './common/http.mjs';
 
 /**
  * Comment Poller — polls Moltbook posts and GitHub issues/discussions
@@ -46,16 +46,13 @@ function saveSeenIds(path, ids) {
 /**
  * Fetch comments for a Moltbook post.
  */
-function fetchMoltbookComments(postId, baseUrl = 'https://www.moltbook.com') {
+async function fetchMoltbookComments(postId, baseUrl = 'https://www.moltbook.com') {
   try {
-    const result = execSync(
-      `curl -sS "${baseUrl}/api/v1/posts/${postId}/comments"`,
-      { encoding: 'utf8', timeout: 15000 }
-    );
-    const data = JSON.parse(result);
+    const root = String(baseUrl || 'https://www.moltbook.com').replace(/\/$/, '');
+    const data = await fetchJson(`${root}/api/v1/posts/${encodeURIComponent(postId)}/comments`);
     return Array.isArray(data) ? data : (data.comments || []);
   } catch (e) {
-    console.error(`  moltbook ${postId.slice(0, 8)} failed: ${e.message}`);
+    console.error(`  moltbook ${String(postId).slice(0, 8)} failed: ${e.message}`);
     return [];
   }
 }
@@ -63,18 +60,12 @@ function fetchMoltbookComments(postId, baseUrl = 'https://www.moltbook.com') {
 /**
  * Fetch comments for a GitHub issue or discussion.
  */
-function fetchGitHubComments(owner, repo, number, type = 'issues', token = '') {
-  const authHeader = token ? `-H "Authorization: token ${token}"` : '';
+async function fetchGitHubComments(owner, repo, number, type = 'issues', token = '') {
   const endpoint = type === 'discussion'
-    ? `https://api.github.com/repos/${owner}/${repo}/discussions/${number}/comments`
-    : `https://api.github.com/repos/${owner}/${repo}/issues/${number}/comments`;
-
+    ? `https://api.github.com/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/discussions/${encodeURIComponent(number)}/comments`
+    : `https://api.github.com/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/issues/${encodeURIComponent(number)}/comments`;
   try {
-    const result = execSync(
-      `curl -sS ${authHeader} "${endpoint}?per_page=50&sort=created&direction=desc"`,
-      { encoding: 'utf8', timeout: 15000 }
-    );
-    const data = JSON.parse(result);
+    const data = await fetchJson(`${endpoint}?per_page=50&sort=created&direction=desc`, { token });
     return Array.isArray(data) ? data : [];
   } catch (e) {
     console.error(`  github ${owner}/${repo}#${number} failed: ${e.message}`);
@@ -85,14 +76,12 @@ function fetchGitHubComments(owner, repo, number, type = 'issues', token = '') {
 /**
  * Fetch all open issues for a GitHub repo (to discover new comments).
  */
-function fetchGitHubIssues(owner, repo, token = '') {
-  const authHeader = token ? `-H "Authorization: token ${token}"` : '';
+async function fetchGitHubIssues(owner, repo, token = '') {
   try {
-    const result = execSync(
-      `curl -sS ${authHeader} "https://api.github.com/repos/${owner}/${repo}/issues?state=open&sort=updated&direction=desc&per_page=10"`,
-      { encoding: 'utf8', timeout: 15000 }
+    const data = await fetchJson(
+      `https://api.github.com/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/issues?state=open&sort=updated&direction=desc&per_page=10`,
+      { token },
     );
-    const data = JSON.parse(result);
     return Array.isArray(data) ? data : [];
   } catch {
     return [];
@@ -104,7 +93,7 @@ function fetchGitHubIssues(owner, repo, token = '') {
  *
  * @returns {object[]} Array of new comment events
  */
-export function pollComments(config) {
+export async function pollComments(config) {
   const commentsCfg = config?.comments || {};
   const seen = loadSeenIds(commentsCfg.seen_file || SEEN_FILE_DEFAULT);
   const newComments = [];
@@ -115,7 +104,7 @@ export function pollComments(config) {
   const moltBaseUrl = moltbookCfg.base_url || 'https://www.moltbook.com';
 
   for (const postId of posts) {
-    const comments = fetchMoltbookComments(postId, moltBaseUrl);
+    const comments = await fetchMoltbookComments(postId, moltBaseUrl);
     for (const c of comments) {
       const cid = c.id || '';
       const key = `moltbook:${cid}`;
@@ -147,7 +136,7 @@ export function pollComments(config) {
 
     if (repoCfg.number) {
       // Poll specific issue/discussion
-      const comments = fetchGitHubComments(owner, repo, repoCfg.number, type, ghToken);
+      const comments = await fetchGitHubComments(owner, repo, repoCfg.number, type, ghToken);
       for (const c of comments) {
         const cid = String(c.id || '');
         const key = `github:${owner}/${repo}:${cid}`;
@@ -169,10 +158,10 @@ export function pollComments(config) {
       }
     } else if (type === 'issues') {
       // Poll all open issues for new comments
-      const issues = fetchGitHubIssues(owner, repo, ghToken);
+      const issues = await fetchGitHubIssues(owner, repo, ghToken);
       for (const issue of issues) {
         if (!issue.comments || issue.comments === 0) continue;
-        const comments = fetchGitHubComments(owner, repo, issue.number, 'issues', ghToken);
+        const comments = await fetchGitHubComments(owner, repo, issue.number, 'issues', ghToken);
         for (const c of comments) {
           const cid = String(c.id || '');
           const key = `github:${owner}/${repo}:${cid}`;
@@ -220,11 +209,11 @@ export async function startCommentPoller({ config, interval }) {
 
   // Seed: do initial poll to mark existing comments as seen
   console.log(`  seeding existing comments...`);
-  const initial = pollComments(config);
+  const initial = await pollComments(config);
   console.log(`  seeded (${initial.length} comments marked as seen)`);
 
   async function poll() {
-    const newComments = pollComments(config);
+    const newComments = await pollComments(config);
 
     if (newComments.length > 0) {
       for (const c of newComments) {

@@ -1075,7 +1075,7 @@ Each rule scopes which messages reach which action: `match` filters on sender, r
 
 `exec` commands are split on spaces and run without a shell (`execFileSync`, `shell: false`). Quotes, pipes and redirects in a rule no longer work, by design. A rule that needs those should call a script file. `${body}` is refused. `${room}` and `${sender}` must match a strict token and must not start with `-`; a failed value refuses the action instead of running with a missing argument.
 
-`nudge` types the rule text into tmux as one argument after `send-keys -l` (`execFileSync`, no shell). Session names use the same strict token as `${room}` and `${sender}`. The pause before Enter is a timer, not a shell `sleep`.
+`nudge` types the rule text into tmux as one argument after `send-keys -l` (`execFileSync`, no shell). Session names use the same strict token as `${room}` and `${sender}`. The pause before Enter is a timer, not a shell `sleep`. Comment polling uses Node `fetch`; a GitHub token goes in the Authorization header, never on a command line.
 
 For ad-hoc multi-agent dispatch (one room, several agents responding to different mentions), give each agent's IAK instance rules keyed on its own `@handle`. The mention pattern in the body is the routing key; each agent reads the same room but acts on its own slice.
 
