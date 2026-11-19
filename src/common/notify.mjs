@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
-import { execSync } from 'node:child_process';
+import { execFileSync } from 'node:child_process';
 import { appendFileSync, readFileSync, writeFileSync } from 'node:fs';
 
 /**
@@ -8,16 +8,41 @@ import { appendFileSync, readFileSync, writeFileSync } from 'node:fs';
  * Supports tmux nudge and notification file delivery.
  */
 
-export function nudgeTmux(session, text) {
+// Same token as argvForExec in room-automation.mjs.
+const EXEC_SAFE_TOKEN = /^[A-Za-z0-9._@/=+-]+$/;
+
+export function execSafeSession(session) {
+  const v = String(session || '');
+  if (!v) return { error: 'session is empty' };
+  if (v.startsWith('-')) return { error: 'session may not start with -' };
+  if (!EXEC_SAFE_TOKEN.test(v)) return { error: 'session failed the allowed pattern' };
+  return { value: v };
+}
+
+function sleepMs(ms) {
+  const n = Number(ms);
+  if (!Number.isFinite(n) || n <= 0) return;
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, n);
+}
+
+function tmuxArgv(args) {
+  execFileSync('tmux', args, { stdio: 'ignore', timeout: 5000 });
+}
+
+export function nudgeTmux(session, text, opts = {}) {
+  const checked = execSafeSession(session);
+  if (checked.error) return false;
+  const payload = text == null ? '' : String(text);
+  const delayMs = opts.delayMs === undefined ? 300 : opts.delayMs;
   try {
-    execSync(`tmux has-session -t ${JSON.stringify(session)} 2>/dev/null`);
+    tmuxArgv(['has-session', '-t', checked.value]);
   } catch {
     return false;
   }
   try {
-    execSync(`tmux send-keys -t ${JSON.stringify(session)} -l ${JSON.stringify(text)}`);
-    execSync('sleep 0.3');
-    execSync(`tmux send-keys -t ${JSON.stringify(session)} Enter`);
+    tmuxArgv(['send-keys', '-t', checked.value, '-l', payload]);
+    sleepMs(delayMs);
+    tmuxArgv(['send-keys', '-t', checked.value, 'Enter']);
     return true;
   } catch {
     return false;

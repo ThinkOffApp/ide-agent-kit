@@ -3,6 +3,7 @@
 import { execSync } from 'node:child_process';
 import { readFileSync, writeFileSync, appendFileSync, existsSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
+import { nudgeTmux } from './common/notify.mjs';
 
 /**
  * Comment Poller — polls Moltbook posts and GitHub issues/discussions
@@ -40,22 +41,6 @@ function loadSeenIds(path) {
 function saveSeenIds(path, ids) {
   const arr = [...ids].slice(-5000);
   writeFileSync(path, arr.join('\n') + '\n');
-}
-
-function nudgeTmux(session, text) {
-  try {
-    execSync(`tmux has-session -t ${JSON.stringify(session)} 2>/dev/null`);
-  } catch {
-    return false;
-  }
-  try {
-    execSync(`tmux send-keys -t ${JSON.stringify(session)} -l ${JSON.stringify(text)}`);
-    execSync('sleep 0.3');
-    execSync(`tmux send-keys -t ${JSON.stringify(session)} Enter`);
-    return true;
-  } catch {
-    return false;
-  }
 }
 
 /**

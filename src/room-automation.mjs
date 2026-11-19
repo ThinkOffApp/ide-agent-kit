@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
-import { execFileSync, execSync } from 'node:child_process';
+import { execFileSync } from 'node:child_process';
 import { readFileSync, writeFileSync, appendFileSync, existsSync, renameSync, unlinkSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { randomUUID } from 'node:crypto';
@@ -8,6 +8,7 @@ import { createReceipt, appendReceipt } from './receipt.mjs';
 import { canSend, markSent } from './rate-limiter.mjs';
 import { shouldSuppressNudge } from './intent.mjs';
 import { resolveSelfHandle, isSelfSender } from './common/handles.mjs';
+import { nudgeTmux, execSafeSession } from './common/notify.mjs';
 
 // Ack-only messages are low-value and cause loops. Filter them out from automation posts.
 const ACK_ONLY_PATTERNS = [
@@ -471,26 +472,24 @@ async function executeAction(action, msg, apiKey, config, muted = false) {
   if (action.type === 'nudge') {
     const session = config?.tmux?.ide_session || 'claude';
     const text = sub(action.text) || 'check rooms';
-    try {
-      execSync(`tmux send-keys -t ${JSON.stringify(session)} -l ${JSON.stringify(text)}`);
-      execSync('sleep 0.3');
-      execSync(`tmux send-keys -t ${JSON.stringify(session)} Enter`);
-      return createReceipt({
-        actor: { name: 'automation', kind: 'nudge' },
-        action: `nudge tmux ${session}`,
-        status: 'ok',
-        notes: `Sent: ${text}`,
-        startedAt,
-      });
-    } catch (e) {
+    const checked = execSafeSession(session);
+    if (checked.error) {
       return createReceipt({
         actor: { name: 'automation', kind: 'nudge' },
         action: `nudge tmux ${session}`,
         status: 'error',
-        notes: e.message,
+        notes: checked.error,
         startedAt,
       });
     }
+    const ok = nudgeTmux(checked.value, text);
+    return createReceipt({
+      actor: { name: 'automation', kind: 'nudge' },
+      action: `nudge tmux ${checked.value}`,
+      status: ok ? 'ok' : 'error',
+      notes: ok ? `Sent: ${text}` : 'tmux session missing or send-keys failed',
+      startedAt,
+    });
   }
 
   return createReceipt({
