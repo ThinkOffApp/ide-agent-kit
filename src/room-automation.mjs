@@ -27,15 +27,30 @@ function isAckOnly(body) {
 
 const EXEC_SAFE_TOKEN = /^[A-Za-z0-9._@/=+-]+$/;
 
+function execSafeValue(name, value) {
+  const v = String(value || '');
+  if (!v) return { error: `${name} is empty` };
+  if (v.startsWith('-')) return { error: `${name} may not start with -` };
+  if (!EXEC_SAFE_TOKEN.test(v)) return { error: `${name} failed the allowed pattern` };
+  return { value: v };
+}
+
 function argvForExec(template, room, sender) {
   if ((template || '').includes('${body}')) {
     return { error: 'exec command may not include ${body}' };
   }
-  const roomTok = EXEC_SAFE_TOKEN.test(room || '') ? room : '';
-  const senderTok = EXEC_SAFE_TOKEN.test(String(sender || '').replace(/^@+/, '')) ? String(sender).replace(/^@+/, '') : '';
-  const cmd = (template || '')
-    .replace(/\$\{room\}/g, roomTok)
-    .replace(/\$\{sender\}/g, senderTok);
+  let cmd = template || '';
+  if (cmd.includes('${room}')) {
+    const r = execSafeValue('room', room);
+    if (r.error) return r;
+    cmd = cmd.replace(/\$\{room\}/g, r.value);
+  }
+  if (cmd.includes('${sender}')) {
+    const raw = String(sender || '').replace(/^@+/, '');
+    const s = execSafeValue('sender', raw);
+    if (s.error) return s;
+    cmd = cmd.replace(/\$\{sender\}/g, s.value);
+  }
   if (/[;&|<>`$(){}]/.test(cmd)) {
     return { error: 'exec command has shell metacharacters' };
   }

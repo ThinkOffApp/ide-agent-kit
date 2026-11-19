@@ -1073,6 +1073,8 @@ The same `automation.rules` schema doubles as a per-agent permission table when 
 
 Each rule scopes which messages reach which action: `match` filters on sender, room, mention, keywords, regex; `action.type` constrains the side-effect (`post` / `exec` / `nudge`). A message that matches no rule is ignored. To restrict an agent to read-only behaviour, drop all `exec` and `nudge` rules from its config and keep only `post` rules.
 
+`exec` commands are split on spaces and run without a shell (`execFileSync`, `shell: false`). Quotes, pipes and redirects in a rule no longer work, by design. A rule that needs those should call a script file. `${body}` is refused. `${room}` and `${sender}` must match a strict token and must not start with `-`; a failed value refuses the action instead of running with a missing argument.
+
 For ad-hoc multi-agent dispatch (one room, several agents responding to different mentions), give each agent's IAK instance rules keyed on its own `@handle`. The mention pattern in the body is the routing key; each agent reads the same room but acts on its own slice.
 
 ### Comment Polling (`src/comment-poller.mjs`)
