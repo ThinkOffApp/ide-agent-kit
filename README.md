@@ -1277,12 +1277,15 @@ This profile broadens `tmux.allow` to include common read/build/test commands (`
 ## Tests
 
 ```bash
-npm test
+npm install && npm test
 ```
 
-Runs the whole suite: the IAK tests in `test/` plus the embedded
-user-intent-kit tests. Needs Node.js 20.11 or newer (the suite uses the
-option-object form of `mock.timers.enable`).
+Run from the tree you are testing (a git worktree needs its own
+`npm install`; `user-intent-kit` is `file:packages/user-intent-kit`, and
+without that link files that import `src/intent.mjs` fail to load).
+The suite is the IAK tests in `test/` plus the embedded user-intent-kit
+tests. Needs Node.js 20.11 or newer (the suite uses the option-object
+form of `mock.timers.enable`).
 
 ## Example flow
 

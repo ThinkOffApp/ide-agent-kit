@@ -40,7 +40,22 @@ if (!process.env.FAKE_TMUX_LOG) {
   process.stderr.write('FAKE_TMUX_LOG missing\\n');
   process.exit(1);
 }
-appendFileSync(process.env.FAKE_TMUX_LOG, JSON.stringify(process.argv.slice(2)) + '\\n');
+const argv = process.argv.slice(2);
+if (argv[0] === 'send-keys') {
+  let i = 1;
+  while (i < argv.length) {
+    const a = argv[i];
+    if (a === '--') break;
+    if (a === '-l') { i += 1; continue; }
+    if (a === '-t') { i += 2; continue; }
+    if (a.startsWith('-')) {
+      process.stderr.write('unknown option: ' + a + '\\n');
+      process.exit(1);
+    }
+    break;
+  }
+}
+appendFileSync(process.env.FAKE_TMUX_LOG, JSON.stringify(argv) + '\\n');
 process.exit(0);
 `);
   chmodSync(tmuxPath, 0o755);
@@ -68,10 +83,18 @@ test('nudge types shell characters as one send-keys -l argument', () => {
   assert.equal(ok, true);
   const calls = readArgvLog();
   assert.deepEqual(calls[0], ['has-session', '-t', 'claude']);
-  assert.deepEqual(calls[1], ['send-keys', '-t', 'claude', '-l', SHELL_BODY]);
+  assert.deepEqual(calls[1], ['send-keys', '-t', 'claude', '-l', '--', SHELL_BODY]);
   assert.deepEqual(calls[2], ['send-keys', '-t', 'claude', 'Enter']);
   assert.equal(calls.length, 3);
   assert.equal(existsSync(markerPath), false);
+});
+
+test('leading-dash payload is passed after -- so tmux does not take it as an option', () => {
+  clearArgvLog();
+  const ok = nudgeTmux('claude', '-literal-text', { delayMs: 0 });
+  assert.equal(ok, true);
+  const calls = readArgvLog();
+  assert.deepEqual(calls[1], ['send-keys', '-t', 'claude', '-l', '--', '-literal-text']);
 });
 
 test('bad session names never invoke tmux', () => {

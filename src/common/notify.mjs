@@ -40,7 +40,7 @@ export function nudgeTmux(session, text, opts = {}) {
     return false;
   }
   try {
-    tmuxArgv(['send-keys', '-t', checked.value, '-l', payload]);
+    tmuxArgv(['send-keys', '-t', checked.value, '-l', '--', payload]);
     sleepMs(delayMs);
     tmuxArgv(['send-keys', '-t', checked.value, 'Enter']);
     return true;

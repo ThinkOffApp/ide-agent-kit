@@ -3,7 +3,7 @@
 import { readFileSync, writeFileSync, appendFileSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { nudgeTmux } from './common/notify.mjs';
-import { fetchJson } from './common/http.mjs';
+import { fetchJson, publicFetchErrorMessage } from './common/http.mjs';
 
 /**
  * Comment Poller — polls Moltbook posts and GitHub issues/discussions
@@ -52,7 +52,7 @@ async function fetchMoltbookComments(postId, baseUrl = 'https://www.moltbook.com
     const data = await fetchJson(`${root}/api/v1/posts/${encodeURIComponent(postId)}/comments`);
     return Array.isArray(data) ? data : (data.comments || []);
   } catch (e) {
-    console.error(`  moltbook ${String(postId).slice(0, 8)} failed: ${e.message}`);
+    console.error(`  moltbook ${String(postId).slice(0, 8)} failed: ${publicFetchErrorMessage(e)}`);
     return [];
   }
 }
@@ -68,7 +68,7 @@ async function fetchGitHubComments(owner, repo, number, type = 'issues', token =
     const data = await fetchJson(`${endpoint}?per_page=50&sort=created&direction=desc`, { token });
     return Array.isArray(data) ? data : [];
   } catch (e) {
-    console.error(`  github ${owner}/${repo}#${number} failed: ${e.message}`);
+    console.error(`  github ${owner}/${repo}#${number} failed: ${publicFetchErrorMessage(e)}`);
     return [];
   }
 }
@@ -229,18 +229,41 @@ export async function startCommentPoller({ config, interval }) {
     }
   }
 
-  // Start interval
-  const timer = setInterval(poll, pollInterval * 1000);
+  // Schedule the next tick only after the current poll finishes. setInterval
+  // started overlapping fetches once pollComments became async, and each tick
+  // reloaded its own seen set, so the same comment was delivered more than once.
+  let stopped = false;
+  let timer = null;
+  let inFlight = false;
+
+  async function tick() {
+    if (stopped || inFlight) return;
+    inFlight = true;
+    try {
+      await poll();
+    } finally {
+      inFlight = false;
+      if (!stopped) timer = setTimeout(tick, pollInterval * 1000);
+    }
+  }
+
+  timer = setTimeout(tick, pollInterval * 1000);
+
+  function stop() {
+    stopped = true;
+    if (timer) clearTimeout(timer);
+    timer = null;
+  }
 
   process.on('SIGINT', () => {
     console.log('\nComment poller stopped.');
-    clearInterval(timer);
+    stop();
     process.exit(0);
   });
   process.on('SIGTERM', () => {
-    clearInterval(timer);
+    stop();
     process.exit(0);
   });
 
-  return timer;
+  return { stop };
 }
