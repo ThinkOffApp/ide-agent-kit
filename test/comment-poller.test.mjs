@@ -13,14 +13,14 @@ describe('comment-poller', () => {
     assert.equal(typeof startCommentPoller, 'function');
   });
 
-  it('pollComments returns empty array with no config', () => {
-    const result = pollComments({});
+  it('pollComments returns empty array with no config', async () => {
+    const result = await pollComments({});
     assert.ok(Array.isArray(result));
     assert.equal(result.length, 0);
   });
 
-  it('pollComments returns empty array with empty sources', () => {
-    const result = pollComments({
+  it('pollComments returns empty array with empty sources', async () => {
+    const result = await pollComments({
       comments: {
         moltbook: { posts: [] },
         github: { repos: [] },

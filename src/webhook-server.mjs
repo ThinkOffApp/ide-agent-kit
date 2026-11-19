@@ -3,18 +3,12 @@
 import { createServer } from 'node:http';
 import { createHmac, timingSafeEqual } from 'node:crypto';
 import { appendFileSync } from 'node:fs';
-import { execSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { isEnabled as acpEnabled, validateToken as acpValidateToken, createSession, sendToSession, closeSession, getSession, listSessions } from './acp-sessions.mjs';
+import { nudgeTmux as sendNudge } from './common/notify.mjs';
 
 function nudgeTmux(session) {
-  try {
-    execSync(`tmux has-session -t ${JSON.stringify(session)} 2>/dev/null`);
-    execSync(`tmux send-keys -t ${JSON.stringify(session)} -l "check rooms"`);
-    setTimeout(() => {
-      try { execSync(`tmux send-keys -t ${JSON.stringify(session)} Enter`); } catch {}
-    }, 300);
-  } catch {}
+  sendNudge(session, 'check rooms');
 }
 
 function verifyGitHubSignature(payload, signature, secret) {

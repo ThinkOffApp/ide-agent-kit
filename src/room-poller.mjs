@@ -7,6 +7,7 @@ import { randomUUID } from 'node:crypto';
 import { execSync } from 'node:child_process';
 import { nudgeTmux, nudgeCommand } from './utils.mjs';
 import { resolveSelfHandle, isSelfSender } from './common/handles.mjs';
+import { fetchJson } from './common/http.mjs';
 
 /**
  * Room Poller — polls GroupMind rooms and notifies IDE agent of new messages.
@@ -43,13 +44,9 @@ function saveSeenIds(path, ids) {
 }
 
 async function fetchRoomMessages(room, apiKey, limit = 10) {
-  const url = `https://groupmind.one/api/v1/rooms/${room}/messages?limit=${limit}`;
+  const url = `https://groupmind.one/api/v1/rooms/${encodeURIComponent(room)}/messages?limit=${limit}`;
   try {
-    const result = execSync(
-      `curl -sS -H "Authorization: Bearer ${apiKey}" "${url}"`,
-      { encoding: 'utf8', timeout: 15000 }
-    );
-    const data = JSON.parse(result);
+    const data = await fetchJson(url, { headers: { Authorization: `Bearer ${apiKey}` } });
     return data.messages || (Array.isArray(data) ? data : []);
   } catch (e) {
     console.error(`  fetch ${room} failed: ${e.message}`);

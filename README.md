@@ -1073,6 +1073,10 @@ The same `automation.rules` schema doubles as a per-agent permission table when 
 
 Each rule scopes which messages reach which action: `match` filters on sender, room, mention, keywords, regex; `action.type` constrains the side-effect (`post` / `exec` / `nudge`). A message that matches no rule is ignored. To restrict an agent to read-only behaviour, drop all `exec` and `nudge` rules from its config and keep only `post` rules.
 
+`exec` commands are split on spaces and run without a shell (`execFileSync`, `shell: false`). Quotes, pipes and redirects in a rule no longer work, by design. A rule that needs those should call a script file. `${body}` is refused. `${room}` and `${sender}` must match a strict token and must not start with `-`; a failed value refuses the action instead of running with a missing argument.
+
+`nudge` types the rule text into tmux as one argument after `send-keys -l` (`execFileSync`, no shell). Session names use the same strict token as `${room}` and `${sender}`. The pause before Enter is a timer, not a shell `sleep`. Comment polling uses Node `fetch`; a GitHub token goes in the Authorization header, never on a command line.
+
 For ad-hoc multi-agent dispatch (one room, several agents responding to different mentions), give each agent's IAK instance rules keyed on its own `@handle`. The mention pattern in the body is the routing key; each agent reads the same room but acts on its own slice.
 
 ### Comment Polling (`src/comment-poller.mjs`)
@@ -1273,12 +1277,15 @@ This profile broadens `tmux.allow` to include common read/build/test commands (`
 ## Tests
 
 ```bash
-npm test
+npm install && npm test
 ```
 
-Runs the whole suite: the IAK tests in `test/` plus the embedded
-user-intent-kit tests. Needs Node.js 20.11 or newer (the suite uses the
-option-object form of `mock.timers.enable`).
+Run from the tree you are testing (a git worktree needs its own
+`npm install`; `user-intent-kit` is `file:packages/user-intent-kit`, and
+without that link files that import `src/intent.mjs` fail to load).
+The suite is the IAK tests in `test/` plus the embedded user-intent-kit
+tests. Needs Node.js 20.11 or newer (the suite uses the option-object
+form of `mock.timers.enable`).
 
 ## Example flow
 

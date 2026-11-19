@@ -3,21 +3,19 @@
 // path the poller delivers the notification but never nudges; with the
 // default it nudges (positive control, same stubs).
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync, writeFileSync, chmodSync, mkdirSync, existsSync, readFileSync } from 'node:fs';
+import { mkdtempSync, rmSync, existsSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 import { startRoomPoller } from '../src/team-relay/room-poller.mjs';
+import { mockFetchByUrl, roomPayload } from './helpers/mock-fetch.mjs';
 
 async function runPoll(dir, pollerOverrides) {
-  const stubDir = path.join(dir, 'bin'); mkdirSync(stubDir, { recursive: true });
-  const stub = path.join(stubDir, 'curl');
-  writeFileSync(stub, `#!/bin/sh
-case "$*" in *limit=50*) echo "[]";; *) echo '[{"id":"o1","from":"petrus","body":"claudemm are you there","created_at":"2026-09-02T00:00:01Z"}]';; esac
-`);
-  chmodSync(stub, 0o755);
+  const restoreFetch = mockFetchByUrl((url) => roomPayload(url, {
+    seed: [],
+    poll: [{ id: 'o1', from: 'petrus', body: 'claudemm are you there', created_at: '2026-09-02T00:00:01Z' }],
+  }));
   const marker = path.join(dir, 'nudged');
-  const savedPath = process.env.PATH; process.env.PATH = `${stubDir}:${savedPath}`;
   const logs = []; const origLog = console.log; const origErr = console.error;
   console.log = (...a) => logs.push(a.join(' ')); console.error = (...a) => logs.push(a.join(' '));
   let timers;
@@ -30,7 +28,7 @@ case "$*" in *limit=50*) echo "[]";; *) echo '[{"id":"o1","from":"petrus","body"
   } finally {
     if (timers?.roomTimer) clearInterval(timers.roomTimer);
     if (timers?.dmTimer) clearInterval(timers.dmTimer);
-    console.log = origLog; console.error = origErr; process.env.PATH = savedPath;
+    console.log = origLog; console.error = origErr; restoreFetch();
   }
   return { nudged: existsSync(marker), notified: existsSync(path.join(dir, 'notify')) && /petrus: claudemm are you there/.test(readFileSync(path.join(dir, 'notify'), 'utf8')), log: logs.join('\n') };
 }

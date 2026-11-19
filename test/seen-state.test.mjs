@@ -1,12 +1,13 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // Issue #90 item 1: seen-state is durable and written per handled message.
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync, writeFileSync, readFileSync, readdirSync, chmodSync, mkdirSync, existsSync } from 'node:fs';
+import { mkdtempSync, rmSync, readFileSync, readdirSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 import { saveSeenIds, loadSeenIds } from '../src/common/seen-ids.mjs';
 import { startRoomPoller } from '../src/team-relay/room-poller.mjs';
+import { mockFetchByUrl, roomPayload } from './helpers/mock-fetch.mjs';
 
 test('saveSeenIds writes atomically (no temp file left, content complete, round-trips)', () => {
   const dir = mkdtempSync(path.join(tmpdir(), 'iak-seen-'));
@@ -26,19 +27,17 @@ test('the live poller remembers each message as it is handled, not once per batc
   // re-delivered message 1 (and every message before it). Now message 1 is
   // in the seen-file and its notification line is on disk before the crash.
   const dir = mkdtempSync(path.join(tmpdir(), 'iak-seenlive-'));
-  const savedPath = process.env.PATH;
+  const t1 = new Date(Date.now() - 2000).toISOString();
+  const t2 = new Date(Date.now() - 1000).toISOString();
+  const restoreFetch = mockFetchByUrl((url) => roomPayload(url, {
+    seed: [],
+    poll: [
+      { id: 'm1', from: 'petrus', body: 'hello one', created_at: t1 },
+      { id: 'm2', from: 'petrus', body: 123, created_at: t2 },
+    ],
+  }));
   let timers;
   try {
-    const stubDir = path.join(dir, 'bin'); mkdirSync(stubDir);
-    const stub = path.join(stubDir, 'curl');
-    // first call (seeding, limit=50) must return nothing so the ids are unseen;
-    // later calls return the two messages
-    const t1 = new Date(Date.now() - 2000).toISOString(); const t2 = new Date(Date.now() - 1000).toISOString();
-    writeFileSync(stub, `#!/bin/sh
-case "$*" in *limit=50*) echo "[]";; *) echo '[{"id":"m1","from":"petrus","body":"hello one","created_at":"${t1}"},{"id":"m2","from":"petrus","body":123,"created_at":"${t2}"}]';; esac
-`);
-    chmodSync(stub, 0o755);
-    process.env.PATH = `${stubDir}:${savedPath}`;
     const seenFile = path.join(dir, 'seen'); const notifyFile = path.join(dir, 'notify');
     let threw = false;
     try {
@@ -55,24 +54,24 @@ case "$*" in *limit=50*) echo "[]";; *) echo '[{"id":"m1","from":"petrus","body"
   } finally {
     if (timers?.roomTimer) clearInterval(timers.roomTimer);
     if (timers?.dmTimer) clearInterval(timers.dmTimer);
-    process.env.PATH = savedPath;
+    restoreFetch();
     rmSync(dir, { recursive: true, force: true });
   }
 });
 
 test('with #92 thread context: the state-of-play header lands once, before the first priority line, and no line is written twice', async () => {
   const dir = mkdtempSync(path.join(tmpdir(), 'iak-header-'));
-  const savedPath = process.env.PATH;
+  const t1 = new Date(Date.now() - 2000).toISOString();
+  const t2 = new Date(Date.now() - 1000).toISOString();
+  const restoreFetch = mockFetchByUrl((url) => roomPayload(url, {
+    seed: [],
+    poll: [
+      { id: 's1', from: '@claudeMB', body: 'state: the card is the benchmark table v2, not hardware', created_at: t1 },
+      { id: 'o1', from: 'petrus', body: 'claudemm what is the card', created_at: t2 },
+    ],
+  }));
   let timers;
   try {
-    const stubDir = path.join(dir, 'bin'); mkdirSync(stubDir);
-    const stub = path.join(stubDir, 'curl');
-    const t1 = new Date(Date.now() - 2000).toISOString(); const t2 = new Date(Date.now() - 1000).toISOString();
-    writeFileSync(stub, `#!/bin/sh
-case "$*" in *limit=50*) echo "[]";; *) echo '[{"id":"s1","from":"@claudeMB","body":"state: the card is the benchmark table v2, not hardware","created_at":"${t1}"},{"id":"o1","from":"petrus","body":"claudemm what is the card","created_at":"${t2}"}]';; esac
-`);
-    chmodSync(stub, 0o755);
-    process.env.PATH = `${stubDir}:${savedPath}`;
     const notifyFile = path.join(dir, 'notify');
     const origLog = console.log; console.log = () => {};
     try {
@@ -92,7 +91,7 @@ case "$*" in *limit=50*) echo "[]";; *) echo '[{"id":"s1","from":"@claudeMB","bo
   } finally {
     if (timers?.roomTimer) clearInterval(timers.roomTimer);
     if (timers?.dmTimer) clearInterval(timers.dmTimer);
-    process.env.PATH = savedPath;
+    restoreFetch();
     rmSync(dir, { recursive: true, force: true });
   }
 });

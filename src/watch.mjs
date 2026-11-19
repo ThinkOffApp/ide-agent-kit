@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
 import { watch, readFileSync, statSync } from 'node:fs';
-import { execSync } from 'node:child_process';
+import { nudgeTmux } from './common/notify.mjs';
 
 /**
  * Watch the queue JSONL file for new entries and trigger tmux nudge immediately.
@@ -65,26 +65,4 @@ export function watchQueue(config, onNewEvent) {
   });
 
   return watcher;
-}
-
-function nudgeTmux(session, text) {
-  try {
-    execSync(`tmux has-session -t ${JSON.stringify(session)} 2>/dev/null`);
-  } catch {
-    console.log(`  tmux session "${session}" not found, skipping nudge`);
-    return;
-  }
-
-  try {
-    execSync(`tmux send-keys -t ${JSON.stringify(session)} -l ${JSON.stringify(text)}`);
-    // Small delay then Enter
-    setTimeout(() => {
-      try {
-        execSync(`tmux send-keys -t ${JSON.stringify(session)} Enter`);
-      } catch {}
-    }, 300);
-    console.log(`  nudged tmux session "${session}"`);
-  } catch (e) {
-    console.log(`  tmux nudge failed: ${e.message}`);
-  }
 }
