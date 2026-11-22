@@ -296,7 +296,8 @@ function readNetwork(sources) {
     // The Wi-Fi port maps to one device (often en1); anything else is wired.
     const ports = sources.run('/usr/sbin/networksetup', ['-listallhardwareports']);
     const wifiDev = (ports.match(/Hardware Port:\s*Wi-Fi\s*\nDevice:\s*(\S+)/) || [])[1];
-    out.network = iface === wifiDev ? 'wifi' : 'ethernet';
+    // Keep the legacy medium label separate from the structured network report.
+    out.network_summary = iface === wifiDev ? 'wifi' : 'ethernet';
   } else if (os === 'linux') {
     const iface = (sources.run('/sbin/ip', ['route', 'show', 'default']).match(/dev\s+(\S+)/) || [])[1];
     if (!iface) return out;
@@ -305,9 +306,9 @@ function readNetwork(sources) {
     if (ip) out.lan_ip = ip;
     try {
       readdirSync(`/sys/class/net/${iface}/wireless`);
-      out.network = 'wifi';
+      out.network_summary = 'wifi';
     } catch {
-      out.network = 'ethernet';
+      out.network_summary = 'ethernet';
     }
   }
   return out;
