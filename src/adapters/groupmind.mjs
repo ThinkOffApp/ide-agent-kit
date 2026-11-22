@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
-import { execFileSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { resolveSelfHandle, isSelfSender } from '../common/handles.mjs';
 import { replyIdOf, embeddedTargetOf, resolveReplyTargets, replyAnnotation } from '../common/reply-context.mjs';
+import { fetchJson } from '../common/http.mjs';
 
 /**
  * GroupMind adapter — polls GroupMind rooms for new messages.
@@ -20,12 +20,9 @@ export const groupmindAdapter = {
     const all = [];
 
     for (const room of rooms) {
-      const url = `https://groupmind.one/api/v1/rooms/${room}/messages?limit=${limit}`;
+      const url = `https://groupmind.one/api/v1/rooms/${encodeURIComponent(room)}/messages?limit=${limit}`;
       try {
-        const result = execFileSync('curl', ['-sS', '-H', `X-API-Key: ${apiKey}`, url], {
-          encoding: 'utf8', timeout: 15000
-        });
-        const data = JSON.parse(result);
+        const data = await fetchJson(url, { headers: { 'X-API-Key': apiKey } });
         const msgs = data.messages || (Array.isArray(data) ? data : []);
         // Resolve reply targets from the same batch: a fresh reply's target is
         // almost always within the last `limit` messages. Without this the

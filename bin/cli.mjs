@@ -1164,7 +1164,7 @@ async function main() {
     const config = loadConfig(opts.config);
 
     if (subcommand === 'poll') {
-      const comments = pollComments(config);
+      const comments = await pollComments(config);
       if (comments.length === 0) {
         console.log('No new comments.');
       } else {

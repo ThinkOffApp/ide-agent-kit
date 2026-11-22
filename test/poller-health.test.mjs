@@ -2,7 +2,7 @@
 // Issue #86: a nudge must not fire while the room poller is down, and the
 // supervisor must say so once (and once more when it is back).
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync, writeFileSync, existsSync, utimesSync, readFileSync, chmodSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync, existsSync, utimesSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { spawnSync, execFile } from 'node:child_process';
@@ -13,6 +13,7 @@ import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { writeHeartbeat, startRoomPoller } from '../src/team-relay/room-poller.mjs';
 import { errLogQuietSince, lastSleepLine, sleepEvidenceSince } from '../scripts/poller-health-alert.mjs';
+import { mockFetchByUrl } from './helpers/mock-fetch.mjs';
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const nudge = path.join(repoRoot, 'tools', 'codex_gui_nudge.sh');
@@ -88,14 +89,8 @@ test('poller-health-alert posts once when down, once when back, nothing in betwe
 });
 
 test('the poller the CLI actually runs writes the heartbeat on every poll', async () => {
-  // src/team-relay/room-poller.mjs is what bin/cli.mjs imports; a stub curl on
-  // PATH keeps it off the network (same trick as the ioreg stub tests).
   const dir = mkdtempSync(path.join(tmpdir(), 'iak-live-'));
-  const stub = path.join(dir, 'curl');
-  writeFileSync(stub, '#!/bin/sh\necho "[]"\n');
-  chmodSync(stub, 0o755);
-  const savedPath = process.env.PATH;
-  process.env.PATH = `${dir}:${savedPath}`;
+  const restoreFetch = mockFetchByUrl(() => []);
   const hb = path.join(dir, 'hb');
   let timers;
   try {
@@ -110,7 +105,7 @@ test('the poller the CLI actually runs writes the heartbeat on every poll', asyn
   } finally {
     if (timers?.roomTimer) clearInterval(timers.roomTimer);
     if (timers?.dmTimer) clearInterval(timers.dmTimer);
-    process.env.PATH = savedPath;
+    restoreFetch();
     rmSync(dir, { recursive: true, force: true });
   }
 });

@@ -3,10 +3,11 @@ import { loadSeenIds, saveSeenIds as saveSeenIdsShared } from '../common/seen-id
 import { enrichEvent } from './enrichment.mjs';
 // SPDX-License-Identifier: AGPL-3.0-only
 
-import { execSync } from 'node:child_process';
 import { readFileSync, writeFileSync, appendFileSync, existsSync, unlinkSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { nudgeCommand } from '../utils.mjs';
+import { nudgeTmux } from '../common/notify.mjs';
+import { fetchJson } from '../common/http.mjs';
 import { shouldSuppressNudge } from '../intent.mjs';
 import { resolveSelfHandle } from '../common/handles.mjs';
 import { resolveReplyTargets, replyAnnotation } from '../common/reply-context.mjs';
@@ -87,30 +88,10 @@ export function isRelevantDirectMessage(message, { selfHandle, humanOnly = false
   return true;
 }
 
-function nudgeTmux(session, text) {
-  try {
-    execSync(`tmux has-session -t ${JSON.stringify(session)} 2>/dev/null`);
-  } catch {
-    return false;
-  }
-  try {
-    execSync(`tmux send-keys -t ${JSON.stringify(session)} -l ${JSON.stringify(text)}`);
-    execSync('sleep 0.3');
-    execSync(`tmux send-keys -t ${JSON.stringify(session)} Enter`);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
 async function fetchRoomMessages(room, apiKey, limit = 10) {
-  const url = `https://groupmind.one/api/v1/rooms/${room}/messages?limit=${limit}`;
+  const url = `https://groupmind.one/api/v1/rooms/${encodeURIComponent(room)}/messages?limit=${limit}`;
   try {
-    const result = execSync(
-      `curl -sS -4 -H "X-API-Key: ${apiKey}" "${url}"`,
-      { encoding: 'utf8', timeout: 15000 }
-    );
-    const data = JSON.parse(result);
+    const data = await fetchJson(url, { headers: { 'X-API-Key': apiKey } });
     return data.messages || (Array.isArray(data) ? data : []);
   } catch (e) {
     console.error(`  fetch ${room} failed: ${e.message}`);
@@ -121,11 +102,7 @@ async function fetchRoomMessages(room, apiKey, limit = 10) {
 async function fetchDirectMessages(apiKey, limit = 100) {
   const url = `https://groupmind.one/api/v1/messages?limit=${limit}`;
   try {
-    const result = execSync(
-      `curl -sS -4 -H "X-API-Key: ${apiKey}" "${url}"`,
-      { encoding: 'utf8', timeout: 15000 }
-    );
-    const data = JSON.parse(result);
+    const data = await fetchJson(url, { headers: { 'X-API-Key': apiKey } });
     return data.messages || (Array.isArray(data) ? data : []);
   } catch (e) {
     console.error(`  fetch direct messages failed: ${e.message}`);

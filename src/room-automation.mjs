@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
-import { execSync } from 'node:child_process';
+import { execFileSync } from 'node:child_process';
 import { readFileSync, writeFileSync, appendFileSync, existsSync, renameSync, unlinkSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { randomUUID } from 'node:crypto';
@@ -8,6 +8,7 @@ import { createReceipt, appendReceipt } from './receipt.mjs';
 import { canSend, markSent } from './rate-limiter.mjs';
 import { shouldSuppressNudge } from './intent.mjs';
 import { resolveSelfHandle, isSelfSender } from './common/handles.mjs';
+import { nudgeTmux, execSafeSession } from './common/notify.mjs';
 
 // Ack-only messages are low-value and cause loops. Filter them out from automation posts.
 const ACK_ONLY_PATTERNS = [
@@ -23,6 +24,40 @@ function isAckOnly(body) {
   return ACK_ONLY_PATTERNS.some(pat =>
     cleaned === pat || cleaned.startsWith(pat + ' ') || cleaned.startsWith(pat + '.') || cleaned.startsWith(pat + ',')
   );
+}
+
+const EXEC_SAFE_TOKEN = /^[A-Za-z0-9._@/=+-]+$/;
+
+function execSafeValue(name, value) {
+  const v = String(value || '');
+  if (!v) return { error: `${name} is empty` };
+  if (v.startsWith('-')) return { error: `${name} may not start with -` };
+  if (!EXEC_SAFE_TOKEN.test(v)) return { error: `${name} failed the allowed pattern` };
+  return { value: v };
+}
+
+function argvForExec(template, room, sender) {
+  if ((template || '').includes('${body}')) {
+    return { error: 'exec command may not include ${body}' };
+  }
+  let cmd = template || '';
+  if (cmd.includes('${room}')) {
+    const r = execSafeValue('room', room);
+    if (r.error) return r;
+    cmd = cmd.replace(/\$\{room\}/g, r.value);
+  }
+  if (cmd.includes('${sender}')) {
+    const raw = String(sender || '').replace(/^@+/, '');
+    const s = execSafeValue('sender', raw);
+    if (s.error) return s;
+    cmd = cmd.replace(/\$\{sender\}/g, s.value);
+  }
+  if (/[;&|<>`$(){}]/.test(cmd)) {
+    return { error: 'exec command has shell metacharacters' };
+  }
+  const argv = cmd.trim().split(/\s+/).filter(Boolean);
+  if (argv.length === 0) return { error: 'empty exec command' };
+  return { argv };
 }
 
 /**
@@ -395,13 +430,28 @@ async function executeAction(action, msg, apiKey, config, muted = false) {
   }
 
   if (action.type === 'exec') {
-    const cmd = sub(action.command);
     const timeout = action.timeout || 30000;
-    try {
-      const output = execSync(cmd, { encoding: 'utf8', timeout, cwd: action.cwd });
+    const parsed = argvForExec(action.command || '', room, msg.user?.handle || msg.from || '');
+    if (parsed.error) {
       return createReceipt({
         actor: { name: 'automation', kind: 'exec' },
-        action: `exec: ${cmd.slice(0, 80)}`,
+        action: 'exec refused',
+        status: 'error',
+        notes: parsed.error,
+        startedAt,
+      });
+    }
+    const [file, ...args] = parsed.argv;
+    try {
+      const output = execFileSync(file, args, {
+        encoding: 'utf8',
+        timeout,
+        cwd: action.cwd,
+        shell: false,
+      });
+      return createReceipt({
+        actor: { name: 'automation', kind: 'exec' },
+        action: `exec: ${parsed.argv.join(' ').slice(0, 80)}`,
         status: 'ok',
         exitCode: 0,
         stdoutTail: output.slice(-500),
@@ -410,7 +460,7 @@ async function executeAction(action, msg, apiKey, config, muted = false) {
     } catch (e) {
       return createReceipt({
         actor: { name: 'automation', kind: 'exec' },
-        action: `exec: ${cmd.slice(0, 80)}`,
+        action: `exec: ${parsed.argv.join(' ').slice(0, 80)}`,
         status: 'error',
         exitCode: e.status || 1,
         stderrTail: (e.stderr || e.message || '').slice(-500),
@@ -422,26 +472,24 @@ async function executeAction(action, msg, apiKey, config, muted = false) {
   if (action.type === 'nudge') {
     const session = config?.tmux?.ide_session || 'claude';
     const text = sub(action.text) || 'check rooms';
-    try {
-      execSync(`tmux send-keys -t ${JSON.stringify(session)} -l ${JSON.stringify(text)}`);
-      execSync('sleep 0.3');
-      execSync(`tmux send-keys -t ${JSON.stringify(session)} Enter`);
-      return createReceipt({
-        actor: { name: 'automation', kind: 'nudge' },
-        action: `nudge tmux ${session}`,
-        status: 'ok',
-        notes: `Sent: ${text}`,
-        startedAt,
-      });
-    } catch (e) {
+    const checked = execSafeSession(session);
+    if (checked.error) {
       return createReceipt({
         actor: { name: 'automation', kind: 'nudge' },
         action: `nudge tmux ${session}`,
         status: 'error',
-        notes: e.message,
+        notes: checked.error,
         startedAt,
       });
     }
+    const ok = nudgeTmux(checked.value, text);
+    return createReceipt({
+      actor: { name: 'automation', kind: 'nudge' },
+      action: `nudge tmux ${checked.value}`,
+      status: ok ? 'ok' : 'error',
+      notes: ok ? `Sent: ${text}` : 'tmux session missing or send-keys failed',
+      startedAt,
+    });
   }
 
   return createReceipt({
@@ -667,4 +715,4 @@ export async function startRoomAutomation({ rooms, apiKey, handle, interval, con
 
 // Exported for tests only: the mute carve-out is the kind of logic that must
 // be provable, not eyeballed, because both of its failure modes are silent.
-export { executeAction as executeActionForTest };
+export { executeAction as executeActionForTest, argvForExec as argvForExecForTest };

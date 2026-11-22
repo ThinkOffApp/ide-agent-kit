@@ -1,39 +1,30 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
-import { execFileSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
+import { fetchJson } from '../common/http.mjs';
 
 /**
  * Comments adapter — polls Moltbook posts and GitHub issues/discussions
  * for new comments. Composite adapter covering two sources.
  */
 
-function fetchMoltbookComments(postId, baseUrl = 'https://www.moltbook.com') {
+async function fetchMoltbookComments(postId, baseUrl = 'https://www.moltbook.com') {
   try {
-    const url = `${baseUrl}/api/v1/posts/${postId}/comments`;
-    const result = execFileSync('curl', ['-sS', url], {
-      encoding: 'utf8', timeout: 15000
-    });
-    const data = JSON.parse(result);
+    const root = String(baseUrl || 'https://www.moltbook.com').replace(/\/$/, '');
+    const data = await fetchJson(`${root}/api/v1/posts/${encodeURIComponent(postId)}/comments`);
     return Array.isArray(data) ? data : (data.comments || []);
   } catch (e) {
-    console.error(`  moltbook ${postId.slice(0, 8)} failed: ${e.message}`);
+    console.error(`  moltbook ${String(postId).slice(0, 8)} failed: ${e.message}`);
     return [];
   }
 }
 
-function fetchGitHubComments(owner, repo, number, type = 'issues', token = '') {
+async function fetchGitHubComments(owner, repo, number, type = 'issues', token = '') {
   const endpoint = type === 'discussion'
-    ? `https://api.github.com/repos/${owner}/${repo}/discussions/${number}/comments`
-    : `https://api.github.com/repos/${owner}/${repo}/issues/${number}/comments`;
-  const curlArgs = ['-sS'];
-  if (token) curlArgs.push('-H', `Authorization: token ${token}`);
-  curlArgs.push(`${endpoint}?per_page=50&sort=created&direction=desc`);
+    ? `https://api.github.com/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/discussions/${encodeURIComponent(number)}/comments`
+    : `https://api.github.com/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/issues/${encodeURIComponent(number)}/comments`;
   try {
-    const result = execFileSync('curl', curlArgs, {
-      encoding: 'utf8', timeout: 15000
-    });
-    const data = JSON.parse(result);
+    const data = await fetchJson(`${endpoint}?per_page=50&sort=created&direction=desc`, { token });
     return Array.isArray(data) ? data : [];
   } catch (e) {
     console.error(`  github ${owner}/${repo}#${number} failed: ${e.message}`);
@@ -41,15 +32,12 @@ function fetchGitHubComments(owner, repo, number, type = 'issues', token = '') {
   }
 }
 
-function fetchGitHubIssues(owner, repo, token = '') {
-  const curlArgs = ['-sS'];
-  if (token) curlArgs.push('-H', `Authorization: token ${token}`);
-  curlArgs.push(`https://api.github.com/repos/${owner}/${repo}/issues?state=open&sort=updated&direction=desc&per_page=10`);
+async function fetchGitHubIssues(owner, repo, token = '') {
   try {
-    const result = execFileSync('curl', curlArgs, {
-      encoding: 'utf8', timeout: 15000
-    });
-    const data = JSON.parse(result);
+    const data = await fetchJson(
+      `https://api.github.com/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/issues?state=open&sort=updated&direction=desc&per_page=10`,
+      { token },
+    );
     return Array.isArray(data) ? data : [];
   } catch {
     return [];
@@ -69,7 +57,7 @@ export const commentsAdapter = {
     const moltBaseUrl = moltbookCfg.base_url || 'https://www.moltbook.com';
 
     for (const postId of posts) {
-      const comments = fetchMoltbookComments(postId, moltBaseUrl);
+      const comments = await fetchMoltbookComments(postId, moltBaseUrl);
       for (const c of comments) {
         c._source = 'moltbook';
         c._postId = postId;
@@ -87,7 +75,7 @@ export const commentsAdapter = {
       const { owner, repo, type } = repoCfg;
 
       if (repoCfg.number) {
-        const comments = fetchGitHubComments(owner, repo, repoCfg.number, type, ghToken);
+        const comments = await fetchGitHubComments(owner, repo, repoCfg.number, type, ghToken);
         for (const c of comments) {
           c._source = 'github';
           c._owner = owner;
@@ -97,10 +85,10 @@ export const commentsAdapter = {
         }
         all.push(...comments);
       } else if (type === 'issues') {
-        const issues = fetchGitHubIssues(owner, repo, ghToken);
+        const issues = await fetchGitHubIssues(owner, repo, ghToken);
         for (const issue of issues) {
           if (!issue.comments || issue.comments === 0) continue;
-          const comments = fetchGitHubComments(owner, repo, issue.number, 'issues', ghToken);
+          const comments = await fetchGitHubComments(owner, repo, issue.number, 'issues', ghToken);
           for (const c of comments) {
             c._source = 'github';
             c._owner = owner;

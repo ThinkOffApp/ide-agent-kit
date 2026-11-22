@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
-import { execFileSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { isSelfSender } from '../common/handles.mjs';
+import { fetchJson } from '../common/http.mjs';
 
 /**
  * xfor adapter — polls xfor.bot posts and notifications.
@@ -11,13 +11,10 @@ import { isSelfSender } from '../common/handles.mjs';
  * Auth: X-API-Key header
  */
 
-function xforFetch(path, apiKey) {
+async function xforFetch(path, apiKey) {
   const url = `https://xfor.bot/api/v1${path}`;
   try {
-    const result = execFileSync('curl', ['-sS', '-H', `X-API-Key: ${apiKey}`, url], {
-      encoding: 'utf8', timeout: 15000
-    });
-    return JSON.parse(result);
+    return await fetchJson(url, { headers: { 'X-API-Key': apiKey } });
   } catch (e) {
     console.error(`  xfor fetch ${path} failed: ${e.message}`);
     return null;
@@ -35,7 +32,7 @@ export const xforAdapter = {
     const all = [];
 
     // Poll notifications (mentions, replies, likes, follows)
-    const notifs = xforFetch('/notifications?unread=true', apiKey);
+    const notifs = await xforFetch('/notifications?unread=true', apiKey);
     if (notifs && Array.isArray(notifs)) {
       for (const n of notifs) {
         n._type = 'notification';
@@ -49,7 +46,7 @@ export const xforAdapter = {
     }
 
     // Poll recent posts from feed
-    const feed = xforFetch('/posts', apiKey);
+    const feed = await xforFetch('/posts', apiKey);
     if (feed && Array.isArray(feed)) {
       for (const p of feed) {
         p._type = 'post';
