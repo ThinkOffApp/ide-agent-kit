@@ -22,7 +22,7 @@ export function validateNode(c) {
 }
 export async function runAdapter(argv, payload) {
   // Fixed argv only. Room bodies travel on stdin, never through a shell.
-  const child = execute(argv[0], argv.slice(1), { timeout: 120000, maxBuffer: 65536 });
+  const child = execute(argv[0], argv.slice(1), { timeout: 660000, maxBuffer: 65536 });
   child.child.stdin.end(JSON.stringify(payload));
   const { stdout } = await child;
   const result = JSON.parse(stdout);
@@ -52,6 +52,7 @@ export function createNode(c, { fetchImpl = fetch, adapter = runAdapter, save = 
         if (!r.ok) throw Error(`Room read HTTP ${r.status}`);
         const { messages } = await r.json();
         if (!Array.isArray(messages) || messages.some(m => !m.id || typeof m.body !== 'string')) throw Error('Invalid room response');
+        if (state.ready && messages.length >= 100 && !messages.some(m => state.seen.includes(m.id) || state.pending.some(p => p.id === m.id))) throw Error('Room catch-up gap; backfill required');
         for (const m of [...messages].reverse()) {
           if (state.seen.includes(m.id) || state.pending.some(p => p.id === m.id)) continue;
           const sender = typeof m.from === 'string' ? m.from : '';

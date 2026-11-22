@@ -9,7 +9,8 @@
     "iak-pending": "./bin/iak-pending.mjs",
     "iak-scan-history": "./scripts/scan-history-for-secrets.mjs",
     "ide-agent-kit-model-tidy": "./bin/model-tidy.mjs",
-    "iak-node": "./bin/iak-node.mjs"
+    "iak-node": "./bin/iak-node.mjs",
+    "iak-node-hermes": "./bin/iak-node-hermes.mjs"
   },
   "scripts": {
     "test": "node --test test/*.test.mjs packages/user-intent-kit/test/*.test.js",

@@ -49,3 +49,31 @@ sender. No periodic healthy check-ins. Remote offline alerts require an external
 monitor: a dead process cannot announce its own death.
 
 Tests: `node --test test/node-service.test.mjs`.
+
+## Hermes adapter (local-source verified; fleet compatibility needs preflight)
+
+The installed Mac Hermes source supports `chat --query-file - --oneshot --format
+stream-json` and explicit `--resume`. `iak-node-hermes /absolute/hermes.json deliver`
+implements the receipt contract; use the same command with `fresh` for recovery.
+Configure `deliver`/`freshSession` as argv arrays beginning with the absolute Node
+binary, then the absolute `bin/iak-node-hermes.mjs` path, adapter config, and action.
+The adapter config contains absolute `binary` (Hermes executable), `stateFile`
+(its own file, distinct from the node poller's state) and `commitmentsFile`.
+Persistent commitments must exist before delivery or recovery. The adapter owns
+its explicit session ID: it never resumes an arbitrary `latest` desktop session.
+A separate human session is left alone. Completed delivery IDs are deduplicated;
+a process crash after a model's side effects but before the receipt is saved
+can still cause replay, so the agent must honor the delivery ID too.
+
+Recovery classifies the terminal structured `error` only, with a failed exit code;
+it does not treat an assistant discussing context limits as an actual failure.
+It archives the old session ID in its own state and starts a fresh CLI session on
+the replay. Existing Hermes transcripts are retained. If the target machine's
+Hermes lacks this stream-json protocol, installation must wait for a compatible
+adapter. No daemon should be enabled until its local CLI capabilities, key
+identity, commitments file, route and receipt round-trip have been checked.
+
+A full 100-message page without any known boundary fails closed as degraded;
+manual backfill is required rather than silently claiming no missed work. This
+implementation does not yet paginate missed history. Polling is serialized within
+one process; operators must not configure two units with the same state file.
