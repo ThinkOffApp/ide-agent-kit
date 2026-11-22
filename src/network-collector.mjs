@@ -32,7 +32,7 @@ export function mergeNetwork(previous={}, collected) {
   const links=collected.links.map(r=>{
     const prior=old.find(o=>o.peer_id===r.peer_id);
     if(!prior?.measurement)return r;
-    const samePath=prior.route===r.route && prior.local_interface===r.local_interface;
+    const samePath=(prior.measurement_route||prior.route)===r.route && prior.local_interface===r.local_interface;
     if(!samePath)return {...r,measurement_stale:true,previous_measurement_route:prior.measurement_route||prior.route||'unknown'};
     return {...r,measurement:prior.measurement,measurement_route:prior.measurement_route||prior.route};
   });
