@@ -1,14 +1,20 @@
 #!/usr/bin/env node
 // SPDX-License-Identifier: AGPL-3.0-only
 import { readFile, writeFile, mkdir } from 'node:fs/promises';
+import { randomUUID } from 'node:crypto';
 import { homedir } from 'node:os';
 import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { validateNode, startNode, systemdUnit } from '../src/node-service.mjs';
 const [action, file] = process.argv.slice(2);
-if (!['run','plan','install'].includes(action) || !file) throw Error('Usage: iak-node <plan|install|run> /absolute/node.json');
+if (!['run','plan','install','ack'].includes(action) || !file) throw Error('Usage: iak-node <plan|install|run|ack> /absolute/node.json');
 const configPath = resolve(file), c = validateNode(JSON.parse(await readFile(configPath, 'utf8')));
-if (action === 'run') await startNode(c);
+if (action === 'ack') {
+  await mkdir(dirname(c.stateFile),{recursive:true,mode:0o700});
+  await writeFile(c.stateFile+'.ack',JSON.stringify({id:randomUUID()}),{mode:0o600,flag:'wx'});
+  console.log('Attention acknowledgement queued; service archives and clears it on its next tick.');
+}
+else if (action === 'run') await startNode(c);
 else {
   const unit = systemdUnit(configPath, process.execPath, fileURLToPath(import.meta.url));
   if (action === 'plan') process.stdout.write(unit);

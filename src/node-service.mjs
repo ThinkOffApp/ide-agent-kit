@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only
-import { readFile, writeFile, mkdir, rename } from 'node:fs/promises';
+import { readFile, writeFile, mkdir, rename, unlink } from 'node:fs/promises';
 import { dirname, resolve } from 'node:path';
 import { timingSafeEqual } from 'node:crypto';
 import { execFile } from 'node:child_process';
@@ -48,8 +48,21 @@ export function createNode(c, { fetchImpl = fetch, adapter = runAdapter, save = 
   async function tick() {
     if (busy) return false;
     busy = true;
-    let stage = 'read';
+    let stage = 'ack';
     try {
+      try {
+        const request = JSON.parse(await readFile(c.stateFile + '.ack', 'utf8'));
+        if (!/^[a-z0-9-]+$/.test(request.id || '')) throw Error('InvalidAck');
+        const archive = c.stateFile + '.attention-' + request.id + '.json';
+        if (state.acknowledged !== request.id) {
+          try { await writeFile(archive, JSON.stringify({deadLetters:state.deadLetters,skippedWindow:state.skippedWindow || null,acknowledgedAt:now()}), {mode:0o600,flag:'wx'}); }
+          catch (e) { if (e.code !== 'EEXIST') throw e; }
+          state.deadLetters=[]; delete state.skippedWindow; state.acknowledged=request.id;
+          await persist(state); log({node:c.id,stage:'ack',errorClass:'AttentionArchived'});
+        }
+        await unlink(c.stateFile + '.ack');
+      } catch (e) { if (e.code !== 'ENOENT') throw e; }
+      stage = 'read';
       const key = (await readFile(c.keyFile, 'utf8')).trim();
       for (const room of c.rooms) {
         const r = await fetchImpl(`https://groupmind.one/api/v1/rooms/${room}/messages?limit=100`, { headers: { Authorization: `Bearer ${key}`, 'Cache-Control': 'no-cache' }, signal: AbortSignal.timeout(15000) });
@@ -100,11 +113,11 @@ export function createNode(c, { fetchImpl = fetch, adapter = runAdapter, save = 
         }
         state.seen = state.seen.slice(-5000); await persist(state);
       }
-      lastError = state.pending.length || state.deadLetters.length || state.skippedWindow ? 'delivery_attention_required' : null; return !lastError;
+      lastError = state.pending.some(p => p.attempts) ? 'delivery_retry_pending' : null; return !lastError;
     } catch { lastError = 'poll_or_delivery_failed'; log({stage, errorClass:'NodeStageFailure', node:c.id}); return false; }
     finally { busy = false; }
   }
-  const health = () => ({ node: c.id, status: lastError ? 'degraded' : state.ready ? 'ready' : 'starting', busy, pending: state.pending.length, deadLetters:state.deadLetters.length, skippedWindow:state.skippedWindow || null, error: lastError });
+  const health = () => ({ node: c.id, status: lastError ? 'degraded' : state.ready ? 'ready' : 'starting', busy, pending: state.pending.length, attention:state.deadLetters.length + (state.skippedWindow ? 1 : 0), deadLetters:state.deadLetters.length, skippedWindow:state.skippedWindow || null, error: lastError });
   async function announce() {
     if (!c.healthRoom) return;
     const current = JSON.stringify({status:health().status,deadLetters:state.deadLetters.length,skipped:state.skippedWindow || null});

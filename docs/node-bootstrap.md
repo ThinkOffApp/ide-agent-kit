@@ -103,3 +103,13 @@ wait. Health includes dead-letter count; operators inspect private state and
 requeue after fixing the cause. State can contain message bodies, stays mode0600,
 and must not be pasted into the room. Journal diagnostics use fixed stage and
 error-class labels, never raw exceptions, message bodies or keys.
+
+Readiness and attention are separate: an otherwise healthy service reports `ready`
+with a nonzero `attention` count for historical dead letters or a skipped window.
+Read/delivery failures still report `degraded`. `iak-node ack /absolute/node.json`
+queues a local acknowledgement; the owning service processes it on the next tick
+(or next start). It first writes a private, uniquely named immutable attention
+archive alongside the state file, then clears only dead letters/skipped-window
+attention, persists state and logs a fixed acknowledgement event. Pending messages
+are not cleared. The CLI never races the live service by rewriting its state.
+A repeat archive operation after a crash is idempotent for that acknowledgement ID.

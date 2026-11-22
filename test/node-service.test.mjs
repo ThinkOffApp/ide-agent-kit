@@ -27,7 +27,7 @@ test('state survives restart and retries unconfirmed delivery',async t=>{
  const fetchImpl=async()=>({ok:true,json:async()=>({messages})});
  let node=createNode(c,{now:()=>0,fetchImpl,adapter:async()=>{throw Error('private secret error');}});await node.init();await node.tick();
  messages=[{id:'queued',from:'petrus',body:'@deepm5 retry'}];assert.equal(await node.tick(),false);
- assert.equal(node.health().error,'delivery_attention_required');
+ assert.equal(node.health().error,'delivery_retry_pending');
  let deliveries=0;node=createNode(c,{now:()=>20000,fetchImpl,adapter:async()=>{deliveries++;return {status:'delivered'};}});await node.init();await node.tick();assert.equal(deliveries,1);
 });
 test('adapter receives untrusted text via stdin, not executable arguments',async t=>{
@@ -70,5 +70,12 @@ test('poison messages back off and dead-letter while later work proceeds',async 
 });
 test('catch-up gap recovers after three failures with an explicit skipped window',async t=>{
  const c=await fixture(t);let messages=[];const n=createNode(c,{save:async()=>{},log:()=>{},fetchImpl:async()=>({ok:true,json:async()=>({messages})})});await n.init();await n.tick();
- messages=Array.from({length:100},(_,i)=>({id:String(i),from:'petrus',body:'unaddressed'}));await n.tick();await n.tick();await n.tick();assert.equal(n.health().skippedWindow.room,c.rooms[0]);assert.equal(n.health().error,'delivery_attention_required');
+ messages=Array.from({length:100},(_,i)=>({id:String(i),from:'petrus',body:'unaddressed'}));await n.tick();await n.tick();await n.tick();assert.equal(n.health().skippedWindow.room,c.rooms[0]);assert.equal(n.health().error,null);assert.equal(n.health().attention,1);
+});
+test('ack archives attention without dropping pending work and returns ready',async t=>{
+ const {readFile}=await import('node:fs/promises');const c=await fixture(t);
+ await writeFile(c.stateFile,JSON.stringify({seen:[],pending:[],deadLetters:[{id:'bad',body:'private evidence'}],ready:true,skippedWindow:{room:c.rooms[0]}}));
+ await writeFile(c.stateFile+'.ack',JSON.stringify({id:'test-ack'}));
+ const n=createNode(c,{log:()=>{},fetchImpl:async()=>({ok:true,json:async()=>({messages:[]})})});await n.init();await n.tick();assert.equal(n.health().status,'ready');assert.equal(n.health().attention,0);
+ const archive=JSON.parse(await readFile(c.stateFile+'.attention-test-ack.json'));assert.equal(archive.deadLetters[0].id,'bad');assert.equal(archive.skippedWindow.room,c.rooms[0]);
 });
