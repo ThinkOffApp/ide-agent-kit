@@ -79,3 +79,20 @@ test('ack archives attention without dropping pending work and returns ready',as
  const n=createNode(c,{log:()=>{},fetchImpl:async()=>({ok:true,json:async()=>({messages:[]})})});await n.init();await n.tick();assert.equal(n.health().status,'ready');assert.equal(n.health().attention,0);
  const archive=JSON.parse(await readFile(c.stateFile+'.attention-test-ack.json'));assert.equal(archive.deadLetters[0].id,'bad');assert.equal(archive.skippedWindow.room,c.rooms[0]);
 });
+test('announcement never mutates state while a slow delivery owns it',async t=>{
+ const c=await fixture(t);c.healthRoom=c.rooms[0];let messages=[],posts=0,release;
+ const gate=new Promise(ok=>{release=ok;});
+ const n=createNode(c,{save:async()=>{},fetchImpl:async(u,o)=>o.method==='POST'?(posts++,{ok:true,json:async()=>({from:c.handle})}):{ok:true,json:async()=>({messages})},adapter:async()=>{await gate;return {status:'delivered'};}});
+ await n.init();await n.tick();messages=[{id:'slow',from:'petrus',body:'@deepm5 slow'}];const tick=n.tick();
+ while(!n.health().busy)await new Promise(ok=>setImmediate(ok));await n.announce();assert.equal(posts,0);release();await tick;await n.announce();assert.equal(posts,1);
+});
+test('queued delivery retains attachment and reply context',async t=>{
+ const c=await fixture(t);let messages=[],received;
+ const n=createNode(c,{save:async()=>{},fetchImpl:async()=>({ok:true,json:async()=>({messages})}),adapter:async(a,p)=>{received=p.message;return {status:'delivered'};}});await n.init();await n.tick();
+ messages=[{id:'attachment',from:'petrus',body:'@deepm5 inspect',image_url:'https://example.org/image.png',file_url:'https://example.org/report.pdf',reply_to:{id:'parent',body:'context'}}];await n.tick();assert.equal(received.image_url,messages[0].image_url);assert.deepEqual(received.reply_to,messages[0].reply_to);assert.equal(received.file_url,messages[0].file_url);
+});
+test('unaddressed room traffic cannot grow the durable seen list unbounded',async t=>{
+ const c=await fixture(t);await writeFile(c.stateFile,JSON.stringify({seen:Array.from({length:6039},(_,i)=>String(i)),pending:[],deadLetters:[],ready:true}));
+ const n=createNode(c,{fetchImpl:async()=>({ok:true,json:async()=>({messages:[]})})});await n.init();await n.tick();
+ const {readFile}=await import('node:fs/promises');assert.equal(JSON.parse(await readFile(c.stateFile)).seen.length,5000);
+});

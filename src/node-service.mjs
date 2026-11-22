@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 import { readFile, writeFile, mkdir, rename, unlink } from 'node:fs/promises';
 import { dirname, resolve } from 'node:path';
-import { timingSafeEqual } from 'node:crypto';
+import { timingSafeEqual, randomUUID } from 'node:crypto';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import http from 'node:http';
@@ -34,11 +34,14 @@ export async function runAdapter(argv, payload) {
 export function createNode(c, { fetchImpl = fetch, adapter = runAdapter, save = null, now = Date.now, log = entry => console.error(JSON.stringify(entry)) } = {}) {
   validateNode(c);
   let state = { seen: [], pending: [], deadLetters: [], ready: false }, busy = false, lastError = null;
-  const persist = save || (async () => {
+  const persist = async (...args) => {
+    state.seen = state.seen.slice(-5000);
+    if (save) return save(...args);
+    const temporary = c.stateFile + '.' + process.pid + '.' + randomUUID() + '.tmp';
     await mkdir(dirname(c.stateFile), { recursive: true, mode: 0o700 });
-    await writeFile(c.stateFile + '.tmp', JSON.stringify(state), { mode: 0o600 });
-    await rename(c.stateFile + '.tmp', c.stateFile);
-  });
+    await writeFile(temporary, JSON.stringify(state), { mode: 0o600 });
+    await rename(temporary, c.stateFile);
+  };
   async function init() {
     try { state = JSON.parse(await readFile(c.stateFile, 'utf8')); }
     catch (e) { if (e.code !== 'ENOENT') throw e; }
@@ -80,7 +83,7 @@ export function createNode(c, { fetchImpl = fetch, adapter = runAdapter, save = 
           if (state.seen.includes(m.id) || state.pending.some(p => p.id === m.id)) continue;
           const sender = typeof m.from === 'string' ? m.from : '';
           const mentioned = m.body.match(/@[a-z0-9_-]+/gi) || [];
-          if (state.ready && sender.toLowerCase() !== c.handle.toLowerCase() && mentioned.some(h => h.toLowerCase() === c.handle.toLowerCase()) && (!c.nodeTag || m.body.includes(c.nodeTag))) state.pending.push({ id: m.id, room, from: sender, body: m.body });
+          if (state.ready && sender.toLowerCase() !== c.handle.toLowerCase() && mentioned.some(h => h.toLowerCase() === c.handle.toLowerCase()) && (!c.nodeTag || m.body.includes(c.nodeTag))) state.pending.push({ ...m, room, from: sender });
           else state.seen.push(m.id);
         }
       }
@@ -119,7 +122,9 @@ export function createNode(c, { fetchImpl = fetch, adapter = runAdapter, save = 
   }
   const health = () => ({ node: c.id, status: lastError ? 'degraded' : state.ready ? 'ready' : 'starting', busy, pending: state.pending.length, attention:state.deadLetters.length + (state.skippedWindow ? 1 : 0), deadLetters:state.deadLetters.length, skippedWindow:state.skippedWindow || null, error: lastError });
   async function announce() {
-    if (!c.healthRoom) return;
+    if (!c.healthRoom || busy) return;
+    busy = true;
+    try {
     const current = JSON.stringify({status:health().status,deadLetters:state.deadLetters.length,skipped:state.skippedWindow || null});
     if (state.announcedStatus === current) return;
     const key = (await readFile(c.keyFile, 'utf8')).trim();
@@ -132,6 +137,7 @@ export function createNode(c, { fetchImpl = fetch, adapter = runAdapter, save = 
     const result = await response.json(), message = result.message || result;
     if (message.from?.toLowerCase() !== c.handle.toLowerCase()) throw Error('Health sender mismatch');
     state.announcedStatus = current; state.transition = (state.transition || 0) + 1; await persist(state);
+    } finally { busy = false; }
   }
   return { init, tick, health, announce };
 }
