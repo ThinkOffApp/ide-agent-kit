@@ -15,6 +15,8 @@ export function validateNode(c) {
   for (const k of ['deliver', 'freshSession']) {
     if (!Array.isArray(c[k]) || !c[k].length || !c[k].every(x => typeof x === 'string' && !x.includes('\0')) || !c[k][0].startsWith('/')) throw Error(`${k} must be an absolute executable argv array`);
   }
+  if (c.handle.toLowerCase() === '@deep' && !c.nodeTag) throw Error('Shared @deep requires an explicit nodeTag; prefer a distinct handle');
+  if (c.nodeTag !== undefined && !/^\[node:[a-z0-9-]+\]$/.test(c.nodeTag)) throw Error('Invalid nodeTag');
   if (!Array.isArray(c.rooms) || !c.rooms.length || c.rooms.some(r => !/^[a-z0-9-]+$/.test(r))) throw Error('Invalid rooms');
   if (c.healthRoom && !c.rooms.includes(c.healthRoom)) throw Error('Health room must be watched');
   if (c.port !== undefined && (!Number.isInteger(c.port) || c.port < 1024 || c.port > 65535)) throw Error('Invalid port');
@@ -29,9 +31,9 @@ export async function runAdapter(argv, payload) {
   if (!['delivered', 'context_full', 'fresh'].includes(result.status)) throw Error('Invalid adapter receipt');
   return result;
 }
-export function createNode(c, { fetchImpl = fetch, adapter = runAdapter, save = null } = {}) {
+export function createNode(c, { fetchImpl = fetch, adapter = runAdapter, save = null, now = Date.now, log = entry => console.error(JSON.stringify(entry)) } = {}) {
   validateNode(c);
-  let state = { seen: [], pending: [], ready: false }, busy = false, lastError = null;
+  let state = { seen: [], pending: [], deadLetters: [], ready: false }, busy = false, lastError = null;
   const persist = save || (async () => {
     await mkdir(dirname(c.stateFile), { recursive: true, mode: 0o700 });
     await writeFile(c.stateFile + '.tmp', JSON.stringify(state), { mode: 0o600 });
@@ -40,11 +42,13 @@ export function createNode(c, { fetchImpl = fetch, adapter = runAdapter, save = 
   async function init() {
     try { state = JSON.parse(await readFile(c.stateFile, 'utf8')); }
     catch (e) { if (e.code !== 'ENOENT') throw e; }
+    state.deadLetters ||= [];
     if (!Array.isArray(state.seen) || !Array.isArray(state.pending)) throw Error('Invalid delivery state');
   }
   async function tick() {
     if (busy) return false;
     busy = true;
+    let stage = 'read';
     try {
       const key = (await readFile(c.keyFile, 'utf8')).trim();
       for (const room of c.rooms) {
@@ -52,43 +56,63 @@ export function createNode(c, { fetchImpl = fetch, adapter = runAdapter, save = 
         if (!r.ok) throw Error(`Room read HTTP ${r.status}`);
         const { messages } = await r.json();
         if (!Array.isArray(messages) || messages.some(m => !m.id || typeof m.body !== 'string')) throw Error('Invalid room response');
-        if (state.ready && messages.length >= 100 && !messages.some(m => state.seen.includes(m.id) || state.pending.some(p => p.id === m.id))) throw Error('Room catch-up gap; backfill required');
+        if (state.ready && messages.length >= 100 && !messages.some(m => state.seen.includes(m.id) || state.pending.some(p => p.id === m.id))) {
+          state.gapFailures = (state.gapFailures || 0) + 1; await persist(state);
+          if (state.gapFailures < 3) throw Error('CatchUpGap');
+          state.skippedWindow = { room, oldest: messages.at(-1)?.id, newest: messages[0]?.id, at: now() };
+          state.seen.push(...messages.map(m => m.id)); state.gapFailures = 0; await persist(state);
+          log({stage:'read', errorClass:'CatchUpRebaseline', node:c.id});
+        }
         for (const m of [...messages].reverse()) {
           if (state.seen.includes(m.id) || state.pending.some(p => p.id === m.id)) continue;
           const sender = typeof m.from === 'string' ? m.from : '';
           const mentioned = m.body.match(/@[a-z0-9_-]+/gi) || [];
-          if (state.ready && sender.toLowerCase() !== c.handle.toLowerCase() && mentioned.some(h => h.toLowerCase() === c.handle.toLowerCase())) state.pending.push({ id: m.id, room, from: sender, body: m.body });
+          if (state.ready && sender.toLowerCase() !== c.handle.toLowerCase() && mentioned.some(h => h.toLowerCase() === c.handle.toLowerCase()) && (!c.nodeTag || m.body.includes(c.nodeTag))) state.pending.push({ id: m.id, room, from: sender, body: m.body });
           else state.seen.push(m.id);
         }
       }
       // First installation baselines room history; subsequent runs preserve pending work.
       state.ready = true;
       await persist(state);
-      while (state.pending.length) {
-        const message = state.pending[0];
-        let receipt = await adapter(c.deliver, { type: 'room_message', node: c.id, message, deliveryId: message.id });
-        if (receipt.status === 'context_full') {
-          const fresh = await adapter(c.freshSession, { type: 'fresh_session', node: c.id, preservePending: true });
-          if (fresh.status !== 'fresh') throw Error('Fresh-session adapter did not confirm recovery');
-          receipt = await adapter(c.deliver, { type: 'room_message', node: c.id, message, deliveryId: message.id });
+      for (const message of [...state.pending]) {
+        if ((message.retryAt || 0) > now()) continue;
+        stage = 'delivery';
+        try {
+          let receipt = await adapter(c.deliver, { type: 'room_message', node: c.id, message, deliveryId: message.id });
+          if (receipt.status === 'context_full') {
+            stage = 'fresh';
+            const fresh = await adapter(c.freshSession, { type: 'fresh_session', node: c.id, preservePending: true });
+            if (fresh.status !== 'fresh') throw Error('FreshReceiptError');
+            stage = 'delivery';
+            receipt = await adapter(c.deliver, { type: 'room_message', node: c.id, message, deliveryId: message.id });
+          }
+          if (receipt.status !== 'delivered') throw Error('DeliveryReceiptError');
+          state.pending = state.pending.filter(p => p.id !== message.id);
+          state.seen.push(message.id);
+        } catch {
+          log({stage, errorClass:'AdapterFailure', node:c.id, deliveryId:message.id});
+          message.attempts = (message.attempts || 0) + 1;
+          message.retryAt = now() + 15000 * 2 ** (message.attempts - 1);
+          if (message.attempts >= 3) {
+            state.pending = state.pending.filter(p => p.id !== message.id);
+            state.deadLetters.push(message); state.seen.push(message.id);
+          }
         }
-        if (receipt.status !== 'delivered') throw Error('Delivery unconfirmed; pending message retained');
-        state.pending.shift(); state.seen.push(message.id); state.seen = state.seen.slice(-5000);
-        await persist(state);
+        state.seen = state.seen.slice(-5000); await persist(state);
       }
-      lastError = null; return true;
-    } catch { lastError = 'poll_or_delivery_failed'; return false; }
+      lastError = state.pending.length || state.deadLetters.length || state.skippedWindow ? 'delivery_attention_required' : null; return !lastError;
+    } catch { lastError = 'poll_or_delivery_failed'; log({stage, errorClass:'NodeStageFailure', node:c.id}); return false; }
     finally { busy = false; }
   }
-  const health = () => ({ node: c.id, status: lastError ? 'degraded' : state.ready ? 'ready' : 'starting', busy, pending: state.pending.length, error: lastError });
+  const health = () => ({ node: c.id, status: lastError ? 'degraded' : state.ready ? 'ready' : 'starting', busy, pending: state.pending.length, deadLetters:state.deadLetters.length, skippedWindow:state.skippedWindow || null, error: lastError });
   async function announce() {
     if (!c.healthRoom) return;
-    const current = health().status;
+    const current = JSON.stringify({status:health().status,deadLetters:state.deadLetters.length,skipped:state.skippedWindow || null});
     if (state.announcedStatus === current) return;
     const key = (await readFile(c.keyFile, 'utf8')).trim();
     const response = await fetchImpl('https://groupmind.one/api/v1/messages', {
       method: 'POST', headers: { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ room: c.healthRoom, body: `IAK node ${c.id}: ${current}. Pending deliveries: ${state.pending.length}.`, client_message_id: `iak-node-${c.id}-${current}-${state.transition || 0}` }),
+      body: JSON.stringify({ room: c.healthRoom, body: `IAK node ${c.id}: ${health().status}. Pending: ${state.pending.length}; dead letters: ${state.deadLetters.length}; skipped window: ${JSON.stringify(state.skippedWindow || null)}.`, client_message_id: `iak-node-${c.id}-${state.transition || 0}` }),
       signal: AbortSignal.timeout(15000)
     });
     if (!response.ok) throw Error('Health publication failed');
@@ -118,7 +142,7 @@ export async function startNode(c) {
   const server = wakeServer(node, token);
   server.requestTimeout = 5000;
   await new Promise((ok, fail) => { server.once('error', fail); server.listen(c.port || 8788, c.host, ok); });
-  const poll = async () => { await node.tick(); try { await node.announce(); } catch { /* next tick retries without secrets in logs */ } };
+  const poll = async () => { await node.tick(); try { await node.announce(); } catch { console.error(JSON.stringify({node:c.id,stage:'announce',errorClass:'HealthPublicationFailure'})); } };
   void poll();
   const timer = setInterval(() => void poll(), 15000);
   return { node, close: () => { clearInterval(timer); server.close(); } };

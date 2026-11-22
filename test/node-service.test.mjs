@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { validateNode, createNode, runAdapter, systemdUnit } from '../src/node-service.mjs';
 async function fixture(t) {
  const dir=await mkdtemp(join(tmpdir(),'iak-node-'));t.after(()=>rm(dir,{recursive:true,force:true}));
- const c={id:'m5',handle:'@deep',host:'100.88.157.24',rooms:['thinkoff-development'],keyFile:join(dir,'key'),tokenFile:join(dir,'token'),stateFile:join(dir,'state'),deliver:['/bin/true'],freshSession:['/bin/true']};
+ const c={id:'m5',handle:'@deepm5',host:'100.88.157.24',rooms:['thinkoff-development'],keyFile:join(dir,'key'),tokenFile:join(dir,'token'),stateFile:join(dir,'state'),deliver:['/bin/true'],freshSession:['/bin/true']};
  await writeFile(c.keyFile,'secret');return c;
 }
 test('reject public binds, shell command strings and invalid identifiers',async t=>{
@@ -14,21 +14,21 @@ test('reject public binds, shell command strings and invalid identifiers',async 
  for(const patch of [{host:'0.0.0.0'},{host:'100.128.1.2'},{host:'100.64.999.2'},{deliver:'echo hi'},{id:'x\nExecStart=bad'}])assert.throws(()=>validateNode({...c,...patch}));
 });
 test('baseline, exact mentions, pending retention and fresh-context replay',async t=>{
- const c=await fixture(t);let messages=[{id:'old',from:'petrus',body:'@deep old'}],calls=[],fail=true;
- const node=createNode(c,{fetchImpl:async()=>({ok:true,json:async()=>({messages})}),save:async()=>{},adapter:async(argv,p)=>{calls.push(p);if(p.type==='fresh_session')return {status:'fresh'};return {status:fail?'context_full':'delivered'};}});
+ const c=await fixture(t);let clock=0;let messages=[{id:'old',from:'petrus',body:'@deepm5 old'}],calls=[],fail=true;
+ const node=createNode(c,{now:()=>clock,fetchImpl:async()=>({ok:true,json:async()=>({messages})}),save:async()=>{},adapter:async(argv,p)=>{calls.push(p);if(p.type==='fresh_session')return {status:'fresh'};return {status:fail?'context_full':'delivered'};}});
  await node.init();assert.equal(await node.tick(),true);assert.equal(calls.length,0);
- messages=[{id:'new',from:'petrus',body:'@deep do task'},{id:'other',from:'petrus',body:'@deeply not yours'},...messages];
+ messages=[{id:'new',from:'petrus',body:'@deepm5 do task'},{id:'other',from:'petrus',body:'@deepm5ly not yours'},...messages];
  assert.equal(await node.tick(),false);assert.equal(node.health().pending,1);assert.equal(calls.length,3);
- fail=false;assert.equal(await node.tick(),true);assert.equal(node.health().pending,0);assert.equal(calls.at(-1).deliveryId,'new');
+ fail=false;clock=20000;assert.equal(await node.tick(),true);assert.equal(node.health().pending,0);assert.equal(calls.at(-1).deliveryId,'new');
  const count=calls.length;await node.tick();assert.equal(calls.length,count);
 });
 test('state survives restart and retries unconfirmed delivery',async t=>{
  const c=await fixture(t);let messages=[];
  const fetchImpl=async()=>({ok:true,json:async()=>({messages})});
- let node=createNode(c,{fetchImpl,adapter:async()=>{throw Error('private secret error');}});await node.init();await node.tick();
- messages=[{id:'queued',from:'petrus',body:'@deep retry'}];assert.equal(await node.tick(),false);
- assert.equal(node.health().error,'poll_or_delivery_failed');
- let deliveries=0;node=createNode(c,{fetchImpl,adapter:async()=>{deliveries++;return {status:'delivered'};}});await node.init();await node.tick();assert.equal(deliveries,1);
+ let node=createNode(c,{now:()=>0,fetchImpl,adapter:async()=>{throw Error('private secret error');}});await node.init();await node.tick();
+ messages=[{id:'queued',from:'petrus',body:'@deepm5 retry'}];assert.equal(await node.tick(),false);
+ assert.equal(node.health().error,'delivery_attention_required');
+ let deliveries=0;node=createNode(c,{now:()=>20000,fetchImpl,adapter:async()=>{deliveries++;return {status:'delivered'};}});await node.init();await node.tick();assert.equal(deliveries,1);
 });
 test('adapter receives untrusted text via stdin, not executable arguments',async t=>{
  const c=await fixture(t);const script=join(c.stateFile+'-adapter.mjs');
@@ -53,7 +53,22 @@ test('authenticated wake does not execute request bodies and rate limits',async 
 test('room health announces only transitions and verifies sender',async t=>{
  const c=await fixture(t);c.healthRoom=c.rooms[0];let posts=0;
  const node=createNode(c,{save:async()=>{},fetchImpl:async(url,opt)=>{
-  if(opt.method==='POST'){posts++;return {ok:true,json:async()=>({from:'@deep'})};}
+  if(opt.method==='POST'){posts++;return {ok:true,json:async()=>({from:'@deepm5'})};}
   return {ok:true,json:async()=>({messages:[]})};
  }});await node.init();await node.tick();await node.announce();await node.announce();assert.equal(posts,1);
+});
+test('shared handles require a node tag and reject other node mentions',async t=>{
+ const c=await fixture(t);assert.throws(()=>validateNode({...c,handle:'@deep'}));c.handle='@deep';c.nodeTag='[node:m5]';let messages=[],ids=[];
+ const n=createNode(c,{save:async()=>{},fetchImpl:async()=>({ok:true,json:async()=>({messages})}),adapter:async(a,p)=>{ids.push(p.deliveryId);return {status:'delivered'};}});await n.init();await n.tick();
+ messages=[{id:'wrong',from:'petrus',body:'@deep [node:asus2] task'},{id:'right',from:'petrus',body:'@deep [node:m5] task'}];await n.tick();assert.deepEqual(ids,['right']);
+});
+test('poison messages back off and dead-letter while later work proceeds',async t=>{
+ const c=await fixture(t);let clock=0,messages=[],ids=[],logs=[];
+ const n=createNode(c,{now:()=>clock,save:async()=>{},log:x=>logs.push(x),fetchImpl:async()=>({ok:true,json:async()=>({messages})}),adapter:async(a,p)=>{if(p.deliveryId==='bad')throw Error('SECRET body');ids.push(p.deliveryId);return {status:'delivered'};}});
+ await n.init();await n.tick();messages=[{id:'good',from:'petrus',body:'@deepm5 good'},{id:'bad',from:'petrus',body:'@deepm5 bad'}];await n.tick();assert.deepEqual(ids,['good']);
+ clock=15000;await n.tick();clock=45000;await n.tick();assert.equal(n.health().deadLetters,1);assert.equal(n.health().pending,0);assert.doesNotMatch(JSON.stringify(logs),/SECRET/);
+});
+test('catch-up gap recovers after three failures with an explicit skipped window',async t=>{
+ const c=await fixture(t);let messages=[];const n=createNode(c,{save:async()=>{},log:()=>{},fetchImpl:async()=>({ok:true,json:async()=>({messages})})});await n.init();await n.tick();
+ messages=Array.from({length:100},(_,i)=>({id:String(i),from:'petrus',body:'unaddressed'}));await n.tick();await n.tick();await n.tick();assert.equal(n.health().skippedWindow.room,c.rooms[0]);assert.equal(n.health().error,'delivery_attention_required');
 });

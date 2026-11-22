@@ -11,7 +11,7 @@ Configuration example (paths must be adapted on the owning machine):
 
 ```json
 {
-  "id": "m5", "handle": "@deep", "host": "100.88.157.24", "port": 8788,
+  "id": "m5", "handle": "@deepm5", "host": "100.88.157.24", "port": 8788,
   "rooms": ["thinkoff-development"], "healthRoom": "thinkoff-development",
   "keyFile": "/home/petrus/.config/iak/groupmind.key",
   "tokenFile": "/home/petrus/.config/iak/wake.token",
@@ -77,3 +77,29 @@ A full 100-message page without any known boundary fails closed as degraded;
 manual backfill is required rather than silently claiming no missed work. This
 implementation does not yet paginate missed history. Polling is serialized within
 one process; operators must not configure two units with the same state file.
+
+
+## Review revision
+
+The source protocol check used installed Hermes commit
+`accb82032cfe8f62d7e8675f0409f3cd1a840b8f` (git describe `accb820`), specifically
+`hermes_cli/_parser.py` and `hermes_cli/stream_json.py`. This is not proof that
+M5/VTA have the same version; run local preflight before enabling a unit.
+
+Superseding the draft limitations above: shared `@deep` configurations now require
+an explicit `nodeTag`, e.g. `[node:m5]`; only mentions with that exact tag deliver.
+A distinct handle such as `@deepm5` remains the preferred deployment option and
+must be provisioned by its owner; this patch creates no identity or key.
+
+A catch-up gap re-baselines after three failed polls. It records room, oldest/newest
+IDs and time for the visible 100-message window; the older unseen window's size
+is unknown. A change-only health message reports that skip and the node remains
+attention-required. This is explicit recovery with possible skipped work, not
+lossless pagination. Pending deliveries already stored are preserved.
+
+Each delivery gets three attempts with 15/30-second backoff, then moves into a
+persistent dead-letter list. Later messages proceed even while earlier retries
+wait. Health includes dead-letter count; operators inspect private state and
+requeue after fixing the cause. State can contain message bodies, stays mode0600,
+and must not be pasted into the room. Journal diagnostics use fixed stage and
+error-class labels, never raw exceptions, message bodies or keys.
