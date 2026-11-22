@@ -11,9 +11,9 @@ export function collectNetwork({peers=[], interfaces=networkInterfaces(), os=pla
     const ipv4=(addresses||[]).filter(a=>!a.internal && (a.family==='IPv4'||a.family===4));
     if(!ipv4.length || /^(docker|veth|br-|lo$|virbr|vmnet)/.test(name))continue;
     const tailscale=ipv4.some(a=>a.address.startsWith('100.') && +a.address.split('.')[1]>=64 && +a.address.split('.')[1]<=127);
-    let kind=tailscale?'tailscale':/^(wl|wifi)/.test(name)?'wifi':'ethernet';
+    let kind=tailscale?'tailscale':/^thunderbolt/.test(name)?'thunderbolt':/^(wl|wifi)/.test(name)?'wifi':/^(eth|en)/.test(name)?'ethernet':'unknown';
     if(os==='darwin'&&!tailscale)kind='unknown'; // No guessed Wi-Fi/Thunderbolt kind on macOS.
-    inventory.push({name,kind,speed_mbps:tailscale?null:os==='linux'?readSpeed(name):null,networks:ipv4.flatMap(a=>{ const parts=(a.cidr||'').split('/'),prefix=Number(parts[1]);if(parts.length!==2||!Number.isInteger(prefix)||prefix<0||prefix>32)return [];const value=a.address.split('.').reduce((n,b)=>(n*256+Number(b))>>>0,0),mask=prefix===0?0:(0xffffffff << (32-prefix))>>>0;const net=(value&mask)>>>0;return [[24,16,8,0].map(shift=>(net>>>shift)&255).join('.')+'/'+prefix];}),addresses:ipv4.map(a=>a.address),measured_at:measuredAt});
+    inventory.push({name,kind,speed_mbps:tailscale?null:os==='linux'?readSpeed(name):null,networks:tailscale?[]:ipv4.flatMap(a=>{ const parts=(a.cidr||'').split('/'),prefix=Number(parts[1]);if(parts.length!==2||!Number.isInteger(prefix)||prefix<0||prefix>32)return [];const value=a.address.split('.').reduce((n,b)=>(n*256+Number(b))>>>0,0),mask=prefix===0?0:(0xffffffff << (32-prefix))>>>0;const net=(value&mask)>>>0;return [[24,16,8,0].map(shift=>(net>>>shift)&255).join('.')+'/'+prefix];}),measured_at:measuredAt});
   }
   const links=[];
   for(const peer of peers) {
@@ -29,8 +29,14 @@ export function collectNetwork({peers=[], interfaces=networkInterfaces(), os=pla
 export function mergeNetwork(previous={}, collected) {
   // Preserve independent measured transfers; route collection is not a bandwidth test.
   const old=Array.isArray(previous.links)?previous.links:[];
-  const links=collected.links.map(r=>({...old.find(o=>o.peer_id===r.peer_id),...r}));
-  for(const link of old)if(!links.some(l=>l.peer_id===link.peer_id))links.push(link);
+  const links=collected.links.map(r=>{
+    const prior=old.find(o=>o.peer_id===r.peer_id);
+    if(!prior?.measurement)return r;
+    const samePath=prior.route===r.route && prior.local_interface===r.local_interface;
+    if(!samePath)return {...r,measurement_stale:true,previous_measurement_route:prior.measurement_route||prior.route||'unknown'};
+    return {...r,measurement:prior.measurement,measurement_route:prior.measurement_route||prior.route};
+  });
+  // A collection is a complete current route inventory, not an append-only log.
   return {...previous,...collected,links};
 }
 export async function publishNetwork(c, collected, {fetchImpl=fetch}={}) {

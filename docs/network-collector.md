@@ -19,3 +19,14 @@ publisher: use a single owner until server-side field merge/versioning exists.
 Peer route records refreshed by this collector do not replace actual bandwidth
 measurements. Ongoing scheduling, HTTP-memory benchmarking and fleet installation
 remain separate. This draft has not published to production.
+
+Review revision: host addresses are omitted from reports, Tailscale /32 prefixes
+are omitted, and only canonical physical subnet prefixes remain. Route changes
+invalidate old throughput and mark its old route; measurements are retained only
+when route and local interface match. Links absent from the current complete
+collection are removed. Linux Thunderbolt is identified by name; InfiniBand and
+unrecognized interface kinds remain unknown. Every interface and link is timestamped.
+
+Real-host preflight: asus1's SSH environment has no `node` executable on PATH,
+so the remote dry run did not execute. No runtime was installed. Deployment needs
+a verified runtime path or an alternate collector bridge before publication.
