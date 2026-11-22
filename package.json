@@ -1,7 +1,7 @@
 {
   "name": "ide-agent-kit",
   "version": "0.10.1",
-  "description": "Built for OpenClaw workflows — ACP session orchestration, room-triggered automation, comment polling, Discord + Moltbook + GitHub connectors, receipts, exec approvals",
+  "description": "Built for OpenClaw workflows \u2014 ACP session orchestration, room-triggered automation, comment polling, Discord + Moltbook + GitHub connectors, receipts, exec approvals",
   "type": "module",
   "bin": {
     "ide-agent-kit": "./bin/cli.mjs",
@@ -59,7 +59,6 @@
     "user-intent-kit": "file:packages/user-intent-kit"
   },
   "overrides": {
-    "fast-uri": "4.1.2",
     "hono": "4.12.34",
     "ip-address": "10.3.1"
   }
