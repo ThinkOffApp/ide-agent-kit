@@ -13,7 +13,7 @@ export function collectNetwork({peers=[], interfaces=networkInterfaces(), os=pla
     const tailscale=ipv4.some(a=>a.address.startsWith('100.') && +a.address.split('.')[1]>=64 && +a.address.split('.')[1]<=127);
     let kind=tailscale?'tailscale':/^thunderbolt/.test(name)?'thunderbolt':/^(wl|wifi)/.test(name)?'wifi':/^(eth|en)/.test(name)?'ethernet':'unknown';
     if(os==='darwin'&&!tailscale)kind='unknown'; // No guessed Wi-Fi/Thunderbolt kind on macOS.
-    inventory.push({name,kind,speed_mbps:tailscale?null:os==='linux'?readSpeed(name):null,networks:tailscale?[]:ipv4.flatMap(a=>{ const parts=(a.cidr||'').split('/'),prefix=Number(parts[1]);if(parts.length!==2||!Number.isInteger(prefix)||prefix<0||prefix>32)return [];const value=a.address.split('.').reduce((n,b)=>(n*256+Number(b))>>>0,0),mask=prefix===0?0:(0xffffffff << (32-prefix))>>>0;const net=(value&mask)>>>0;return [[24,16,8,0].map(shift=>(net>>>shift)&255).join('.')+'/'+prefix];}),measured_at:measuredAt});
+    inventory.push({name,kind,speed_mbps:tailscale?null:os==='linux'?readSpeed(name):null,networks:tailscale?[]:ipv4.flatMap(a=>{ const parts=(a.cidr||'').split('/'),prefix=Number(parts[1]);if(parts.length!==2||!Number.isInteger(prefix)||prefix<0||prefix>32)return [];const value=a.address.split('.').reduce((n,b)=>(n*256+Number(b))>>>0,0),mask=prefix===0?0:(0xffffffff << (32-prefix))>>>0;const net=(value&mask)>>>0;return [[24,16,8,0].map(shift=>(net>>>shift)&255).join('.')+'/'+prefix];}),addresses:ipv4.map(a=>a.address),measured_at:measuredAt});
   }
   const links=[];
   for(const peer of peers) {
@@ -40,18 +40,23 @@ export function mergeNetwork(previous={}, collected) {
   return {...previous,...collected,links};
 }
 export async function publishNetwork(c, collected, {fetchImpl=fetch}={}) {
-  if(c.baseUrl!=='https://groupmind.one/api/v1')throw Error('Unsupported publish destination');
+  const target=new URL(c.baseUrl);
+  const host=target.hostname;
+  const tailnet=isIP(host)===4 && host.startsWith('100.') && +host.split('.')[1]>=64 && +host.split('.')[1]<=127;
+  const local=['localhost','127.0.0.1','[::1]'].includes(host);
+  if (!['http:','https:'].includes(target.protocol) || target.username || target.password || target.search || target.hash || (!tailnet&&!local&&c.baseUrl!=='https://groupmind.one/api/v1')) throw Error('Unsupported publish destination');
+  if (!target.pathname.endsWith('/api/v1')) throw Error('API base path must end in /api/v1');
   for(const k of ['userId','deviceId'])if(!/^[a-zA-Z0-9_-]+$/.test(c[k]||''))throw Error('Invalid intent identifier');
   const key=(await import('node:fs/promises')).readFile;
   const token=(await key(c.keyFile,'utf8')).trim();
   const headers={Authorization:`Bearer ${token}`,'Content-Type':'application/json','Cache-Control':'no-cache'};
   const endpoint=`${c.baseUrl}/intent/${encodeURIComponent(c.userId)}`;
-  const existing=await fetchImpl(endpoint,{headers,signal:AbortSignal.timeout(15000)});
+  const existing=await fetchImpl(endpoint,{headers,redirect:'error',signal:AbortSignal.timeout(15000)});
   if(!existing.ok)throw Error(`Intent read HTTP ${existing.status}`);
   const intent=await existing.json(),slot=intent.devices?.[c.deviceId];
   if(!slot)throw Error('Existing device slot required; collector does not invent fleet identities');
   const network=mergeNetwork(slot.network,collected);
-  const response=await fetchImpl(`${endpoint}/${encodeURIComponent(c.deviceId)}`,{method:'PATCH',headers,body:JSON.stringify({network}),signal:AbortSignal.timeout(15000)});
+  const response=await fetchImpl(`${endpoint}/${encodeURIComponent(c.deviceId)}`,{method:'PATCH',headers,redirect:'error',body:JSON.stringify({network}),signal:AbortSignal.timeout(15000)});
   if(!response.ok)throw Error(`Intent publish HTTP ${response.status}`);
   return {deviceId:c.deviceId,interfaces:network.interfaces.length,links:network.links.length};
 }

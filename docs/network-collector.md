@@ -2,7 +2,7 @@
 
 `node bin/iak-network.mjs /absolute/config.json` collects only, with no API write.
 Add `publish` to PATCH the `network` field of an existing device slot. Configure
-`baseUrl` as https://groupmind.one/api/v1, `userId`, `deviceId`, absolute `keyFile`,
+`baseUrl` as the approved API endpoint (localhost or literal tailnet address), `userId`, `deviceId`, absolute `keyFile`,
 and `peers` as `{id: existingPeerSlot, address: literalIPv4}` entries.
 
 Linux reports OS interfaces, canonical IPv4 subnets, readable negotiated link
@@ -30,3 +30,13 @@ unrecognized interface kinds remain unknown. Every interface and link is timesta
 Real-host preflight: asus1's SSH environment has no `node` executable on PATH,
 so the remote dry run did not execute. No runtime was installed. Deployment needs
 a verified runtime path or an alternate collector bridge before publication.
+
+
+Current authorized target plan: Petrus approved host addresses on 22 Nov; the
+collector now includes them. The configured base URL may target localhost or a
+literal Tailscale IPv4, including local asus3, with an /api/v1 suffix. Redirects
+are rejected to avoid credential forwarding. Fleet publication is intended for
+the local installation; the room remains on groupmind.one. No write has occurred.
+The local asus3 stack is on an older separate Groupmind.one checkout and lacks
+today's FleetConnections source; API compatibility/update requires review before
+using the collector against it.
