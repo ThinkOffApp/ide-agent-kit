@@ -222,7 +222,8 @@ test('reports a wired Mac as ethernet, not wifi', () => {
     '/usr/sbin/ipconfig getifaddr en0': '192.168.50.241',
     '/usr/sbin/networksetup -listallhardwareports': 'Hardware Port: Wi-Fi\nDevice: en1\n',
   }})});
-  assert.equal(host.network, 'ethernet');
+  assert.equal(host.network_summary, 'ethernet');
+  assert.ok(!('network' in host), 'legacy telemetry must not overwrite structured network reports');
   assert.equal(host.lan_ip, '192.168.50.241');
 });
 
@@ -232,13 +233,13 @@ test('reports a Mac on the wifi device as wifi', () => {
     '/usr/sbin/ipconfig getifaddr en1': '192.168.50.99',
     '/usr/sbin/networksetup -listallhardwareports': 'Hardware Port: Wi-Fi\nDevice: en1\n',
   }})});
-  assert.equal(host.network, 'wifi');
+  assert.equal(host.network_summary, 'wifi');
 });
 
 test('omits hardware and network when the commands fail', () => {
   const host = collectHostTelemetry({ sources: sources({ platform: 'darwin', commands: {} })});
   assert.ok(!('hw' in host), 'invented a hardware description');
-  assert.ok(!('network' in host), 'guessed a network medium');
+  assert.ok(!('network_summary' in host), 'guessed a network medium');
   assert.ok(!('lan_ip' in host));
 });
 
