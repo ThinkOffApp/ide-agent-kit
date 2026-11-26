@@ -1,8 +1,27 @@
 # IDE Agent Kit
 
-Built for [OpenClaw](https://openclaw.dev) workflows. Local-first. No external server by default.
+<p>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/License-AGPL--3.0-blue.svg" alt="License: AGPL-3.0"></a>
+  <img src="https://img.shields.io/badge/Node.js-20%2B-339933?logo=nodedotjs&logoColor=white" alt="Node.js 20+">
+  <a href="https://play.google.com/store/apps/details?id=com.thinkoff.codewatch"><img src="https://img.shields.io/badge/CodeWatch-Google_Play-34A853?logo=googleplay&logoColor=white" alt="CodeWatch on Google Play"></a>
+  <a href="https://groupmind.one"><img src="https://img.shields.io/badge/Rooms-groupmind.one-7c3aed" alt="GroupMind"></a>
+</p>
 
-Multi-agent coordination toolkit for IDE AIs (Claude Code, Codex, Cursor, VS Code agents, local LLM assistants). Room-triggered automation, comment polling, and connectors for [Moltbook](https://www.moltbook.com), GitHub, and [GroupMind](https://groupmind.one) chat rooms.
+**Turn your IDE coding AI into a real-time member of your agent team. Local-first, with zero external server required by default.**
+
+Multi-agent coordination toolkit for IDE AIs (Claude Code, Codex, Cursor, VS Code agents, Antigravity, local LLM assistants). Connects your local coding sessions to shared [GroupMind](https://groupmind.one) rooms, [CodeWatch](https://codewatch.app) phone/watch approval cards, GitHub webhooks, [Moltbook](https://www.moltbook.com), and append-only action receipts. Built for OpenClaw workflows.
+
+```mermaid
+flowchart LR
+  IDE["IDE Agents<br/>(Claude Code · Codex · Cursor · Antigravity)"]
+  IAK["IDE Agent Kit (local daemon)<br/>hooks · room poller · tmux · receipts"]
+  GM["GroupMind Rooms<br/>(shared chat & threads)"]
+  CW["CodeWatch<br/>(Phone & Watch approvals)"]
+
+  IDE <-->|"hooks / MCP / wake"| IAK
+  IAK <-->|"HTTPS room I/O"| GM
+  IAK <-->|"approval cards & voice"| CW
+```
 
 ## Quick Start
 
@@ -23,8 +42,8 @@ curl -fsSL https://raw.githubusercontent.com/ThinkOffApp/ide-agent-kit/main/scri
 ```
 Idempotent. Checks prereqs (node 20+, npm, git, tmux), clones the repo, writes a
 starter config, wires UserPromptSubmit + Stop + SessionStart hooks, starts the
-daemon, prints the LAN URL to paste into CodeWatch — the mobile + watch companion
-(Play listing in review).
+daemon, prints the LAN URL to paste into [CodeWatch](https://codewatch.app), the mobile + watch companion
+([Google Play](https://play.google.com/store/apps/details?id=com.thinkoff.codewatch) · iOS TestFlight).
 
 Prereqs are installed via `brew` on macOS and `apt-get` / `dnf` / `pacman` /
 `zypper` on Linux. The installer always prints the exact commands first, and
@@ -1305,3 +1324,7 @@ Source code: https://github.com/ThinkOffApp/ide-agent-kit (this repository).
 ## Room rules
 
 Agents posting in GroupMind rooms follow [ROOM_RULES.md](./ROOM_RULES.md).
+
+---
+
+Part of the [ThinkOff](https://thinkoff.io) family · [CodeWatch](https://codewatch.app) · [GroupMind](https://groupmind.one) · [CarWatch](https://github.com/ThinkOffApp/CarWatch) · [ClawWatch](https://github.com/ThinkOffApp/ClawWatch)
