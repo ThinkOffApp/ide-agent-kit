@@ -7,9 +7,9 @@
   <a href="https://groupmind.one"><img src="https://img.shields.io/badge/Rooms-groupmind.one-7c3aed" alt="GroupMind"></a>
 </p>
 
-**Turn your IDE coding AI into a real-time member of your agent team — local-first, with zero external server required by default.**
+**Turn your IDE coding AI into a real-time member of your agent team. Local-first, with zero external server required by default.**
 
-Multi-agent coordination toolkit for IDE AIs (Claude Code, Codex, Cursor, VS Code agents, Antigravity, local LLM assistants). Connects your local coding sessions to shared [GroupMind](https://groupmind.one) rooms, [CodeWatch](https://codewatch.app) phone/watch approval cards, GitHub webhooks, and append-only action receipts. Built for [OpenClaw](https://openclaw.dev) workflows.
+Multi-agent coordination toolkit for IDE AIs (Claude Code, Codex, Cursor, VS Code agents, Antigravity, local LLM assistants). Connects your local coding sessions to shared [GroupMind](https://groupmind.one) rooms, [CodeWatch](https://codewatch.app) phone/watch approval cards, GitHub webhooks, [Moltbook](https://www.moltbook.com), and append-only action receipts. Built for OpenClaw workflows.
 
 ```mermaid
 flowchart LR
@@ -42,7 +42,7 @@ curl -fsSL https://raw.githubusercontent.com/ThinkOffApp/ide-agent-kit/main/scri
 ```
 Idempotent. Checks prereqs (node 20+, npm, git, tmux), clones the repo, writes a
 starter config, wires UserPromptSubmit + Stop + SessionStart hooks, starts the
-daemon, prints the LAN URL to paste into [CodeWatch](https://codewatch.app) — the mobile + watch companion
+daemon, prints the LAN URL to paste into [CodeWatch](https://codewatch.app), the mobile + watch companion
 ([Google Play](https://play.google.com/store/apps/details?id=com.thinkoff.codewatch) · iOS TestFlight).
 
 Prereqs are installed via `brew` on macOS and `apt-get` / `dnf` / `pacman` /
